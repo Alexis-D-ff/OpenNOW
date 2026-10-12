@@ -452,12 +452,20 @@ impl FfmpegDecoder {
                     map_vulkan_frame_direct(decoded, self.last_timestamp_us, metadata)
                         .ok()
                         .and_then(|frame| frame.vulkan);
-                match map_hardware_frame_to_dmabuf(
-                    decoded,
-                    self.last_timestamp_us,
-                    metadata,
-                    self.mode,
-                ) {
+                let exported = if vulkan_frame_has_drm_modifier(decoded) {
+                    map_hardware_frame_to_dmabuf(
+                        decoded,
+                        self.last_timestamp_us,
+                        metadata,
+                        self.mode,
+                    )
+                } else {
+                    Err(Error::unavailable(
+                        Subsystem::Vulkan,
+                        "Vulkan Video frames are not DRM-format-modifier tiled",
+                    ))
+                };
+                match exported {
                     Ok(mut frame) => {
                         frame.vulkan = direct_vulkan;
                         if !self.zero_copy_active {
@@ -1025,6 +1033,14 @@ fn map_hardware_frame_to_dmabuf(
     drm_frame(mapped, timestamp_us, output_format)
 }
 
+const VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: ffi::VkImageTiling = 1_000_158_000;
+
+fn vulkan_frame_has_drm_modifier(decoded: &frame::Video) -> bool {
+    let vulkan_frame = unsafe { (*decoded.as_ptr()).data[0].cast::<ffi::AVVkFrame>() };
+    !vulkan_frame.is_null()
+        && unsafe { (*vulkan_frame).tiling } == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+}
+
 fn validate_request_profile(codec: VideoCodec, format: StreamFormat) -> Result<()> {
     if codec != VideoCodec::H265
         || format.pixel_format != PixelFormat::Nv12
@@ -1309,10 +1325,8 @@ unsafe fn configure_exportable_vulkan_frames(
         if vulkan.is_null() {
             return false;
         }
-        // VkImageTiling is an i32 in the generated Vulkan ABI bindings.
-        // VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT = 1000158000.
         unsafe {
-            (*vulkan).tiling = 1_000_158_000;
+            (*vulkan).tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
             // NVIDIA exposes exportable modifiers for the component formats
             // used by NV12, while its video decode profile rejects an
             // exportable multi-planar image. Two images still remain entirely
@@ -1579,6 +1593,39 @@ mod tests {
             hardware_pixel_format(decoder, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM),
             Some(ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME),
             "bundled ARM64 HEVC requires a DRM_PRIME hardware config with HW_DEVICE_CTX support",
+        );
+    }
+
+    #[test]
+    fn vulkan_dmabuf_export_requires_drm_modifier_tiling() {
+        let mut storage: ffi::AVVkFrame = unsafe { std::mem::zeroed() };
+        let vulkan_frame = &raw mut storage;
+        let mut decoded = frame::Video::empty();
+        assert!(!vulkan_frame_has_drm_modifier(&decoded));
+        unsafe {
+            (*decoded.as_mut_ptr()).data[0] = vulkan_frame.cast();
+        }
+        assert!(!vulkan_frame_has_drm_modifier(&decoded));
+        unsafe {
+            (*vulkan_frame).tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+        }
+        assert!(vulkan_frame_has_drm_modifier(&decoded));
+        unsafe {
+            (*decoded.as_mut_ptr()).data[0] = ptr::null_mut();
+        }
+    }
+
+    #[cfg(feature = "ffmpeg-bundled")]
+    #[test]
+    fn bundled_ffmpeg_maps_hardware_frames_to_drm_prime() {
+        initialize_ffmpeg().unwrap();
+        let configuration =
+            unsafe { std::ffi::CStr::from_ptr(ffi::avutil_configuration()) }.to_string_lossy();
+        assert!(
+            configuration
+                .split_whitespace()
+                .any(|flag| flag == "--enable-libdrm"),
+            "without libdrm, av_hwframe_map to DRM_PRIME is EINVAL for every VAAPI and Vulkan frame",
         );
     }
 
