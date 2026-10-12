@@ -20,7 +20,9 @@ def verify_capabilities(message):
         raise ValueError("Native VAAPI must not advertise HEVC or AV1 support")
     software = next(backend for backend in backends if backend["backend"] == "ffmpeg")
     fallback_codecs = {codec["codec"]: codec["available"] for codec in software["codecs"]}
-    if fallback_codecs != {"h264": True, "h265": True, "av1": True}:
+    if (set(fallback_codecs) != {"h264", "h265", "av1"}
+            or any(type(available) is not bool for available in fallback_codecs.values())
+            or not all(fallback_codecs[codec] for codec in ("h264", "h265"))):
         raise ValueError("The packaged FFmpeg software fallback is unavailable")
 
 
