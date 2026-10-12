@@ -47,6 +47,7 @@ struct Producer {
     OpenNowStreamerGraphicsContext context{};
     QRhiTexture *sourceTexture = nullptr;
     std::optional<OpenNowStreamerFrameInfo> next;
+    std::optional<OpenNowStreamerStatus> recordStatus;
     OpenNowStreamerFrameInfo acquired{};
     OpenNowStreamerFrameInfo recorded{};
     OpenNowStreamerFrameInfo released{};
@@ -165,6 +166,7 @@ NativeStreamRuntime::Api producerApi()
                          OpenNowStreamerRecordedFrame *output) {
         auto *producer = reinterpret_cast<Producer *>(const_cast<OpenNowStreamer *>(handle));
         const auto *frame = reinterpret_cast<const Producer::Frame *>(token);
+        if (producer->recordStatus) return *producer->recordStatus;
 #if defined(Q_OS_WIN)
         if (!producer->sourceTexture || !producer->context.device
             || command->command_buffer != producer->context.queue)
@@ -344,6 +346,75 @@ private slots:
             QSKIP("Renderable RGBA16F unavailable");
 #else
         QSKIP("Native frame generation integration requires D3D11 or Vulkan");
+#endif
+    }
+
+    void recordFailureClassification_data()
+    {
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QString>("errorCode");
+        QTest::newRow("unsupported-import") << int(OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED)
+                                            << QStringLiteral("streamer_presentation_unsupported");
+        QTest::newRow("render-failed") << int(OPENNOW_STREAMER_RENDER_FAILED)
+                                       << QStringLiteral("streamer_presentation_failed");
+    }
+
+    void recordFailureClassification()
+    {
+#if defined(Q_OS_WIN) || (QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>))
+        QFETCH(int, status);
+        QFETCH(QString, errorCode);
+        Producer producer;
+#if !defined(Q_OS_WIN)
+        producer.instance = &m_instance;
+#endif
+        producer.recordStatus = OpenNowStreamerStatus(status);
+        producerToCreate = &producer;
+        const auto resetProducer = qScopeGuard([] { producerToCreate = nullptr; });
+        NativeStreamRuntime runtime(producerApi());
+        QSignalSpy errors(&runtime, &NativeStreamRuntime::presentationError);
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("classification-start")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
+
+        const QSize size(64, 64);
+        auto texture = std::unique_ptr<QRhiTexture>(m_rhi->newTexture(
+            QRhiTexture::RGBA8, size, 1, QRhiTexture::RenderTarget));
+        QVERIFY(texture->create());
+        QRhiTextureRenderTargetDescription description(QRhiColorAttachment(texture.get()));
+        auto target = std::unique_ptr<QRhiTextureRenderTarget>(m_rhi->newTextureRenderTarget(description));
+        auto pass = std::unique_ptr<QRhiRenderPassDescriptor>(target->newCompatibleRenderPassDescriptor());
+        target->setRenderPassDescriptor(pass.get());
+        QVERIFY(target->create());
+        auto callback = createNativeStreamRenderCallback(&runtime);
+        const auto release = qScopeGuard([&] { callback->releaseResources(); });
+        const auto present = [&] {
+            QRhiCommandBuffer *cb = nullptr;
+            QCOMPARE(m_rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+            callback->initialize(m_rhi.get(), cb, target.get());
+            callback->prepareFrame(cb);
+            cb->beginPass(target.get(), Qt::black, {1.0f, 0});
+            callback->recordFrame(cb, QRect(QPoint(0, 0), size));
+            cb->endPass();
+            QCOMPARE(m_rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+            callback->finishFrame();
+            callback->frameSwapped();
+        };
+        producer.next = OpenNowStreamerFrameInfo{64, 64, 1, 0};
+        present();
+        QTRY_COMPARE(errors.count(), 1);
+        QCOMPARE(errors.at(0).at(1).toString(), errorCode);
+        QVERIFY(!errors.at(0).at(0).toString().isEmpty());
+        QCOMPARE(producer.sourceCount, 1);
+        QCOMPARE(producer.releaseCount, 1);
+        QVERIFY(!runtime.presentationAllowed());
+        producer.next = OpenNowStreamerFrameInfo{64, 64, 2, 0};
+        present();
+        QTest::qWait(50);
+        QCOMPARE(errors.count(), 1);
+#else
+        QSKIP("Native presentation classification requires D3D11 or Vulkan");
 #endif
     }
 

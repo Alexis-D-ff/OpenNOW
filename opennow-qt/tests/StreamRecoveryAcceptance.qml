@@ -10,7 +10,7 @@ QtObject {
         property bool running: false
         property string lastError: ""
         property var commands: []
-        signal presentationError(string message)
+        signal presentationError(string message, string errorCode)
         signal responseReceived(var response)
         signal eventReceived(var event)
         signal callbacksDropped(int count)
@@ -600,6 +600,46 @@ QtObject {
         ShellStore.authSession = null
         ShellStore.authGeneration = 0
     }
+    function checkPresentationClassification() {
+        const owner = {generation:3,userId:"present-owner",providerIdpId:"present-provider"}
+        for (const code of ["streamer_presentation_unsupported", "streamer_presentation_failed"]) {
+            const unsupported = code === "streamer_presentation_unsupported"
+            ShellStore.cancelSessionRecovery()
+            ShellStore.streamerRecoveryExhausted = false
+            ShellStore.sessionReconnectAttempts = 0
+            ShellStore.streamerStopRequestId = ""
+            ShellStore.streamerStopExpected = false
+            ShellStore.activeSession = {sessionId:"present-seat",status:3,ownerScope:owner}
+            ShellStore.streamer = {sessionId:"present-seat",status:"streaming"}
+            const commandsBefore = runtime.commands.length
+            const callsBefore = client.calls.length
+            runtime.presentationError("presentation fixture " + code, code)
+            check(ShellStore.streamer.errorCode === code, code + " reaches the streamer snapshot")
+            check(ShellStore.streamerRestartTimer.running === !unsupported,
+                  code + (unsupported ? " must not schedule a transport reconnect"
+                                      : " keeps bounded transport recovery"))
+            check(ShellStore.streamerRecoveryExhausted === unsupported
+                  && (ShellStore.streamState === "error") === unsupported,
+                  code + " terminal state matches its classification")
+            check(ShellStore.sessionReconnectAttempts === 0, code + " consumes no reconnect budget yet")
+            check(!client.calls.slice(callsBefore).some(call => call.method === "session.stop"),
+                  code + " never stops the cloud session")
+            const stops = runtime.commands.slice(commandsBefore).filter(command => command.type === "stop")
+            check(stops.length === (unsupported ? 1 : 0),
+                  code + (unsupported ? " releases the incompatible native presenter once"
+                                      : " leaves stop to the recovery timer"))
+            check(ShellStore.activeSession && ShellStore.activeSession.sessionId === "present-seat",
+                  code + " keeps the seat for retry or confirmed exit")
+            check(ShellStore.lastError === "presentation fixture " + code, code + " keeps the actionable message")
+            ShellStore.streamerRestartTimer.stop()
+        }
+        ShellStore.cancelSessionRecovery()
+        ShellStore.streamerRecoveryExhausted = false
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamerStopExpected = false
+        ShellStore.activeSession = null
+        ShellStore.streamer = {status:"stopped"}
+    }
     function checkConnectingPresentation(parent) {
         const saved = {session:ShellStore.activeSession, streamer:ShellStore.streamer,
             state:ShellStore.streamState, restarts:ShellStore.streamerRestartAttempts,
@@ -776,6 +816,7 @@ QtObject {
         check(stats.cards.every(card => card.key !== "PacketLoss"), "honor hidden metrics")
         stats.destroy()
         checkQueuedPollRetries()
+        checkPresentationClassification()
         checkOwnedTerminations()
         checkActiveTimerExhaustion()
         checkCoreRestartPreservesSession()
