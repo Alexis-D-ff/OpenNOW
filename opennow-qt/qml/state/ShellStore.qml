@@ -2323,7 +2323,7 @@ QtObject {
         if (termination.sessionId && activeSession
                 && String(termination.sessionId) !== String(activeSession.sessionId))
             return
-        reportSessionEnd(activeSession, "remote_ended")
+        reportSessionEnd(activeSession, "remote_ended", true)
         const pendingRequests = [streamerPrepareRequestId, streamPollRequestId]
         streamerPrepareRequestId = ""
         streamPollRequestId = ""
@@ -2950,7 +2950,7 @@ QtObject {
         })
     }
 
-    function reportSessionEnd(session, cause) {
+    function reportSessionEnd(session, cause, confirmedTermination) {
         if (!session || streamStartedAtMs <= 0)
             return
         const snapshot = streamer || ({})
@@ -2960,7 +2960,7 @@ QtObject {
             game_id: String(session.appId || ""),
             game_title: selectedGame && selectedGame.title ? String(selectedGame.title) : "",
             duration_s: Math.max(0, Date.now() - streamStartedAtMs) / 1000,
-            outcome: failed ? "error" : cause !== "" ? cause
+            outcome: confirmedTermination ? "remote_ended" : failed ? "error" : cause !== "" ? cause
                 : bugReports.startedSessionId === sessionId ? "clean" : "user_stopped",
             error_code: failed ? bugReports.normalizedCode(snapshot.errorCode, "native_stream_error") : undefined,
             recoveries: Number(streamerRecoveryCount || 0) + Number(sessionRecoveryCount || 0),
