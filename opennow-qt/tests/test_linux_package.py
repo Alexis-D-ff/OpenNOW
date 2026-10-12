@@ -124,6 +124,32 @@ class LinuxPackageCapabilitiesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "FFmpeg software fallback"):
             verify_capabilities(self.message)
 
+    def test_software_av1_can_be_unavailable_without_a_cpu_decoder(self):
+        self.message["capabilities"]["videoBackends"][1]["codecs"][2]["available"] = False
+        verify_capabilities(self.message)
+
+    def test_missing_hevc_software_decoder_is_rejected(self):
+        self.message["capabilities"]["videoBackends"][1]["codecs"][1]["available"] = False
+        with self.assertRaisesRegex(ValueError, "FFmpeg software fallback"):
+            verify_capabilities(self.message)
+
+    def test_software_codec_contract_must_be_complete(self):
+        for index in range(3):
+            with self.subTest(index=index):
+                message = copy.deepcopy(self.message)
+                message["capabilities"]["videoBackends"][1]["codecs"].pop(index)
+                with self.assertRaisesRegex(ValueError, "FFmpeg software fallback"):
+                    verify_capabilities(message)
+
+    def test_software_codec_availability_must_be_boolean(self):
+        for index in range(3):
+            for available in (None, 1, "false"):
+                with self.subTest(index=index, available=available):
+                    message = copy.deepcopy(self.message)
+                    message["capabilities"]["videoBackends"][1]["codecs"][index]["available"] = available
+                    with self.assertRaisesRegex(ValueError, "FFmpeg software fallback"):
+                        verify_capabilities(message)
+
     def test_non_ready_response_is_rejected(self):
         self.message["type"] = "error"
         with self.assertRaisesRegex(ValueError, "did not return ready"):
