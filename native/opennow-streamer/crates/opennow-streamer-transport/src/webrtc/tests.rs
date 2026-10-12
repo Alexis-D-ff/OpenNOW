@@ -23,6 +23,9 @@ struct Peer {
     rtp_transmits: usize,
     drop_rtp_number: Option<usize>,
     dropped_rtp: usize,
+    drop_payload_types: Vec<u8>,
+    hold_rtp_number: Option<usize>,
+    held_rtp: Option<(Vec<u8>, SocketAddr)>,
     controlling_checks: bool,
     controlled_checks: bool,
 }
@@ -189,6 +192,9 @@ impl Peer {
             rtp_transmits: 0,
             drop_rtp_number: None,
             dropped_rtp: 0,
+            drop_payload_types: Vec::new(),
+            hold_rtp_number: None,
+            held_rtp: None,
             controlling_checks: false,
             controlled_checks: false,
         };
@@ -212,7 +218,19 @@ impl Peer {
                         && packet.contents[0] & 0xc0 == 0x80
                         && !(192..=223).contains(&packet.contents[1])
                     {
+                        if self
+                            .drop_payload_types
+                            .contains(&(packet.contents[1] & 0x7f))
+                        {
+                            self.dropped_rtp += 1;
+                            continue;
+                        }
                         self.rtp_transmits += 1;
+                        if self.hold_rtp_number == Some(self.rtp_transmits) {
+                            self.hold_rtp_number = None;
+                            self.held_rtp = Some((packet.contents.to_vec(), packet.destination));
+                            continue;
+                        }
                         if self.drop_rtp_number == Some(self.rtp_transmits) {
                             self.drop_rtp_number = None;
                             self.dropped_rtp += 1;
@@ -294,6 +312,21 @@ impl Peer {
             assert!(Instant::now() < deadline, "local peer timed out");
             self.tick();
         }
+    }
+
+    fn release_held_rtp(&mut self) {
+        let (bytes, destination) = self.held_rtp.take().unwrap();
+        self.socket.send_to(&bytes, destination).unwrap();
+    }
+
+    fn retransmission_payload_types(&mut self) -> Vec<u8> {
+        self.rtc
+            .writer(self.video)
+            .unwrap()
+            .payload_params()
+            .filter_map(|params| params.resend())
+            .map(|pt| *pt)
+            .collect()
     }
 
     fn pump(&mut self) {
@@ -1120,4 +1153,67 @@ fn historical_usage_14_media_endpoint_remains_authoritative() {
         media_endpoint(&session).unwrap(),
         Some("192.0.2.42:4444".parse().unwrap())
     );
+}
+
+#[test]
+fn unrecoverable_delta_loss_releases_the_next_keyframe_once_nack_can_no_longer_repair_it() {
+    let mut peer = Peer::connect(64);
+    peer.drop_payload_types = peer.retransmission_payload_types();
+    assert!(!peer.drop_payload_types.is_empty());
+    let key = [0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+    let delta = [0, 0, 0, 1, 0x41, 0x88, 0x84, 0x21];
+    peer.write(true, 90_000, &key);
+    assert_eq!(peer.frame().rtp_timestamp, 90_000);
+    peer.drop_rtp_number = Some(peer.rtp_transmits + 1);
+    let mut timestamp = 93_000;
+    for _ in 0..NACK_REPAIRABLE_FRAMES {
+        peer.write(true, timestamp, &delta);
+        peer.tick();
+        timestamp += 1_500;
+    }
+    peer.pump();
+    assert!(
+        peer.dropped_rtp >= 2,
+        "the loss must be NACKed and stay unrecovered"
+    );
+    assert!(peer.media.try_recv().is_err());
+    peer.write(true, timestamp, &key);
+    let recovered = peer.frame();
+    assert_eq!(recovered.rtp_timestamp, timestamp);
+    assert!(recovered.keyframe);
+    assert!(!recovered.contiguous);
+    peer.pump();
+    assert!(peer.media.try_recv().is_err());
+    assert!(peer.keyframe_requests > 0);
+}
+
+#[test]
+fn repairable_delta_loss_waits_for_retransmission_and_stays_contiguous() {
+    let mut peer = Peer::connect(64);
+    peer.drop_payload_types = peer.retransmission_payload_types();
+    let key = [0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+    peer.write(true, 90_000, &key);
+    assert_eq!(peer.frame().rtp_timestamp, 90_000);
+    peer.hold_rtp_number = Some(peer.rtp_transmits + 1);
+    for index in 1..=20_u8 {
+        peer.write(
+            true,
+            90_000 + u64::from(index) * 1_500,
+            &[0, 0, 0, 1, 0x41, 0x88, 0x84, index],
+        );
+        peer.tick();
+    }
+    peer.pump();
+    assert!(peer.held_rtp.is_some());
+    assert!(peer.media.try_recv().is_err());
+    peer.release_held_rtp();
+    for index in 1..=20_u8 {
+        let frame = peer.frame();
+        assert_eq!(frame.rtp_timestamp, 90_000 + u64::from(index) * 1_500);
+        assert_eq!(frame.payload.last(), Some(&index));
+        assert!(frame.contiguous);
+    }
+    peer.pump();
+    assert!(peer.media.try_recv().is_err());
+    assert_eq!(peer.keyframe_requests, 0);
 }

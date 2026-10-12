@@ -26,10 +26,31 @@ impl PacketCounts {
 }
 
 #[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VideoAssembly {
+    pub(super) frames: u64,
+    pub(super) keyframes: u64,
+    pub(super) discontinuities: u64,
+    pub(super) delivered: u64,
+    pub(super) awaiting_reference: u64,
+    pub(super) consumer_full: u64,
+    pub(super) keyframe_requests: u64,
+}
+
+impl VideoAssembly {
+    pub(super) fn assembled(&mut self, keyframe: bool, contiguous: bool) {
+        self.frames = self.frames.saturating_add(1);
+        self.keyframes = self.keyframes.saturating_add(u64::from(keyframe));
+        self.discontinuities = self.discontinuities.saturating_add(u64::from(!contiguous));
+    }
+}
+
+#[derive(Default, Serialize)]
 pub(super) struct Traffic {
     pub(super) transmitted: PacketCounts,
     pub(super) received: PacketCounts,
     pub(super) routed: PacketCounts,
+    pub(super) video: VideoAssembly,
     pub(super) send_errors: u64,
     pub(super) tx_to_known_peer: u64,
     pub(super) rx_from_known_peer: u64,
@@ -100,7 +121,19 @@ pub(super) fn sdp_summary(sdp: &str) -> Value {
             _ => "other",
         })
         .collect::<Vec<_>>();
+    let rtcp_feedback = |kind: &str| {
+        sdp.lines()
+            .filter_map(|line| line.strip_prefix("a=rtcp-fb:"))
+            .filter(|line| {
+                line.split_once(' ')
+                    .is_some_and(|(_, value)| value.trim() == kind)
+            })
+            .count()
+    };
     json!({"iceLite":sdp.lines().any(|line| line == "a=ice-lite"),
+        "rtxPayloads":sdp.lines().filter(|line| line.starts_with("a=fmtp:") && line.contains("apt=")).count(),
+        "nackFeedback":rtcp_feedback("nack"),
+        "pliFeedback":rtcp_feedback("nack pli"),
         "bundleSize":sdp.lines().find_map(|line| line.strip_prefix("a=group:BUNDLE ")).map(|mids| mids.split_whitespace().count()),
         "candidateCount":sdp.lines().filter(|line| line.starts_with("a=candidate:")).count(),
         "ufragLengths":ufrags.iter().map(|value| value.len()).collect::<Vec<_>>(),
@@ -116,9 +149,12 @@ mod tests {
 
     #[test]
     fn trace_summaries_exclude_credentials_addresses_and_payloads() {
-        let sdp = "a=ice-ufrag:private-user\na=ice-pwd:private-password\na=setup:private-role\na=group:BUNDLE private-mid\na=candidate:private-foundation 1 udp 123 192.0.2.42 5555 typ host\n";
+        let sdp = "a=ice-ufrag:private-user\na=ice-pwd:private-password\na=setup:private-role\na=group:BUNDLE private-mid\na=candidate:private-foundation 1 udp 123 192.0.2.42 5555 typ host\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\na=fmtp:97 apt=96\n";
         let summary = sdp_summary(sdp);
         assert_eq!(summary["candidateCount"], 1);
+        assert_eq!(summary["rtxPayloads"], 1);
+        assert_eq!(summary["nackFeedback"], 1);
+        assert_eq!(summary["pliFeedback"], 1);
         assert_eq!(summary["bundleSize"], 1);
         assert!(!summary.to_string().contains("private"));
         let summary = candidate_summary(
@@ -136,6 +172,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(packets).unwrap(),
             json!({"stun":1,"dtls":1,"rtp":1,"other":1})
+        );
+        let mut video = VideoAssembly::default();
+        video.assembled(true, true);
+        video.assembled(false, false);
+        assert_eq!(
+            serde_json::to_value(video).unwrap(),
+            json!({"frames":2,"keyframes":1,"discontinuities":1,"delivered":0,
+                "awaitingReference":0,"consumerFull":0,"keyframeRequests":0})
         );
     }
 }
