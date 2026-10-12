@@ -2177,7 +2177,8 @@ QtObject {
         if (!activeSession)
             return
         if (streamer.errorCode === "missing-video-peer"
-                || streamer.errorCode === "nvst-legacy-transport-unsupported") {
+                || streamer.errorCode === "nvst-legacy-transport-unsupported"
+                || streamer.errorCode === "streamer_presentation_unsupported") {
             cancelSessionRecovery()
             streamerRecoveryExhausted = true
             streamState = "error"
@@ -3512,12 +3513,14 @@ QtObject {
 
     property Connections nativeRuntimeConnections: Connections {
         target: NativeStreamRuntime
-        function onPresentationError(message) {
+        function onPresentationError(message, errorCode) {
+            const code = String(errorCode || "streamer_presentation_failed")
             root.lastError = message
             if (root.activeSession) {
-                root.updateStreamerFields({status: "error", message: message,
-                    errorCode: "streamer_presentation_failed"})
-                root.bugReports.reportStreamError("streamer_presentation_failed", message, "presentation")
+                root.updateStreamerFields({status: "error", message: message, errorCode: code})
+                root.bugReports.reportStreamError(code, message, "presentation")
+                if (code === "streamer_presentation_unsupported")
+                    root.stopNativeStreamer("Decoded video cannot be presented on this graphics device")
             }
         }
         function onResponseReceived(response) { root.acceptNativeResponse(response) }

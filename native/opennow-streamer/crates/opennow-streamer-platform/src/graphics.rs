@@ -113,6 +113,7 @@ pub struct GraphicsFrameInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphicsFrameError {
     NotReady,
+    Unsupported(String),
     Failed(String),
 }
 
@@ -191,6 +192,9 @@ impl GraphicsFrame for opennow_streamer_platform_linux::LinuxGpuFrame {
         }
         .map_err(|error| match error {
             opennow_streamer_platform_linux::Error::FrameNotReady => GraphicsFrameError::NotReady,
+            error @ opennow_streamer_platform_linux::Error::ImportUnsupported(_) => {
+                GraphicsFrameError::Unsupported(error.to_string())
+            }
             error => GraphicsFrameError::from(error.to_string()),
         })?;
         Ok(GraphicsRecordedFrame {
@@ -322,6 +326,7 @@ pub enum GraphicsRuntimeError {
     NoFrame,
     StaleFrame,
     FrameAlreadyRecorded,
+    RecordUnsupported(String),
     RecordFailed(String),
 }
 
@@ -341,6 +346,9 @@ impl fmt::Display for GraphicsRuntimeError {
             }
             Self::FrameAlreadyRecorded => {
                 formatter.write_str("the GPU frame token was already recorded")
+            }
+            Self::RecordUnsupported(message) => {
+                write!(formatter, "GPU frame recording is unsupported: {message}")
             }
             Self::RecordFailed(message) => {
                 write!(formatter, "GPU frame recording failed: {message}")
@@ -552,6 +560,9 @@ impl RenderThreadGraphics {
             .record(context, command)
             .map_err(|error| match error {
                 GraphicsFrameError::NotReady => GraphicsRuntimeError::NoFrame,
+                GraphicsFrameError::Unsupported(message) => {
+                    GraphicsRuntimeError::RecordUnsupported(message)
+                }
                 GraphicsFrameError::Failed(message) => GraphicsRuntimeError::RecordFailed(message),
             })
     }

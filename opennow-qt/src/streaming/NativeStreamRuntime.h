@@ -110,9 +110,12 @@ public:
     [[nodiscard]] bool inputAllowed() const;
     [[nodiscard]] bool serverCursorComposited() const;
     [[nodiscard]] const OpenNowStreamerVulkanDevice *vulkanDevice() const;
+    enum class PresentationFailure { Recoverable, Unsupported };
+    void logRenderDiagnostic(const QString &detail);
     // Called at most once per presentation failure from the scene-graph thread.
     void reportPresentationError(const QString &message);
-    void reportPresentationError(const QString &message, quint64 generation);
+    void reportPresentationError(const QString &message, quint64 generation,
+                                 PresentationFailure failure = PresentationFailure::Recoverable);
 
     Q_INVOKABLE bool start();
     Q_INVOKABLE bool send(const QJsonObject &command);
@@ -151,7 +154,7 @@ public:
 signals:
     void inputCaptureReset();
     void inputAllowedChanged();
-    void presentationError(const QString &message);
+    void presentationError(const QString &message, const QString &errorCode);
     void runningChanged();
     void lastErrorChanged();
     void responseReceived(const QJsonObject &response);

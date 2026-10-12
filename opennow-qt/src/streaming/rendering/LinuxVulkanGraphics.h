@@ -69,13 +69,14 @@ inline void requestDeviceExtensions()
     extensionRequestInstalled.store(true, std::memory_order_release);
 }
 
-inline bool hasDmabufImportContract(const QVersionNumber &instanceVersion,
-                                   uint32_t physicalDeviceVersion,
-                                   const QByteArrayList &requested,
-                                   const QByteArrayList &available)
+inline QByteArrayList dmabufImportContractGaps(const QVersionNumber &instanceVersion,
+                                              uint32_t physicalDeviceVersion,
+                                              const QByteArrayList &requested,
+                                              const QByteArrayList &available)
 {
-    if (instanceVersion < QVersionNumber(1, 1) || physicalDeviceVersion < VK_API_VERSION_1_1)
-        return false;
+    QByteArrayList gaps;
+    if (instanceVersion < QVersionNumber(1, 1)) gaps.append("instance-api<1.1");
+    if (physicalDeviceVersion < VK_API_VERSION_1_1) gaps.append("device-api<1.1");
     // The image import acquires and releases its DMA-BUF from
     // VK_QUEUE_FAMILY_FOREIGN_EXT, because the producer is V4L2/VA-API rather
     // than another Vulkan device, so the foreign queue family extension is part
@@ -86,9 +87,19 @@ inline bool hasDmabufImportContract(const QVersionNumber &instanceVersion,
     if (instanceVersion < QVersionNumber(1, 2) || physicalDeviceVersion < VK_API_VERSION_1_2)
         required.append("VK_KHR_image_format_list");
     for (const auto &extension : required) {
-        if (!requested.contains(extension) || !available.contains(extension)) return false;
+        if (!available.contains(extension)) gaps.append(extension + "(unsupported)");
+        else if (!requested.contains(extension)) gaps.append(extension + "(not-requested)");
     }
-    return true;
+    return gaps;
+}
+
+inline bool hasDmabufImportContract(const QVersionNumber &instanceVersion,
+                                   uint32_t physicalDeviceVersion,
+                                   const QByteArrayList &requested,
+                                   const QByteArrayList &available)
+{
+    return dmabufImportContractGaps(instanceVersion, physicalDeviceVersion, requested, available)
+        .isEmpty();
 }
 
 inline bool hasDmabufBufferImportContract(const QVersionNumber &instanceVersion,
@@ -106,30 +117,53 @@ inline bool hasDmabufBufferImportContract(const QVersionNumber &instanceVersion,
     return true;
 }
 
-inline uint32_t enabledImportCapabilities(QVulkanInstance *instance, VkPhysicalDevice physicalDevice)
+struct ImportContract {
+    uint32_t capabilities = 0;
+    QString summary;
+};
+
+inline ImportContract importContract(QVulkanInstance *instance, VkPhysicalDevice physicalDevice)
 {
-    if (!extensionRequestInstalled.load(std::memory_order_acquire)
-            || !instance || instance->apiVersion() < QVersionNumber(1, 1)) return 0;
+    if (!instance || !physicalDevice)
+        return {0, QStringLiteral("vulkan-import instance-or-device=missing")};
+    if (!extensionRequestInstalled.load(std::memory_order_acquire))
+        return {0, QStringLiteral("vulkan-import extension-request=not-installed")};
+    if (instance->apiVersion() < QVersionNumber(1, 1))
+        return {0, QStringLiteral("vulkan-import instance-api=%1").arg(instance->apiVersion().toString())};
     auto *functions = instance->functions();
     VkPhysicalDeviceProperties properties{};
     functions->vkGetPhysicalDeviceProperties(physicalDevice, &properties);
-    if (properties.apiVersion < VK_API_VERSION_1_1) return 0;
+    QByteArrayList supported;
     uint32_t count = 0;
     if (functions->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr)
-            != VK_SUCCESS) return 0;
-    QList<VkExtensionProperties> available(count);
-    if (functions->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count,
-                                                       available.data()) != VK_SUCCESS) return 0;
-    available.resize(count);
-    QByteArrayList supported;
-    for (const auto &property : available) supported.append(property.extensionName);
+            == VK_SUCCESS) {
+        QList<VkExtensionProperties> available(count);
+        if (functions->vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count,
+                                                           available.data()) == VK_SUCCESS) {
+            available.resize(count);
+            for (const auto &property : available) supported.append(property.extensionName);
+        }
+    }
     const auto requested = qgetenv("QT_VULKAN_DEVICE_EXTENSIONS").split(';');
-    uint32_t capabilities = 0;
-    if (hasDmabufImportContract(instance->apiVersion(), properties.apiVersion, requested, supported))
-        capabilities |= OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_IMPORT;
+    ImportContract contract;
+    const auto imageGaps = dmabufImportContractGaps(instance->apiVersion(), properties.apiVersion,
+                                                    requested, supported);
+    if (imageGaps.isEmpty())
+        contract.capabilities |= OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_IMPORT;
     if (hasDmabufBufferImportContract(instance->apiVersion(), properties.apiVersion, requested, supported))
-        capabilities |= OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_BUFFER_IMPORT;
-    return capabilities;
+        contract.capabilities |= OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_BUFFER_IMPORT;
+    contract.summary = QStringLiteral(
+        "vulkan-import device=\"%1\" vendor=0x%2 id=0x%3 type=%4 api=%5.%6.%7 driver=0x%8 caps=0x%9 image-gaps=[%10]")
+        .arg(QString::fromUtf8(properties.deviceName).left(96))
+        .arg(properties.vendorID, 0, 16).arg(properties.deviceID, 0, 16)
+        .arg(int(properties.deviceType))
+        .arg(VK_API_VERSION_MAJOR(properties.apiVersion))
+        .arg(VK_API_VERSION_MINOR(properties.apiVersion))
+        .arg(VK_API_VERSION_PATCH(properties.apiVersion))
+        .arg(properties.driverVersion, 0, 16)
+        .arg(contract.capabilities, 0, 16)
+        .arg(QString::fromLatin1(imageGaps.join(',')));
+    return contract;
 }
 }
 #endif

@@ -371,7 +371,7 @@ mod implementation {
                 .collect()
         };
 
-        let mut last_error = None;
+        let mut rejections = Vec::new();
         for (candidate_idx, candidate_name) in candidate_indices {
             let mut device = ptr::null_mut();
             let mut options = build_options(hdr_colorspace);
@@ -400,7 +400,7 @@ mod implementation {
                     ffmpeg_next::Error::from(result)
                 );
                 eprintln!("{err_msg}");
-                last_error = Some(Error::unavailable(Subsystem::Vulkan, err_msg));
+                rejections.push(err_msg);
                 continue;
             }
 
@@ -408,7 +408,10 @@ mod implementation {
             match initialized {
                 Ok(owner) => return Ok(Arc::new(owner)),
                 Err(error) => {
-                    eprintln!("candidate Vulkan device {candidate_name} rejected: {error}");
+                    let rejection =
+                        format!("candidate Vulkan device {candidate_name} rejected: {error}");
+                    eprintln!("{rejection}");
+                    rejections.push(rejection);
                     unsafe {
                         let context = &mut *((*device).data.cast::<ffi::AVHWDeviceContext>());
                         let vulkan = &mut *context.hwctx.cast::<ffi::AVVulkanDeviceContext>();
@@ -425,18 +428,20 @@ mod implementation {
                         }
                         ffi::av_buffer_unref(&mut device);
                     }
-                    last_error = Some(error);
                     continue;
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            Error::unavailable(
-                Subsystem::Vulkan,
-                "shared Vulkan device creation failed: no suitable candidate device found",
-            )
-        }))
+        Err(Error::unavailable(
+            Subsystem::Vulkan,
+            if rejections.is_empty() {
+                "shared Vulkan device creation failed: no suitable candidate device found"
+                    .to_owned()
+            } else {
+                rejections.join("; ")
+            },
+        ))
     }
 
     unsafe fn initialize(device: *mut ffi::AVBufferRef) -> Result<SharedVulkanDevice> {

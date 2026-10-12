@@ -481,7 +481,6 @@ pub struct LinuxFrameProducer {
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
     render: VulkanRenderDevice,
-    dmabuf_import_supported: bool,
     imported: HashMap<DmaBufKey, Weak<ImportedNv12Frame>>,
     renderers: HashMap<GpuTextureFormat, RendererResources>,
     slots: Vec<Option<FrameSlotResources>>,
@@ -579,14 +578,12 @@ impl LinuxFrameProducer {
                 vk::Device::from_raw(render.device as u64),
             )
         };
-        let dmabuf_import_supported = render.dmabuf_import_enabled;
         Ok(Self {
             _entry: entry,
             instance,
             physical_device,
             device,
             render,
-            dmabuf_import_supported,
             imported: HashMap::new(),
             renderers: HashMap::new(),
             slots: (0..slot_count).map(|_| None).collect(),
@@ -723,48 +720,32 @@ impl LinuxFrameProducer {
                 source: frame,
             }));
         }
-        let mut gpu_error = None;
-        if frame
-            .dmabuf
-            .as_ref()
-            .is_some_and(|frame| sand::is_sand(frame))
-        {
-            if !self.render.dmabuf_buffer_import_enabled {
-                return Err(Error::unavailable(
-                    Subsystem::Vulkan,
-                    "SAND DMA-BUF requires Qt Vulkan external buffer import and foreign queue ownership support",
-                ));
+        match dmabuf_import_route(&frame, self.render)? {
+            DmaBufImportRoute::Sand => {
+                sand::import(&self.instance, self.physical_device, &self.device, frame)
+                    .map(PreparedLinuxFrame::Sand)
             }
-            return sand::import(&self.instance, self.physical_device, &self.device, frame)
-                .map(PreparedLinuxFrame::Sand);
-        }
-        if self.dmabuf_import_supported && frame.dmabuf.is_some() {
-            match self.import_dmabuf(Arc::clone(&frame)) {
-                Ok(imported) => return Ok(PreparedLinuxFrame::DmaBuf(imported)),
-                Err(error) => gpu_error = Some(error),
+            DmaBufImportRoute::Image => self
+                .import_dmabuf(Arc::clone(&frame))
+                .map(PreparedLinuxFrame::DmaBuf),
+            // CPU planes are accepted only from an explicitly CPU-backed decoder,
+            // never as an automatic substitute for failed native GPU interop.
+            DmaBufImportRoute::None
+                if frame.planes.len() == 2
+                    && frame.format.pixel_format == PixelFormat::Nv12
+                    && frame.format.color_transfer == crate::ColorTransfer::Sdr =>
+            {
+                Ok(PreparedLinuxFrame::Cpu(CpuNv12Frame {
+                    luma: frame.planes[0].clone(),
+                    chroma: frame.planes[1].clone(),
+                    source: frame,
+                }))
             }
+            DmaBufImportRoute::None => Err(Error::unavailable(
+                Subsystem::Vulkan,
+                "decoded frame carries neither a GPU surface nor CPU NV12 SDR planes; implicit CPU readback is disabled",
+            )),
         }
-        // CPU planes are accepted only from an explicitly CPU-backed decoder,
-        // never as an automatic substitute for failed native GPU interop.
-        if frame.vulkan.is_none()
-            && frame.dmabuf.is_none()
-            && frame.planes.len() == 2
-            && frame.format.pixel_format == PixelFormat::Nv12
-            && frame.format.color_transfer == crate::ColorTransfer::Sdr
-        {
-            return Ok(PreparedLinuxFrame::Cpu(CpuNv12Frame {
-                luma: frame.planes[0].clone(),
-                chroma: frame.planes[1].clone(),
-                source: frame,
-            }));
-        }
-        if let Some(error) = gpu_error {
-            return Err(error);
-        }
-        Err(Error::unavailable(
-            Subsystem::Vulkan,
-            "decoded GPU frame cannot be imported by Qt's Vulkan device; implicit CPU readback is disabled",
-        ))
     }
 
     fn wait_for_decode(&mut self, frame: &VulkanVideoFrame) -> Result<()> {
@@ -2019,6 +2000,36 @@ fn validate_direct_frame(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmaBufImportRoute {
+    None,
+    Image,
+    Sand,
+}
+
+fn dmabuf_import_route(
+    frame: &DecodedVideoFrame,
+    render: VulkanRenderDevice,
+) -> Result<DmaBufImportRoute> {
+    let Some(dmabuf) = frame.dmabuf.as_ref() else {
+        return Ok(DmaBufImportRoute::None);
+    };
+    if sand::is_sand(dmabuf) {
+        if !render.dmabuf_buffer_import_enabled {
+            return Err(Error::ImportUnsupported(
+                "SAND DMA-BUF requires Qt Vulkan external buffer import and foreign queue ownership support".to_owned(),
+            ));
+        }
+        return Ok(DmaBufImportRoute::Sand);
+    }
+    if !render.dmabuf_import_enabled {
+        return Err(Error::ImportUnsupported(
+            "the decoder produced a DMA-BUF frame but Qt's Vulkan device did not enable the DMA-BUF image import contract; implicit CPU readback is disabled".to_owned(),
+        ));
+    }
+    Ok(DmaBufImportRoute::Image)
+}
+
 fn yuv_dmabuf_layout(
     frame: &DmaBufFrame,
     pixel_format: PixelFormat,
@@ -2530,6 +2541,112 @@ mod tests {
 
     #[test]
     #[ignore = "requires a Vulkan implementation; runs with Mesa lavapipe without /dev/dri"]
+    fn recording_a_dmabuf_frame_without_the_import_contract_is_unsupported_on_every_attempt() {
+        unsafe {
+            let entry = ash::Entry::load().unwrap();
+            let application = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
+            let instance = entry
+                .create_instance(
+                    &vk::InstanceCreateInfo::default().application_info(&application),
+                    None,
+                )
+                .unwrap();
+            let physical = instance.enumerate_physical_devices().unwrap()[0];
+            let family = instance
+                .get_physical_device_queue_family_properties(physical)
+                .iter()
+                .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+                .unwrap() as u32;
+            let priorities = [1.0];
+            let queues = [vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&priorities)];
+            let device = instance
+                .create_device(
+                    physical,
+                    &vk::DeviceCreateInfo::default().queue_create_infos(&queues),
+                    None,
+                )
+                .unwrap();
+            let queue = device.get_device_queue(family, 0);
+            let pool = device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default().queue_family_index(family),
+                    None,
+                )
+                .unwrap();
+            let commands = device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+                .unwrap();
+            device
+                .begin_command_buffer(commands[0], &vk::CommandBufferBeginInfo::default())
+                .unwrap();
+            let render = VulkanRenderDevice {
+                instance: instance.handle().as_raw() as usize,
+                physical_device: physical.as_raw() as usize,
+                device: device.handle().as_raw() as usize,
+                queue: queue.as_raw() as usize,
+                queue_family: family,
+                dmabuf_import_enabled: false,
+                dmabuf_buffer_import_enabled: false,
+            };
+            let producer = LinuxGpuFrameProducer::new(3).unwrap();
+            for attempt in 0..2 {
+                let frame = producer
+                    .frame(DecodedVideoFrame {
+                        format: crate::StreamFormat::video_default(64, 64).unwrap(),
+                        planes: Vec::new(),
+                        dmabuf: Some(Arc::new(DmaBufFrame::new(
+                            vec![crate::DmaBufObject {
+                                fd: 0,
+                                size: 8192,
+                                format_modifier: 0,
+                            }],
+                            vec![crate::DmaBufLayer {
+                                format: DRM_FORMAT_NV12,
+                                planes: vec![
+                                    DmaBufPlane {
+                                        object_index: 0,
+                                        offset: 0,
+                                        pitch: 64,
+                                    },
+                                    DmaBufPlane {
+                                        object_index: 0,
+                                        offset: 4096,
+                                        pitch: 64,
+                                    },
+                                ],
+                            }],
+                            Arc::new(()),
+                        ))),
+                        vulkan: None,
+                        timestamp_us: attempt + 1,
+                    })
+                    .unwrap();
+                let error = frame
+                    .record(render, commands[0].as_raw() as usize, 0)
+                    .unwrap_err();
+                assert!(
+                    matches!(&error, Error::ImportUnsupported(reason) if reason.contains("DMA-BUF image import contract")),
+                    "{error}"
+                );
+                frame.render_resources().retire().unwrap();
+            }
+            device.end_command_buffer(commands[0]).unwrap();
+            drop(producer);
+            device.destroy_command_pool(pool, None);
+            device.destroy_device(None);
+            instance.destroy_instance(None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan implementation; runs with Mesa lavapipe without /dev/dri"]
     fn retired_render_resources_survive_session_drop_and_borrowed_device_destruction() {
         unsafe {
             let entry = ash::Entry::load().unwrap();
@@ -2630,7 +2747,8 @@ mod tests {
                     .producer
                     .as_ref()
                     .unwrap()
-                    .dmabuf_import_supported
+                    .render
+                    .dmabuf_import_enabled
             );
             resources.retire().unwrap();
             resources.retire().unwrap();
@@ -3201,6 +3319,77 @@ mod tests {
         format.pixel_format = PixelFormat::P010;
         format.color_transfer = crate::ColorTransfer::Sdr;
         assert!(LinuxTextureColorSpace::from_format(format).is_err());
+    }
+
+    #[test]
+    fn dmabuf_frames_without_the_enabled_import_contract_are_deterministically_unsupported() {
+        let layer = |format| crate::DmaBufLayer {
+            format,
+            planes: vec![
+                DmaBufPlane {
+                    object_index: 0,
+                    offset: 0,
+                    pitch: 64,
+                },
+                DmaBufPlane {
+                    object_index: 0,
+                    offset: 4096,
+                    pitch: 64,
+                },
+            ],
+        };
+        let frame = |dmabuf_layer: Option<crate::DmaBufLayer>| DecodedVideoFrame {
+            format: crate::StreamFormat::video_default(64, 64).unwrap(),
+            planes: Vec::new(),
+            dmabuf: dmabuf_layer.map(|layer| {
+                Arc::new(DmaBufFrame::new(
+                    vec![crate::DmaBufObject {
+                        fd: 0,
+                        size: 8192,
+                        format_modifier: 0,
+                    }],
+                    vec![layer],
+                    Arc::new(()),
+                ))
+            }),
+            vulkan: None,
+            timestamp_us: 1,
+        };
+        let render = |image: bool, buffer: bool| VulkanRenderDevice {
+            instance: 1,
+            physical_device: 1,
+            device: 1,
+            queue: 1,
+            queue_family: 0,
+            dmabuf_import_enabled: image,
+            dmabuf_buffer_import_enabled: buffer,
+        };
+        let nv12 = frame(Some(layer(DRM_FORMAT_NV12)));
+        let sand = frame(Some(layer(u32::from_le_bytes(*b"P030"))));
+        let cpu = frame(None);
+
+        assert!(matches!(
+            dmabuf_import_route(&nv12, render(false, true)),
+            Err(Error::ImportUnsupported(_))
+        ));
+        assert_eq!(
+            dmabuf_import_route(&nv12, render(true, false)).unwrap(),
+            DmaBufImportRoute::Image
+        );
+        assert!(matches!(
+            dmabuf_import_route(&sand, render(true, false)),
+            Err(Error::ImportUnsupported(_))
+        ));
+        assert_eq!(
+            dmabuf_import_route(&sand, render(false, true)).unwrap(),
+            DmaBufImportRoute::Sand
+        );
+        for (image, buffer) in [(false, false), (true, true)] {
+            assert_eq!(
+                dmabuf_import_route(&cpu, render(image, buffer)).unwrap(),
+                DmaBufImportRoute::None
+            );
+        }
     }
 
     #[test]
