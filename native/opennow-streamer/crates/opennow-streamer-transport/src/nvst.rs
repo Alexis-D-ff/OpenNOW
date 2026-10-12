@@ -5592,6 +5592,96 @@ fn udp_receive_is_idle(error: &std::io::Error) -> bool {
     )
 }
 
+#[derive(Default)]
+struct VideoKeepaliveState {
+    pings_sent: u64,
+    ping_tracker: StreamPingTracker,
+    first_failure: Option<Instant>,
+    failed_attempts: u64,
+    deferred_total: u64,
+}
+
+impl VideoKeepaliveState {
+    fn record_send(
+        &mut self,
+        result: std::io::Result<usize>,
+        transaction_id: Option<[u8; 12]>,
+        now: Instant,
+        budget: Duration,
+        operation: &'static str,
+        local_port: u16,
+    ) -> std::io::Result<()> {
+        const WSAENOBUFS: i32 = 10055;
+        match result {
+            Ok(_) => {
+                if let Some(first_failure) = self.first_failure.take() {
+                    opennow_streamer_protocol::log::log_async(
+                        "INFO",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=recovered failed_attempts={} failure_ms={}",
+                            self.failed_attempts,
+                            now.saturating_duration_since(first_failure).as_millis(),
+                        ),
+                    );
+                }
+                self.failed_attempts = 0;
+                self.pings_sent += 1;
+                if let Some(transaction_id) = transaction_id {
+                    self.ping_tracker.sent(transaction_id, now);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(first_failure) = self.first_failure
+                    && now.saturating_duration_since(first_failure) >= budget
+                {
+                    opennow_streamer_protocol::log::log_async(
+                        "WARN",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=exhausted failed_attempts={} failure_ms={} budget_ms={}",
+                            self.failed_attempts.saturating_add(1),
+                            now.saturating_duration_since(first_failure).as_millis(),
+                            budget.as_millis(),
+                        ),
+                    );
+                    return Err(error);
+                }
+                if udp_icmp_port_unreachable(&error) {
+                    if self.first_failure.is_some() {
+                        self.failed_attempts = self.failed_attempts.saturating_add(1);
+                    }
+                    return Ok(());
+                }
+                if error.raw_os_error() != Some(WSAENOBUFS)
+                    && !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    )
+                {
+                    return Err(error);
+                }
+                self.failed_attempts = self.failed_attempts.saturating_add(1);
+                self.first_failure.get_or_insert(now);
+                self.deferred_total = self.deferred_total.saturating_add(1);
+                if self.failed_attempts == 1 {
+                    log_udp_error(operation, local_port, &error);
+                    opennow_streamer_protocol::log::log_async(
+                        "WARN",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=deferred budget_ms={} retry=next-scheduled-keepalive",
+                            budget.as_millis(),
+                        ),
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Reserves the dedicated NATT-only video (Mjolnir) socket. The native streamer
 /// always owns this socket outright, so it never inherits a parent-owned fd.
 pub fn reserve_nvst_mjolnir_udp_socket() -> std::io::Result<UdpSocket> {
@@ -7571,6 +7661,24 @@ fn run_nvst_udp_receiver(
         run_nvst_webrtc_bundle(socket, config, commands, outputs, transport_origin, setup);
         return;
     }
+    run_nvst_video_receiver(
+        socket,
+        config,
+        commands,
+        outputs,
+        transport_origin,
+        |socket, packet, peer| socket.send_to(packet, peer),
+    );
+}
+
+fn run_nvst_video_receiver(
+    socket: UdpSocket,
+    config: NvstVideoConfig,
+    commands: Receiver<UdpReceiverCommand>,
+    outputs: NvstReceiverOutputs,
+    transport_origin: Instant,
+    mut send_keepalive: impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>,
+) {
     let local_port = socket.local_addr().map_or(0, |addr| addr.port());
     log_udp_receiver_start(
         "video",
@@ -7591,8 +7699,7 @@ fn run_nvst_udp_receiver(
     let mut datagram = vec![0_u8; 65_536];
     let mut peer_seen = false;
     let mut last_ping = Instant::now() - PING_INTERVAL_BEFORE_CONNECTION;
-    let mut pings_sent = 0_u64;
-    let mut ping_tracker = StreamPingTracker::default();
+    let mut keepalive = VideoKeepaliveState::default();
     let mut inbound_datagrams = 0_u64;
     let mut handled_stun = 0_u64;
     let mut invalid_stun = 0_u64;
@@ -7659,35 +7766,42 @@ fn run_nvst_udp_receiver(
                     &transaction_id,
                 );
                 let sent_at = Instant::now();
-                if let Err(error) = socket.send_to(&ping, receiver.config.video_peer) {
-                    if !udp_icmp_port_unreachable(&error) {
-                        log_udp_error("video-natt-send", local_port, &error);
-                        eprintln!("NVST NATT send failed: {error}");
-                        forward_optional(
-                            &event_sender,
-                            receiver.stop(NvstStopCause::socket("video-natt-send", &error)),
-                        );
-                        return;
-                    }
-                } else {
-                    pings_sent += 1;
+                if let Err(error) = keepalive.record_send(
+                    send_keepalive(&socket, &ping, receiver.config.video_peer),
+                    Some(transaction_id),
+                    sent_at,
+                    receiver.config.timeout,
+                    "video-natt-send",
+                    local_port,
+                ) {
+                    log_udp_error("video-natt-send", local_port, &error);
+                    eprintln!("NVST NATT send failed: {error}");
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("video-natt-send", &error)),
+                    );
+                    return;
                 }
-                ping_tracker.sent(transaction_id, sent_at);
             } else {
-                if let Err(error) =
-                    socket.send_to(&receiver.config.ping_payload, receiver.config.video_peer)
-                {
-                    if !udp_icmp_port_unreachable(&error) {
-                        log_udp_error("video-ping-send", local_port, &error);
-                        eprintln!("NVST ping send failed: {error}");
-                        forward_optional(
-                            &event_sender,
-                            receiver.stop(NvstStopCause::socket("video-ping-send", &error)),
-                        );
-                        return;
-                    }
-                } else {
-                    pings_sent += 1;
+                if let Err(error) = keepalive.record_send(
+                    send_keepalive(
+                        &socket,
+                        &receiver.config.ping_payload,
+                        receiver.config.video_peer,
+                    ),
+                    None,
+                    now,
+                    receiver.config.timeout,
+                    "video-ping-send",
+                    local_port,
+                ) {
+                    log_udp_error("video-ping-send", local_port, &error);
+                    eprintln!("NVST ping send failed: {error}");
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("video-ping-send", &error)),
+                    );
+                    return;
                 }
             }
             last_ping = now;
@@ -7724,9 +7838,12 @@ fn run_nvst_udp_receiver(
                 }
                 if expected_source && let Some(credentials) = stun_credentials.as_ref() {
                     let received_at = Instant::now();
-                    if let Some(elapsed) =
-                        ping_tracker.receive(&datagram[..length], source, credentials, received_at)
-                    {
+                    if let Some(elapsed) = keepalive.ping_tracker.receive(
+                        &datagram[..length],
+                        source,
+                        credentials,
+                        received_at,
+                    ) {
                         receiver
                             .config
                             .feedback()
@@ -7825,11 +7942,13 @@ fn run_nvst_udp_receiver(
         }
         if now.duration_since(last_stats_log) >= Duration::from_secs(10) {
             last_stats_log = now;
+            let pings_sent = keepalive.pings_sent;
+            let keepalive_deferred = keepalive.deferred_total;
             opennow_streamer_protocol::log::log_async(
                 "INFO",
                 "nvst-video",
                 &format!(
-                    "{} local_port={local_port} peer_port={} inbound={inbound_datagrams} pings={pings_sent} rr={receiver_reports_sent} stun_ok={handled_stun} stun_invalid={invalid_stun} wrong_source={wrong_source}",
+                    "{} local_port={local_port} peer_port={} inbound={inbound_datagrams} pings={pings_sent} keepalive_deferred={keepalive_deferred} rr={receiver_reports_sent} stun_ok={handled_stun} stun_invalid={invalid_stun} wrong_source={wrong_source}",
                     receiver.stats_line(stats_origin),
                     receiver.config.video_peer.port()
                 ),
@@ -7841,6 +7960,7 @@ fn run_nvst_udp_receiver(
         }
         let timeout = receiver.poll_timeout(now);
         if timeout.is_some() {
+            let pings_sent = keepalive.pings_sent;
             opennow_streamer_protocol::log::log_async(
                 "WARN",
                 "nvst-video",
@@ -9641,6 +9761,379 @@ mod tests {
             std::io::ErrorKind::TimedOut,
             "timeout",
         )));
+    }
+
+    fn spawn_video_with_keepalive_fault(
+        socket: UdpSocket,
+        config: NvstVideoConfig,
+        media_consumer: MediaConsumer,
+        event_sender: Sender<NvstReceiveEvent>,
+        send_keepalive: impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>
+        + Send
+        + 'static,
+    ) -> NvstUdpReceiverSession {
+        socket
+            .set_read_timeout(Some(UDP_RECEIVE_POLL_INTERVAL))
+            .unwrap();
+        let (commands, receiver) = mpsc::channel();
+        let input_ready = Arc::new(AtomicBool::new(false));
+        let microphone = Arc::new(Mutex::new(MicrophoneQueue::new(false)));
+        let outputs = NvstReceiverOutputs {
+            media_consumer,
+            event_sender,
+            input_ready: input_ready.clone(),
+            microphone: microphone.clone(),
+        };
+        let join = thread::spawn(move || {
+            run_nvst_video_receiver(
+                socket,
+                config,
+                receiver,
+                outputs,
+                Instant::now(),
+                send_keepalive,
+            );
+        });
+        NvstUdpReceiverSession {
+            commands,
+            join: Some(join),
+            input_ready,
+            microphone,
+        }
+    }
+
+    #[test]
+    fn video_keepalive_single_resource_failure_preserves_receive_and_cadence() {
+        for (error, authenticated_ping) in [
+            (std::io::Error::from_raw_os_error(10055), true),
+            (std::io::Error::from(std::io::ErrorKind::Interrupted), true),
+            (std::io::Error::from(std::io::ErrorKind::WouldBlock), true),
+            (std::io::Error::from_raw_os_error(10055), false),
+            (std::io::Error::from(std::io::ErrorKind::Interrupted), false),
+            (std::io::Error::from(std::io::ErrorKind::WouldBlock), false),
+        ] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let client_address = client.local_addr().unwrap();
+            let mut config = config();
+            config.video_peer = server.local_addr().unwrap();
+            config.stun_credentials = authenticated_ping.then(stun_credentials);
+            let ping_payload = config.ping_payload.clone();
+            let packet = protect_for_test(
+                &test_srtp(&config),
+                build_plaintext_rtp(
+                    1,
+                    FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                    42,
+                    &[0, 0, 1, 0x65],
+                ),
+                0,
+            );
+            server.send_to(&packet, client_address).unwrap();
+            let (media_consumer, media_receiver) = mpsc::sync_channel(1);
+            let (event_sender, event_receiver) = mpsc::channel();
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            let worker_attempts = attempts.clone();
+            let mut first_error = Some(error);
+            let session = spawn_video_with_keepalive_fault(
+                client,
+                config,
+                media_consumer,
+                event_sender,
+                move |socket, packet, peer| {
+                    worker_attempts.lock().unwrap().push(Instant::now());
+                    if let Some(error) = first_error.take() {
+                        Err(error)
+                    } else {
+                        socket.send_to(packet, peer)
+                    }
+                },
+            );
+            let frame = media_receiver.recv_timeout(Duration::from_secs(2));
+            assert!(
+                frame.is_ok(),
+                "a failed keepalive must not discard queued video: {frame:?}; events={:?}",
+                event_receiver.try_iter().collect::<Vec<_>>()
+            );
+            assert_eq!(frame.unwrap().frame_index, Some(42));
+            let mut datagram = [0; 512];
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (length, source) = loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "next scheduled keepalive succeeds"
+                );
+                let received = server
+                    .recv_from(&mut datagram)
+                    .expect("next scheduled keepalive succeeds");
+                if (authenticated_ping && looks_like_stun(&datagram[..received.0]))
+                    || (!authenticated_ping && datagram[..received.0] == ping_payload)
+                {
+                    break received;
+                }
+            };
+            assert_eq!(source, client_address);
+            if authenticated_ping {
+                assert!(valid_stun_fingerprint(&datagram[..length]));
+            } else {
+                assert_eq!(datagram[..length], ping_payload);
+            }
+            session.stop();
+            let attempts = attempts.lock().unwrap();
+            assert!(attempts.len() >= 2);
+            assert!(
+                attempts[1].duration_since(attempts[0])
+                    >= PING_INTERVAL_BEFORE_CONNECTION - UDP_RECEIVE_POLL_INTERVAL
+            );
+        }
+    }
+
+    #[test]
+    fn video_keepalive_persistent_resource_failure_stops_despite_inbound_video() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_address = client.local_addr().unwrap();
+        let mut config = config();
+        config.video_peer = server.local_addr().unwrap();
+        config.stun_credentials = Some(stun_credentials());
+        config.timeout = MIN_TIMEOUT;
+        let budget = config.timeout;
+        let srtp = test_srtp(&config);
+        let binding = build_authenticated_stun_packet(
+            STUN_BINDING_REQUEST,
+            &[0x11; 12],
+            stun_credentials().local_password.as_bytes(),
+            &[(STUN_ATTR_USERNAME, b"loc1:remote01".to_vec())],
+        );
+        server.send_to(&binding, client_address).unwrap();
+        let (media_consumer, media_receiver) = mpsc::sync_channel(64);
+        let (event_sender, event_receiver) = mpsc::channel();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let worker_attempts = attempts.clone();
+        let session = spawn_video_with_keepalive_fault(
+            client,
+            config,
+            media_consumer,
+            event_sender,
+            move |_, _, _| {
+                worker_attempts.lock().unwrap().push(Instant::now());
+                Err(std::io::Error::from_raw_os_error(10055))
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut sequence = 1;
+        let mut frames = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "persistent failures must terminate"
+            );
+            let packet = protect_for_test(
+                &srtp,
+                build_plaintext_rtp(
+                    sequence,
+                    FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                    u32::from(sequence),
+                    &[0, 0, 1, 0x65],
+                ),
+                0,
+            );
+            server.send_to(&packet, client_address).unwrap();
+            sequence += 1;
+            if let Ok(event) = event_receiver.recv_timeout(PING_INTERVAL_BEFORE_CONNECTION) {
+                assert!(
+                    matches!(
+                        event,
+                        NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+                            NvstStopCause::Socket {
+                                operation: "video-natt-send",
+                                os_code: Some(10055),
+                                ..
+                            }
+                        ))
+                    ),
+                    "unexpected event: {event:?}"
+                );
+                break;
+            }
+            frames += media_receiver.try_iter().count();
+        }
+        session.stop();
+        let attempts = attempts.lock().unwrap();
+        assert!(
+            frames > 0,
+            "receive must continue during deferred keepalives"
+        );
+        assert!(attempts.len() > 1);
+        assert!(attempts.last().unwrap().duration_since(attempts[0]) >= budget);
+        assert!(
+            attempts
+                .windows(2)
+                .all(|pair| pair[1].duration_since(pair[0])
+                    >= PING_INTERVAL_AFTER_CONNECTION - UDP_RECEIVE_POLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn video_keepalive_permanent_send_failures_remain_terminal() {
+        for error in [
+            std::io::Error::from_raw_os_error(10051),
+            std::io::Error::from_raw_os_error(10065),
+            std::io::Error::from_raw_os_error(10022),
+            std::io::Error::from_raw_os_error(10038),
+            std::io::Error::from_raw_os_error(1),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+            std::io::Error::from(std::io::ErrorKind::TimedOut),
+        ] {
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut config = config();
+            config.stun_credentials = Some(stun_credentials());
+            let code = error.raw_os_error();
+            let kind = error.kind();
+            let (media_consumer, _media_receiver) = mpsc::sync_channel(1);
+            let (event_sender, event_receiver) = mpsc::channel();
+            let mut error = Some(error);
+            let session = spawn_video_with_keepalive_fault(
+                client,
+                config,
+                media_consumer,
+                event_sender,
+                move |_, _, _| Err(error.take().expect("permanent failure must not retry")),
+            );
+            let event = event_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            session.stop();
+            assert!(
+                matches!(event, NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(NvstStopCause::Socket { operation: "video-natt-send", kind: actual_kind, os_code, })) if actual_kind == kind && os_code == code)
+            );
+        }
+    }
+
+    #[test]
+    fn video_keepalive_records_only_successful_sends_and_resets_failure_budget() {
+        let origin = Instant::now();
+        let budget = MIN_TIMEOUT;
+        let mut state = VideoKeepaliveState::default();
+        for (index, error) in [
+            std::io::Error::from_raw_os_error(10055),
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+            std::io::Error::from(std::io::ErrorKind::WouldBlock),
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state
+                .record_send(
+                    Err(error),
+                    Some([index as u8; 12]),
+                    origin,
+                    budget,
+                    "video-natt-send",
+                    0,
+                )
+                .unwrap();
+            assert_eq!(state.pings_sent, 0);
+            assert!(state.ping_tracker.pending.is_empty());
+        }
+        assert_eq!(state.first_failure, Some(origin));
+        assert_eq!(state.failed_attempts, 4);
+        assert_eq!(state.deferred_total, 3);
+        let sent_at = origin + budget - Duration::from_millis(1);
+        state
+            .record_send(
+                Ok(128),
+                Some([9; 12]),
+                sent_at,
+                budget,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, None);
+        assert_eq!(state.failed_attempts, 0);
+        assert_eq!(state.pings_sent, 1);
+        assert_eq!(
+            state
+                .ping_tracker
+                .pending
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![([9; 12], sent_at)]
+        );
+        let new_failure = origin + budget;
+        state
+            .record_send(
+                Err(std::io::Error::from_raw_os_error(10055)),
+                Some([10; 12]),
+                new_failure,
+                budget,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, Some(new_failure));
+        assert!(
+            state
+                .record_send(
+                    Err(std::io::Error::from_raw_os_error(10055)),
+                    Some([11; 12]),
+                    new_failure + budget,
+                    budget,
+                    "video-natt-send",
+                    0
+                )
+                .is_err()
+        );
+        assert_eq!(state.pings_sent, 1);
+        assert_eq!(state.ping_tracker.pending.len(), 1);
+    }
+
+    #[test]
+    fn video_keepalive_icmp_errors_do_not_create_tracking_or_extend_resource_deadline() {
+        let origin = Instant::now();
+        let mut state = VideoKeepaliveState::default();
+        state
+            .record_send(
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                Some([1; 12]),
+                origin,
+                MIN_TIMEOUT,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, None);
+        assert_eq!(state.failed_attempts, 0);
+        assert_eq!(state.pings_sent, 0);
+        assert!(state.ping_tracker.pending.is_empty());
+        state
+            .record_send(
+                Err(std::io::Error::from_raw_os_error(10055)),
+                Some([2; 12]),
+                origin,
+                MIN_TIMEOUT,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert!(
+            state
+                .record_send(
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    Some([3; 12]),
+                    origin + MIN_TIMEOUT,
+                    MIN_TIMEOUT,
+                    "video-natt-send",
+                    0
+                )
+                .is_err()
+        );
+        assert!(state.ping_tracker.pending.is_empty());
     }
 
     #[cfg(windows)]
