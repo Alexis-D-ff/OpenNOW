@@ -110,8 +110,10 @@ public:
                         return;
                     }
                 } else {
-                    context.enabled_capabilities = LinuxVulkanGraphics::enabledImportCapabilities(
+                    const auto contract = LinuxVulkanGraphics::importContract(
                         handles->inst, handles->physDev);
+                    context.enabled_capabilities = contract.capabilities;
+                    if (m_runtime) m_runtime->logRenderDiagnostic(contract.summary);
                 }
 #endif
                 break;
@@ -226,6 +228,12 @@ public:
         }
         if (status == OPENNOW_STREAMER_NO_FRAME || status == OPENNOW_STREAMER_STALE_FRAME) {
             prepareOriginal();
+            return;
+        }
+        if (status == OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED) {
+            if (frame) m_runtime->releaseFrame(frame);
+            reportFailure(QStringLiteral("OpenNOW's current Vulkan graphics device cannot import the hardware decoder's video frames, so reconnecting would fail the same way. Select Video backend: Software (CPU) in Stream settings, or export diagnostics. Your cloud session is still running."),
+                          NativeStreamRuntime::PresentationFailure::Unsupported);
             return;
         }
         if (status != OPENNOW_STREAMER_OK || !frame || recorded.resource == 0
@@ -624,11 +632,13 @@ private:
         m_outputDirty = true;
         m_outputKind = 1;
     }
-    void reportFailure(const QString &message)
+    void reportFailure(const QString &message,
+                       NativeStreamRuntime::PresentationFailure failure
+                       = NativeStreamRuntime::PresentationFailure::Recoverable)
     {
         if (m_reportedFailure || !m_runtime) return;
         m_reportedFailure = true;
-        m_runtime->reportPresentationError(message, m_presentationGeneration);
+        m_runtime->reportPresentationError(message, m_presentationGeneration, failure);
     }
 };
 }

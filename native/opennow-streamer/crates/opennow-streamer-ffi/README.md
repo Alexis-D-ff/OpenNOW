@@ -13,6 +13,15 @@ This crate exposes `opennow-streamer-core::Engine` as a C-compatible in-process 
 - `opennow_streamer_destroy` consumes the handle exactly once, waits for the engine and both callback queues to drain, and then returns. No call may race with destroy. A null handle is rejected; reusing a destroyed pointer is caller-side undefined behavior.
 - Every exported function catches Rust panics before they can unwind through the C ABI. A worker-thread panic closes the command queue.
 
+### Deterministic presentation incompatibility (ABI 12)
+
+`opennow_streamer_record_frame` returns `OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED` when the decoder's
+output kind cannot be imported with the graphics context's enabled capabilities, for example a
+DMA-BUF frame on a Vulkan context without `OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_IMPORT`.
+The same decoder and device fail identically on every attempt, so the host must not restart the
+media transport for it. `OPENNOW_STREAMER_RENDER_FAILED` remains the status for failures that a
+fresh device, surface, or session may clear. Rebuild Qt and the native library together.
+
 ### Windows adapter selection (ABI 10)
 
 ABI 10 appends `uint64_t windows_adapter_luid` to `OpenNowStreamerConfig`; rebuild the Qt shell
