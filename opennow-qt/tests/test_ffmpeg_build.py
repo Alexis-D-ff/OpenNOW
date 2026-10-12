@@ -117,12 +117,13 @@ class FFmpegBuildContractTest(unittest.TestCase):
 
     def test_request_options_are_target_gated_and_portable_is_retained(self):
         source = BUILD_SCRIPT.read_text()
-        start = source.index('    if use_v4l2_request() {', source.index('enable!(configure, "BUILD_LIB_DRM"'))
+        start = source.index('    if use_v4l2_request() {', source.index('enable!(configure, "BUILD_DRM", "libdrm");'))
         options = source[start:source.index('\n    }', start)]
         for option in ("libdrm", "libudev", "v4l2-request", "v4l2-m2m", "sand"):
             self.assertIn(f'"--enable-{option}"', options)
         manifest = ROOT / "native/opennow-streamer/crates/opennow-streamer-platform-linux/Cargo.toml"
         self.assertIn('"ffmpeg-sys-next/build-portable"', manifest.read_text())
+        self.assertIn('"ffmpeg-sys-next/build-drm"', manifest.read_text())
         bundled = source[source.index('let include_paths: Vec<PathBuf> = if env::var("CARGO_FEATURE_BUILD")'):]
         self.assertIn('if use_v4l2_request() {\n            println!("cargo:rpi=true");\n        }',
                       bundled[:bundled.index('link_to_libraries(statik, &target_os);')])
