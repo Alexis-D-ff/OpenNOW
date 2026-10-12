@@ -92,8 +92,6 @@ QString statusText(OpenNowStreamerStatus status)
         return u"The embedded streamer rejected a stale frame."_s;
     case OPENNOW_STREAMER_RENDER_FAILED:
         return u"The embedded streamer could not record the frame."_s;
-    case OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED:
-        return u"The embedded streamer cannot import the decoded frame on this graphics device."_s;
     case OPENNOW_STREAMER_SCENE_GRAPH_ACTIVE:
         return u"The embedded streamer scene graph is still active."_s;
     case OPENNOW_STREAMER_FRAME_ALREADY_RECORDED:
@@ -314,31 +312,20 @@ void NativeStreamRuntime::invalidatePresentation()
     emit frameAvailable(); // Repaint even when the dead transport sends no more frames.
 }
 
-void NativeStreamRuntime::logRenderDiagnostic(const QString &detail)
-{
-    QMetaObject::invokeMethod(this, [detail = detail.left(1536)] { handshakeLog(detail); },
-                              Qt::QueuedConnection);
-}
-
 void NativeStreamRuntime::reportPresentationError(const QString &message)
 {
     reportPresentationError(message, presentationGeneration());
 }
 
-void NativeStreamRuntime::reportPresentationError(const QString &message, quint64 generation,
-                                                  PresentationFailure failure)
+void NativeStreamRuntime::reportPresentationError(const QString &message, quint64 generation)
 {
-    const auto errorCode = failure == PresentationFailure::Unsupported
-        ? u"streamer_presentation_unsupported"_s
-        : u"streamer_presentation_failed"_s;
-    QMetaObject::invokeMethod(this, [this, message, generation, errorCode] {
+    QMetaObject::invokeMethod(this, [this, message, generation] {
         if (generation != presentationGeneration()) return;
         resetInputCapture();
         invalidatePresentation();
         setLastError(message);
         qWarning("Stream presentation: %s", qUtf8Printable(message));
-        handshakeLog(u"presentation-error code="_s + errorCode);
-        emit presentationError(message, errorCode);
+        emit presentationError(message);
     }, Qt::QueuedConnection);
 }
 

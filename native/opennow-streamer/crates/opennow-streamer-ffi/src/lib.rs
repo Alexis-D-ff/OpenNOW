@@ -23,7 +23,7 @@ use serde_json::Value;
 
 static FIRST_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
 
-pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 12;
+pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 11;
 pub const OPENNOW_STREAMER_MAX_TEXT_BYTES: usize =
     opennow_streamer_protocol::text_input::MAX_TEXT_BYTES;
 pub const OPENNOW_STREAMER_VULKAN_DEVICE_INFO_VERSION: u32 = 1;
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn opennow_streamer_vulkan_device_create(
                     let reason: String = error
                         .to_string()
                         .chars()
-                        .take(1536)
+                        .take(512)
                         .map(|character| {
                             if character.is_control() {
                                 ' '
@@ -243,7 +243,6 @@ pub enum OpenNowStreamerStatus {
     FrameAlreadyRecorded = 12,
     SonyInactive = 13,
     SdlClaimRejected = 14,
-    GraphicsUnsupported = 15,
     Panic = 255,
 }
 
@@ -765,7 +764,6 @@ fn graphics_status(error: GraphicsRuntimeError) -> OpenNowStreamerStatus {
         GraphicsRuntimeError::NoFrame => OpenNowStreamerStatus::NoFrame,
         GraphicsRuntimeError::StaleFrame => OpenNowStreamerStatus::StaleFrame,
         GraphicsRuntimeError::FrameAlreadyRecorded => OpenNowStreamerStatus::FrameAlreadyRecorded,
-        GraphicsRuntimeError::RecordUnsupported(_) => OpenNowStreamerStatus::GraphicsUnsupported,
         GraphicsRuntimeError::RecordFailed(_) => OpenNowStreamerStatus::RenderFailed,
     }
 }
@@ -1359,10 +1357,7 @@ pub unsafe extern "C" fn opennow_streamer_set_graphics_context(
                 "WARN"
             },
             "graphics",
-            &format!(
-                "graphics context initialized (api={api_name} dmabuf_image_import={} dmabuf_buffer_import={}): {status:?}",
-                context.vulkan_dmabuf_import_enabled, context.vulkan_dmabuf_buffer_import_enabled
-            ),
+            &format!("graphics context initialized (api={api_name}): {status:?}"),
         );
         status
     })) {
@@ -1781,16 +1776,8 @@ mod tests {
     }
 
     #[test]
-    fn abi_twelve_adds_the_deterministic_graphics_unsupported_status() {
-        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 12);
-        assert_eq!(OpenNowStreamerStatus::GraphicsUnsupported as i32, 15);
-        let header = include_str!("../include/opennow_streamer_ffi.h");
-        assert!(header.contains("OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED = 15,"));
-    }
-
-    #[test]
     fn abi_eleven_appends_the_sony_snapshot_contract() {
-        const { assert!(OPENNOW_STREAMER_FFI_ABI_VERSION >= 11) };
+        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 11);
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, incarnation), 8);
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, vendor), 16);
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, product), 18);
@@ -3028,10 +3015,6 @@ mod tests {
             ),
             (None, OpenNowStreamerStatus::Ok),
             (
-                Some(GraphicsFrameError::Unsupported("no DMA-BUF import".into())),
-                OpenNowStreamerStatus::GraphicsUnsupported,
-            ),
-            (
                 Some(GraphicsFrameError::Failed("device removed".into())),
                 OpenNowStreamerStatus::RenderFailed,
             ),
@@ -3073,7 +3056,7 @@ mod tests {
             );
             assert_eq!(recorded.drops.load(Ordering::Relaxed), index + 1);
         }
-        assert_eq!(messages.frames_available.load(Ordering::Relaxed), 5);
+        assert_eq!(messages.frames_available.load(Ordering::Relaxed), 4);
         assert_eq!(recorded.values.lock().unwrap().len(), 1);
         assert_eq!(
             unsafe { opennow_streamer_scene_graph_shutdown(&handle) },

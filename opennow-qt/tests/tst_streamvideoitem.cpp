@@ -796,7 +796,7 @@ private slots:
                                         promoted, promoted));
         QVERIFY(!hasDmabufImportContract(QVersionNumber(1, 1), VK_API_VERSION_1_2,
                                          promoted, promoted));
-        QCOMPARE(importContract(nullptr, VK_NULL_HANDLE).capabilities, uint32_t(0));
+        QCOMPARE(enabledImportCapabilities(nullptr, VK_NULL_HANDLE), uint32_t(0));
 #else
         QSKIP("Linux Vulkan capability contract");
 #endif

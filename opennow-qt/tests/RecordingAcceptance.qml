@@ -13,7 +13,7 @@ QtObject {
         property bool running: true
         property string lastError: ""
         property var commands: []
-        signal presentationError(string message, string errorCode)
+        signal presentationError(string message)
         signal responseReceived(var response)
         signal eventReceived(var event)
         signal callbacksDropped(int count)
