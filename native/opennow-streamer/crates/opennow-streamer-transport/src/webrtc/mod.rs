@@ -37,6 +37,7 @@ const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_FLUSH_TIME: Duration = Duration::from_millis(150);
+const NACK_REPAIRABLE_FRAMES: usize = 101;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -319,7 +320,7 @@ pub fn negotiate(
         .clear_codecs()
         .enable_opus(true)
         .set_reordering_size_audio(32)
-        .set_reordering_size_video(512)
+        .set_reordering_size_video(NACK_REPAIRABLE_FRAMES)
         .set_send_buffer_audio(1)
         .set_send_buffer_video(1);
     match codec {
@@ -833,6 +834,8 @@ impl TransportWorker {
                 .find(|kind| writer.is_request_keyframe_possible(*kind));
             if let Some(kind) = kind {
                 if writer.request_keyframe(None, kind).is_ok() {
+                    self.traffic.video.keyframe_requests =
+                        self.traffic.video.keyframe_requests.saturating_add(1);
                     self.video.last_request = Some(now);
                 }
             }
@@ -852,6 +855,7 @@ impl TransportWorker {
             .stream_rx_by_mid(data.mid, data.rid)
             .map(|stream| *stream.ssrc());
         if is_video {
+            self.traffic.video.assembled(keyframe, data.contiguous);
             if self.video.mid.is_some_and(|mid| mid != data.mid) {
                 return Err("multiple video tracks are unsupported".to_owned());
             }
@@ -861,6 +865,8 @@ impl TransportWorker {
             }
             self.video.ssrc = ssrc;
             if data.data.len() > MAX_VIDEO_BYTES || (!self.video.reference_ready && !keyframe) {
+                self.traffic.video.awaiting_reference =
+                    self.traffic.video.awaiting_reference.saturating_add(1);
                 self.video_drops = self.video_drops.saturating_add(1);
                 self.request_keyframe(data.mid);
                 return Ok(());
@@ -890,13 +896,16 @@ impl TransportWorker {
         };
         match self.media_consumer.try_send(frame) {
             Ok(()) => {
-                if is_video && keyframe {
-                    self.video.reference_ready = true;
+                if is_video {
+                    self.traffic.video.delivered = self.traffic.video.delivered.saturating_add(1);
+                    self.video.reference_ready |= keyframe;
                 }
                 Ok(())
             }
             Err(TrySendError::Full(_)) => {
                 if is_video {
+                    self.traffic.video.consumer_full =
+                        self.traffic.video.consumer_full.saturating_add(1);
                     self.video_drops = self.video_drops.saturating_add(1);
                     self.video.reference_ready = false;
                     self.request_keyframe(data.mid);

@@ -65,6 +65,7 @@ codegen-units = 1
 strip = true
 
 [patch.crates-io]
+str0m = { path = "vendor/str0m" }
 # Always compile the vendored Opus sources for the distributable streamer.
 audiopus_sys = { path = "vendor/audiopus-sys" }
 # Upstream does not expose an NVDEC-only bundled build. This patch keeps CUDA
