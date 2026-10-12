@@ -640,6 +640,147 @@ QtObject {
         ShellStore.activeSession = null
         ShellStore.streamer = {status:"stopped"}
     }
+    function checkRemoteTerminationReporting() {
+        client.state = "ready"
+        const auth = {user:{userId:"report-owner",displayName:"Report owner"},provider:{idpId:"report-provider"}}
+        const owner = {generation:1,userId:"report-owner",providerIdpId:"report-provider"}
+        ShellStore.authSession = auth
+        ShellStore.authGeneration = 1
+        const consent = value => ShellStore.settings = Object.assign({}, ShellStore.settings, {automaticBugReports:value})
+        consent("enabled")
+        runtime.running = false
+        const timeout = {type:"error", code:"nvst-recovery-exhausted",
+            message:"NVST recovery failed after one attempt: Timeout",
+            termination:{source:"nvst-transport",code:"nvst-recovery-exhausted",resumable:null}}
+        const incidents = since => client.calls.slice(since).filter(call => call.method === "bug_report.incident")
+        const tracked = (since, event) => client.calls.slice(since)
+            .filter(call => call.method === "analytics.track" && call.params.event === event)
+        const ended = since => tracked(since, "session_ended").map(call => call.params.props)
+        const begin = sessionId => {
+            ShellStore.cancelSessionRecovery()
+            ShellStore.streamPollTimer.stop()
+            ShellStore.activeSession = {sessionId:sessionId,status:3,phase:"streaming",appId:"100",ownerScope:owner}
+            ShellStore.streamer = {sessionId:sessionId,status:"streaming",firstFrameLatencyMs:1}
+            ShellStore.streamStartedAtMs = Date.now() - 60000
+            ShellStore.streamState = "streaming"
+            ShellStore.streamerStopExpected = false
+            ShellStore.streamerRecoveryExhausted = false
+            ShellStore.sessionReconnectAttempts = 0
+            ShellStore.coreSessionRestoreId = ""
+            ShellStore.sessionStopIntentId = ""
+            ShellStore.streamerStopRequestId = ""
+            ShellStore.streamerStartRequestId = ""
+            ShellStore.streamerPrepareRequestId = ""
+            ShellStore.streamStopRequestId = ""
+            ShellStore.streamPollRequestId = ""
+            return client.calls.length
+        }
+        const fail = () => {
+            ShellStore.acceptNativeEvent(timeout)
+            ShellStore.acceptNativeEvent({type:"status", status:"stopped", message:timeout.message,
+                termination:timeout.termination})
+            check(ShellStore.streamerRestartTimer.running, "a native timeout schedules bounded recovery")
+        }
+        const discover = () => {
+            ShellStore.streamerRestartTimer.stop()
+            ShellStore.streamerRestartTimer.triggered()
+            check(ShellStore.recoveryDiscoveryRequestId !== "", "recovery reconciles the seat with CloudMatch")
+            return ShellStore.recoveryDiscoveryRequestId
+        }
+        const terminate = sessionId => client.eventReceived("session.changed", {scope:owner,session:null,
+            termination:{source:"cloudmatch-http",httpStatus:404,sessionId:sessionId,resumable:false}})
+
+        for (const termination of [
+            {source:"cloudmatch-http",httpStatus:404,resumable:false},
+            {source:"cloudmatch-session-status",status:7,resumable:false}
+        ]) {
+            const sessionId = "report-terminated-" + termination.source
+            const since = begin(sessionId)
+            fail()
+            const reported = incidents(since)
+            check(reported.length === 1 && reported[0].params.code === "nvst_recovery_exhausted"
+                && tracked(since, "session_error").length === 1,
+                termination.source + " the native failure remains an observable incident")
+            client.responseReceived(discover(), {scope:owner,session:null,
+                termination:Object.assign({sessionId:sessionId}, termination)})
+            terminate(sessionId)
+            const summary = ended(since)
+            check(!ShellStore.activeSession && summary.length === 1 && summary[0].outcome === "remote_ended"
+                && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+                termination.source + " confirmed termination is remote_ended and keeps the initiating code, got "
+                + JSON.stringify(summary))
+        }
+
+        let since = begin("report-unreported")
+        consent("disabled")
+        fail()
+        check(incidents(since).length === 0, "an opted-out failure produces no incident")
+        consent("enabled")
+        terminate("report-unreported")
+        let summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended"
+            && summary[0].error_code === "nvst_recovery_exhausted",
+            "confirmed termination is classified without a reported incident")
+
+        since = begin("report-exhausted")
+        fail()
+        ShellStore.sessionReconnectAttempts = ShellStore.maximumSessionReconnectAttempts
+        ShellStore.streamerRestartTimer.stop()
+        ShellStore.streamerRestartTimer.triggered()
+        check(ShellStore.streamerRecoveryExhausted, "recovery exhausts its budget")
+        terminate("report-exhausted")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended"
+            && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+            "a stale exhausted streamer error cannot overwrite the authoritative ending")
+
+        since = begin("report-recovered")
+        fail()
+        client.responseReceived(discover(), {scope:owner,
+            session:{sessionId:"report-recovered",status:3,streamingBaseUrl:"https://example.invalid"}})
+        check(ShellStore.sessionClaimRequestId !== "", "a live seat is reclaimed")
+        client.responseReceived(ShellStore.sessionClaimRequestId,
+            {session:{sessionId:"report-recovered",status:3,phase:"resuming",resumePending:true}})
+        ShellStore.streamPollTimer.stop()
+        ShellStore.streamer = {sessionId:"report-recovered",status:"streaming"}
+        ShellStore.acceptNativeEvent({type:"status", event:"first-frame", status:"streaming", backend:"fixture"})
+        terminate("report-recovered")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended" && summary[0].error_code === undefined
+            && incidents(since).length === 1,
+            "a remote end after recovered media keeps the recovered incident but no stale error code")
+
+        since = begin("report-clean")
+        terminate("report-clean")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended" && summary[0].error_code === undefined
+            && incidents(since).length === 0, "a healthy confirmed termination carries no failure")
+
+        since = begin("report-unconfirmed")
+        fail()
+        client.eventReceived("session.changed", {scope:owner,session:null})
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "error"
+            && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+            "an unconfirmed session end remains an error")
+
+        since = begin("report-stopped")
+        fail()
+        ShellStore.stopStreamingSession()
+        client.responseReceived(ShellStore.streamStopRequestId, {session:null})
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "error" && incidents(since).length === 1,
+            "stopping a failed stream remains an error and ends once")
+
+        ShellStore.streamerRestartTimer.stop()
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamerStopExpected = false
+        ShellStore.streamer = {status:"stopped"}
+        ShellStore.acceptStreamingSession(null)
+        ShellStore.streamStartedAtMs = 0
+        ShellStore.authSession = null
+        ShellStore.authGeneration = 0
+    }
     function checkConnectingPresentation(parent) {
         const saved = {session:ShellStore.activeSession, streamer:ShellStore.streamer,
             state:ShellStore.streamState, restarts:ShellStore.streamerRestartAttempts,
@@ -824,6 +965,7 @@ QtObject {
         checkExitAfterExhaustedRestore()
         checkAuthenticationRecovery()
         checkSavedProfileBootstrap()
+        checkRemoteTerminationReporting()
         ShellStore.activeSession = null
         ShellStore.streamer = null
         beginLiveProfileUnlock(parent)
