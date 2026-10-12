@@ -127,7 +127,9 @@ pub(crate) fn embedded_video_backends_with_config(
     _windows_adapter_luid: Option<WindowsAdapterLuid>,
 ) -> Vec<VideoBackendCapability> {
     #[cfg(target_os = "linux")]
-    let mut backends = linux_backend::video_backends();
+    let mut backends = linux_backend::mediacodec_capability()
+        .map(|backend| vec![backend])
+        .unwrap_or_else(linux_backend::video_backends);
     #[cfg(target_os = "linux")]
     for backend in &mut backends {
         if backend.backend == "vulkan" {

@@ -2533,6 +2533,40 @@ mod tests {
     }
 
     #[test]
+    fn embedded_mediacodec_preflight_preserves_the_hardware_only_profile() {
+        let mut caps = json!({"protocolVersion":7,"videoBackends":[{
+            "backend":"mediacodec","platform":"linux","available":true,"codecs":[
+                {"codec":"h264","available":true,"colorQualities":["8bit_420"],"hdrSupported":false},
+                {"codec":"h265","available":false,"colorQualities":[],"hdrSupported":false},
+                {"codec":"av1","available":false,"colorQualities":[],"hdrSupported":false}
+            ]
+        }]});
+        let settings =
+            json!({"codec":"auto","colorQuality":"8bit_420","fps":60,"resolution":"1280x720"});
+        assert_eq!(
+            StreamerService::embedded_session_settings(&settings, &caps).unwrap()["codec"],
+            "h264"
+        );
+        for unsupported in [
+            json!({"codec":"h265"}),
+            json!({"codec":"av1"}),
+            json!({"codec":"h264","colorQuality":"10bit_420"}),
+            json!({"codec":"h264","colorQuality":"8bit_444"}),
+            json!({"codec":"h264","enableHdr":true}),
+            json!({"codec":"h264","nativeVideoBackend":"software"}),
+        ] {
+            assert!(StreamerService::embedded_session_settings(&unsupported, &caps).is_err());
+        }
+        caps["videoBackends"][0]["available"] = json!(false);
+        assert_eq!(
+            StreamerService::embedded_session_settings(&settings, &caps)
+                .unwrap_err()
+                .code,
+            "streamer_backend_unavailable"
+        );
+    }
+
+    #[test]
     fn embedded_color_selection_cannot_be_silently_reduced_by_cloudmatch() {
         for profiles in [
             None,
