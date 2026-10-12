@@ -122,11 +122,9 @@ pub(super) fn readiness_decision(
 }
 
 pub(super) fn account_decision(
-    game: &Value,
     variant: &Value,
     variant_id: &str,
     access: &Value,
-    subscription: &Value,
 ) -> Option<LaunchDecision> {
     use LaunchStatus::*;
     let decide = |status, message| LaunchDecision { status, message };
@@ -181,32 +179,32 @@ pub(super) fn account_decision(
             ));
         }
     }
-    if game["membershipTierLabel"].as_str().is_some_and(|tier| {
-        !tier.trim().is_empty() && !tier.trim().to_ascii_lowercase().starts_with("free")
-    }) {
-        match subscription["membershipTier"]
-            .as_str()
-            .filter(|tier| !tier.trim().is_empty())
-        {
-            None => {
-                return Some(decide(
-                    MetadataUnconfirmed,
-                    "Membership details could not be confirmed. Refresh and try again.",
-                ));
-            }
-            Some(tier) if tier.trim().to_ascii_lowercase().starts_with("free") => {
-                return Some(decide(
-                    SubscriptionRequired,
-                    "This game requires a paid GeForce NOW membership.",
-                ));
-            }
-            _ => (),
-        }
-        if let Some(decision) = game_play_denial(subscription) {
-            return Some(decision);
-        }
-    }
     None
+}
+
+pub(super) fn requires_paid_membership(game: &Value) -> bool {
+    game["membershipTierLabel"].as_str().is_some_and(|tier| {
+        !tier.trim().is_empty() && !tier.trim().to_ascii_lowercase().starts_with("free")
+    })
+}
+
+pub(super) fn paid_membership_decision(subscription: &Value) -> Option<LaunchDecision> {
+    use LaunchStatus::*;
+    let decide = |status, message| LaunchDecision { status, message };
+    match subscription["membershipTier"]
+        .as_str()
+        .filter(|tier| !tier.trim().is_empty())
+    {
+        None => Some(decide(
+            MetadataUnconfirmed,
+            "Membership details could not be confirmed. Refresh and try again.",
+        )),
+        Some(tier) if tier.trim().to_ascii_lowercase().starts_with("free") => Some(decide(
+            SubscriptionRequired,
+            "This game requires a paid GeForce NOW membership.",
+        )),
+        _ => game_play_denial(subscription),
+    }
 }
 
 pub(super) fn game_play_denial(subscription: &Value) -> Option<LaunchDecision> {
@@ -220,57 +218,62 @@ fn launch_decision(
     game: &Value,
     app_id: &str,
     variant_id: &str,
-    subscription: &Value,
     access: &Value,
-) -> LaunchDecision {
+    membership: impl FnOnce() -> Result<Value, ServiceError>,
+) -> Result<LaunchDecision, ServiceError> {
     use LaunchStatus::*;
     let decide = |status, message| LaunchDecision { status, message };
     if game["id"] != app_id || variant_id.parse::<i32>().ok().is_none_or(|id| id <= 0) {
-        return decide(
+        return Ok(decide(
             MetadataUnconfirmed,
             "The exact store version could not be confirmed. Refresh and try again.",
-        );
+        ));
     }
     let Some(variant) = selected_variant(game, variant_id) else {
-        return decide(
+        return Ok(decide(
             MetadataUnconfirmed,
             "The selected store version is no longer available. Choose a store version again.",
-        );
+        ));
     };
     if let Some(decision) = readiness_decision(game, variant, PlayabilityMetadata::Required) {
-        return decision;
+        return Ok(decision);
     }
     match variant["libraryStatus"].as_str() {
         Some("MANUAL" | "PLATFORM_SYNC") => (),
         Some("NOT_OWNED") => {
-            return decide(
+            return Ok(decide(
                 OwnershipRequired,
                 "Confirm that you already own this game on the selected store before adding it to your GeForce NOW library.",
-            );
+            ));
         }
         _ => {
-            return decide(
+            return Ok(decide(
                 MetadataUnconfirmed,
                 "Ownership of this store version could not be confirmed. Refresh or sync your library.",
-            );
+            ));
         }
     }
-    if let Some(decision) = account_decision(game, variant, variant_id, access, subscription) {
-        return decision;
+    if let Some(decision) = account_decision(variant, variant_id, access) {
+        return Ok(decision);
+    }
+    if requires_paid_membership(game)
+        && let Some(decision) = paid_membership_decision(&membership()?)
+    {
+        return Ok(decision);
     }
     if variant["librarySelected"] == false {
-        return decide(
+        return Ok(decide(
             SelectionRequired,
             "Choose this owned store version for play before launching.",
-        );
+        ));
     }
     if variant["librarySelected"] != true {
-        return decide(
+        return Ok(decide(
             MetadataUnconfirmed,
             "Your preferred store version could not be confirmed. Refresh and try again.",
-        );
+        ));
     }
-    decide(Ready, "Ready to play this store version.")
+    Ok(decide(Ready, "Ready to play this store version."))
 }
 
 #[derive(Clone, Copy)]
@@ -388,22 +391,6 @@ impl GfnService {
             return self.store_launch_inspect(params, Some((&app_id, &variant_id)), settings);
         }
         let mut result = self.catalog_game(&json!({"appId":app_id}), settings)?;
-        let subscription = if result["game"]["membershipTierLabel"]
-            .as_str()
-            .is_some_and(|tier| {
-                !tier.trim().is_empty() && !tier.trim().to_ascii_lowercase().starts_with("free")
-            }) {
-            let subscription = self.subscription(settings)?;
-            if subscription["scope"] != result["scope"] {
-                return Err(ServiceError {
-                    code: "stale_account",
-                    message: "The membership account changed.".into(),
-                });
-            }
-            subscription["subscription"].clone()
-        } else {
-            Value::Null
-        };
         let access = if selected_variant(&result["game"], &variant_id).is_some_and(|variant| {
             matches!(
                 variant["libraryStatus"].as_str(),
@@ -421,14 +408,17 @@ impl GfnService {
         } else {
             Value::Null
         };
-        result["decision"] = serde_json::to_value(launch_decision(
-            &result["game"],
-            &app_id,
-            &variant_id,
-            &subscription,
-            &access,
-        ))
-        .expect("launch decision serializable");
+        let decision = launch_decision(&result["game"], &app_id, &variant_id, &access, || {
+            let subscription = self.subscription(settings)?;
+            if subscription["scope"] != result["scope"] {
+                return Err(ServiceError {
+                    code: "stale_account",
+                    message: "The membership account changed.".into(),
+                });
+            }
+            Ok(subscription["subscription"].clone())
+        })?;
+        result["decision"] = serde_json::to_value(decision).expect("launch decision serializable");
         result["appId"] = json!(app_id);
         result["variantId"] = json!(variant_id);
         Ok(result)

@@ -39,7 +39,10 @@ fn access() -> Value {
 }
 
 fn decision(game: &Value, app_id: &str, variant_id: &str, subscription: &Value) -> LaunchDecision {
-    super::launch_decision(game, app_id, variant_id, subscription, &access())
+    super::launch_decision(game, app_id, variant_id, &access(), || {
+        Ok(subscription.clone())
+    })
+    .unwrap()
 }
 
 #[test]
@@ -48,33 +51,45 @@ fn selected_store_link_and_subscription_requirements_use_current_account_metadat
     let mut account = access();
     account["accounts"][0]["isRequired"] = json!(true);
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::LinkRequired
     );
     account["accounts"][0]["isConnected"] = json!(true);
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::Ready
     );
     account["accounts"][0]["status"] = json!("expired");
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::LinkRequired
     );
     account["accounts"][0]["status"] = json!("connected");
     game["variants"][0]["subscription"] = json!("STORE_PASS");
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::SubscriptionRequired
     );
     account["subscriptions"] = json!([{"id":"STORE_PASS"}]);
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::Ready
     );
     account["definitions"]["stores"]["status"] = json!("stale");
     assert_eq!(
-        super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+        super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+            .unwrap()
+            .status,
         LaunchStatus::MetadataUnconfirmed
     );
 }
@@ -91,7 +106,9 @@ fn nullable_variant_scope_preserves_required_account_linking() {
         let mut account = access();
         account["accounts"][0] = definition.connection_definition();
         assert_eq!(
-            super::launch_decision(&game, "parent-app", "123", &Value::Null, &account).status,
+            super::launch_decision(&game, "parent-app", "123", &account, || Ok(Value::Null))
+                .unwrap()
+                .status,
             if required {
                 LaunchStatus::LinkRequired
             } else {
@@ -799,5 +816,97 @@ fn membership_requirements_preserve_all_existing_tier_cases_in_the_shared_policy
             expected,
             "{required}/{membership}"
         );
+    }
+}
+
+fn premium_service(url: &str) -> (GfnService, PathBuf) {
+    let (mut service, path) = service(url);
+    service.endpoints.account_linking = format!("{url}/graphql");
+    service.endpoints.subscription = format!("{url}/subscription");
+    (service, path)
+}
+
+fn premium_app(playability: &str) -> Value {
+    let mut game = app("MANUAL", true, false);
+    game["gfn"] = json!({"playabilityState":playability,"minimumMembershipTierLabel":"Premium"});
+    game
+}
+
+fn store_access() -> Vec<(u16, Value)> {
+    vec![
+        (
+            200,
+            json!({"data":{"appStoreDefinitions":[{"store":"STEAM","label":"Steam","features":[],
+                "accountLinkingMetadata":{"isRequired":false,"isSupported":true,"supportedVariantIds":[]}}]}}),
+        ),
+        (200, json!({"data":{"genreDefinitions":[]}})),
+        (200, json!({"data":{"subscriptionDefinitions":[]}})),
+        (
+            200,
+            json!({"data":{"userAccount":{"storesData":[{"store":"STEAM","isConnected":true,"status":"connected"}],"subscriptions":[]}}}),
+        ),
+    ]
+}
+
+#[test]
+fn account_playability_decides_premium_launches_without_the_membership_service() {
+    let mut responses = vec![vpc(), read(premium_app("UNPLAYABLE_DUE_TO_UPGRADE"))];
+    responses.extend(store_access());
+    let (url, worker) = mock_requests(responses, |_, request| {
+        assert!(
+            !request.starts_with("GET /subscription"),
+            "membership was requested"
+        );
+    });
+    let (service, path) = premium_service(&url);
+    let result = service
+        .catalog_launch_inspect(&json!({"appId":"parent-app","variantId":"123"}), &json!({}))
+        .unwrap();
+    assert_eq!(result["decision"]["status"], "subscription_required");
+    worker.join().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn playable_premium_launches_still_require_a_confirmed_membership() {
+    for (membership, expected) in [
+        ((404, json!({})), Err("upstream_error")),
+        ((500, json!({})), Err("upstream_error")),
+        (
+            (200, json!({"membershipTier":"FREE"})),
+            Ok("subscription_required"),
+        ),
+        (
+            (
+                200,
+                json!({"membershipTier":"ULTIMATE","currentSubscriptionState":{"isGamePlayAllowed":true}}),
+            ),
+            Ok("ready"),
+        ),
+    ] {
+        let status = membership.0;
+        let mut responses = vec![vpc(), read(premium_app("PLAYABLE"))];
+        responses.extend(store_access());
+        responses.push(membership);
+        let (url, worker) = mock_requests(responses, |index, request| {
+            assert_eq!(index == 6, request.starts_with("GET /subscription?"));
+        });
+        let (service, path) = premium_service(&url);
+        let result = service
+            .catalog_launch_inspect(&json!({"appId":"parent-app","variantId":"123"}), &json!({}));
+        match expected {
+            Ok(decision) => assert_eq!(result.unwrap()["decision"]["status"], decision),
+            Err(code) => {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, code);
+                assert!(
+                    error.message.contains(&status.to_string()),
+                    "{}",
+                    error.message
+                );
+            }
+        }
+        worker.join().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 }
