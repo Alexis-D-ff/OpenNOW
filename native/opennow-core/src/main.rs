@@ -214,13 +214,16 @@ fn run() -> Result<(), String> {
                 dispatch(&method, &params, &worker_core, &worker_output)
             });
             let outcome = match &result {
-                Ok(_) => "ok",
-                Err((code, _)) => code.as_str(),
+                Ok(_) => "outcome=ok".to_owned(),
+                Err((code, message)) => match upstream_http_status(message) {
+                    Some(status) => format!("outcome={code} httpStatus={status}"),
+                    None => format!("outcome={code}"),
+                },
             };
             worker_core.diagnostics.record(
                 "rpc",
                 &method,
-                format!("outcome={outcome} durationMs={}", started.elapsed().as_millis()),
+                format!("{outcome} durationMs={}", started.elapsed().as_millis()),
             );
             observe_reporting(&worker_core, &worker_output, &method, &params, &result);
             let was_cancelled = permit.token.cancelled();
@@ -1570,6 +1573,13 @@ fn ensure_install_id(core: &AppCore) -> Result<String, (String, String)> {
     Ok(install_id)
 }
 
+fn upstream_http_status(message: &str) -> Option<u16> {
+    let (_, detail) = message.split_once(" (")?;
+    let status = detail.get(..3)?.parse::<u16>().ok()?;
+    (matches!(detail.as_bytes().get(3), Some(b' ' | b')')) && (100..=599).contains(&status))
+        .then_some(status)
+}
+
 fn gfn_error(error: gfn::ServiceError) -> (String, String) {
     (error.code.to_owned(), error.message)
 }
@@ -1597,6 +1607,39 @@ fn argument_value(name: &str) -> Option<String> {
 #[cfg(test)]
 mod acceptance_tests {
     use super::*;
+
+    #[test]
+    fn rpc_diagnostics_keep_only_the_upstream_http_status() {
+        for (message, expected) in [
+            (
+                format!(
+                    "Subscription request failed ({})",
+                    reqwest::StatusCode::NOT_FOUND
+                ),
+                Some(404),
+            ),
+            (
+                format!(
+                    "Session polling failed ({}): INTERNAL_ERROR_STATUS C2EC1025",
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                ),
+                Some(500),
+            ),
+            ("Server info failed (408)".to_owned(), Some(408)),
+            (
+                "Server info failed: error sending request (dns)".to_owned(),
+                None,
+            ),
+            ("Subscription request failed (4040 x)".to_owned(), None),
+            ("Subscription request failed (099 x)".to_owned(), None),
+            (
+                "Membership details could not be confirmed.".to_owned(),
+                None,
+            ),
+        ] {
+            assert_eq!(upstream_http_status(&message), expected, "{message}");
+        }
+    }
 
     #[test]
     fn updates_require_no_session_and_a_terminal_streamer() {
