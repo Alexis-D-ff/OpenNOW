@@ -1,13 +1,19 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+#[cfg(target_os = "linux")]
 use anyhow::{Context, Result, ensure};
+#[cfg(target_os = "linux")]
 use opennow_streamer_platform_linux::{
     BackendEvent, DecoderBackend, DecoderPreference, EncodedVideoFrame, LinuxSession, PixelFormat,
     SessionConfig, StreamFormat,
 };
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
     let socket = PathBuf::from(
@@ -80,4 +86,10 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("The MediaCodec bridge smoke check requires Linux.");
+    std::process::exit(2);
 }
