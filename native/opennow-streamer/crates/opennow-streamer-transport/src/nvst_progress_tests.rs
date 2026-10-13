@@ -765,6 +765,42 @@ fn delayed_play_does_not_consume_the_dedicated_first_video_timeout() {
 }
 
 #[test]
+fn pre_play_video_preserves_the_windows_first_video_allowance() {
+    for raw in [true, false] {
+        let mut config = config();
+        config.startup_timeout = Duration::from_secs(60);
+        config.timeout = Duration::from_secs(8);
+        let feedback = config.feedback();
+        let crypto = test_srtp(&config);
+        feedback.wait_for_play();
+        let mut receiver = NvstVideoReceiver::new(config);
+        let started = receiver.timeout_origin;
+        if raw {
+            receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 0, 7), started);
+        } else {
+            receiver.process_mjolnir_payload(1, 0, &[], started);
+        }
+        let played = started + Duration::from_secs(19);
+        feedback.complete_play(played);
+        assert_eq!(receiver.poll_timeout(played + Duration::from_secs(8)), None);
+        assert_eq!(
+            receiver.poll_frame_progress(played + Duration::from_secs(8), progress_policy()),
+            None
+        );
+        assert_eq!(
+            receiver.poll_timeout(played + Duration::from_secs(60) - Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(
+            receiver.poll_timeout(played + Duration::from_secs(60)),
+            Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout {
+                idle_for: Duration::from_secs(60)
+            }))
+        );
+    }
+}
+
+#[test]
 fn early_partial_video_cannot_start_a_frame_watchdog_before_play() {
     let config = config();
     let feedback = config.feedback();
@@ -781,6 +817,11 @@ fn early_partial_video_cannot_start_a_frame_watchdog_before_play() {
         None
     );
     feedback.complete_play(played);
+    assert_eq!(
+        receiver.poll_frame_progress(played, progress_policy()),
+        None
+    );
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 1, 7), played);
     assert_eq!(
         receiver.poll_frame_progress(
             played + Duration::from_secs(2) - Duration::from_nanos(1),
@@ -850,5 +891,49 @@ fn bundle_play_completion_arms_the_shared_dedicated_video_clock() {
     assert!(timeout.is_some_and(|idle| idle >= Duration::from_millis(120)));
     assert!(
         matches!(*feedback.video_startup.lock().unwrap(), VideoStartup::PlayComplete(at) if at >= played)
+    );
+}
+
+#[test]
+fn first_post_play_packet_starts_the_idle_budget_and_frame_watchdog() {
+    let mut config = config();
+    config.startup_timeout = Duration::from_secs(60);
+    config.timeout = Duration::from_secs(8);
+    let feedback = config.feedback();
+    let crypto = test_srtp(&config);
+    feedback.wait_for_play();
+    let mut receiver = NvstVideoReceiver::new(config);
+    let started = receiver.timeout_origin;
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 0, 7), started);
+    let played = started + Duration::from_secs(19);
+    feedback.complete_play(played);
+    let received = played + Duration::from_secs(30);
+    assert_eq!(receiver.poll_timeout(received), None);
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 1, 7), received);
+    assert!(!receiver.initial_timeout_pending);
+    assert_eq!(
+        receiver.frame_progress.first_authenticated_at,
+        Some(received)
+    );
+    assert_eq!(
+        receiver.poll_frame_progress(
+            received + Duration::from_secs(2) - Duration::from_nanos(1),
+            progress_policy()
+        ),
+        None
+    );
+    assert!(matches!(
+        receiver.poll_frame_progress(received + Duration::from_secs(2), progress_policy()),
+        Some(NvstFrameProgressEvent::KeyframeRequested { .. })
+    ));
+    assert_eq!(
+        receiver.poll_timeout(received + Duration::from_secs(8) - Duration::from_nanos(1)),
+        None
+    );
+    assert_eq!(
+        receiver.poll_timeout(received + Duration::from_secs(8)),
+        Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout {
+            idle_for: Duration::from_secs(8)
+        }))
     );
 }

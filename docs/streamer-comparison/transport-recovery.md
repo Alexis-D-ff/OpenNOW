@@ -53,7 +53,9 @@ Prepared-session video startup waits for the existing PLAY-completion signal.
 The bundle records that signal in the feedback state shared with dedicated
 Mjolnir, so the first-video budget begins at PLAY rather than worker creation.
 Early authenticated partial video does not start a frame-progress deadline before
-PLAY. Sessions without the PLAY gate retain their immediate startup deadline.
+PLAY or consume the first-video allowance. Only the first authenticated video
+packet after PLAY starts the idle and frame-progress budgets. Sessions without
+the PLAY gate retain their immediate startup deadline.
 The core's bounded PLAY gate still owns failure when PLAY never completes and
 stops both workers on startup failure.
 

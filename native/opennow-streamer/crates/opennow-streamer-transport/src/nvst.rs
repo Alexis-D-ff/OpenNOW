@@ -4460,7 +4460,7 @@ impl NvstVideoReceiver {
         now: Instant,
         policy: NvstFrameProgressPolicy,
     ) -> Option<NvstFrameProgressEvent> {
-        if self.state != NvstReceiverState::Running {
+        if self.state != NvstReceiverState::Running || self.initial_timeout_pending {
             return None;
         }
         let assembled_at = self.config.feedback().last_assembled_frame_at();
@@ -4566,8 +4566,11 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(packet.header.ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
-        self.frame_progress.authenticated(now);
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+            self.frame_progress.authenticated(now);
+        }
         self.frame_invalidation
             .poll_backstop(now, RFI_BACKSTOP_TIMEOUT, &self.config.feedback);
         self.authenticated_packets += 1;
@@ -4824,7 +4827,10 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+        }
         // The bundle path cannot assemble video: the Mjolnir frame metadata lives
         // in the `0x4753` RTP extension, which str0m does not surface. The official
         // cloud path delivers video exclusively on the raw Mjolnir socket, so bundle
