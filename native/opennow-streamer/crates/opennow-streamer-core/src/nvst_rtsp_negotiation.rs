@@ -252,4 +252,53 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn mic_describe_handoff_reaches_the_live_transport_parser() {
+        use opennow_streamer_transport::{NvstConfigError, NvstVideoConfig};
+
+        let mut handoff = json!({
+            "clientUdpPort":49005,"videoPeerIp":"192.0.2.1","videoPeerPort":5004,
+            "srtpAesKeyHex":"01".repeat(32),"srtpSaltHex":"02".repeat(12),"codec":"H264",
+            "microphoneOnBundle":true,"pingVersion":6,
+            "localIceUsernameFragment":"loc1","localIcePassword":"local-password-value-01",
+            "remoteIceUsernameFragment":"remote01","remoteIcePassword":"remote-password-value-01",
+            "remoteDtlsFingerprint":"AA:BB"
+        });
+        microphone_handoff("a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=mic 5002 RTP/AVP 113 114\r\na=rtpmap:113 opus/48000/1\r\na=rtpmap:114 red/48000/1\r\n", &mut handoff).unwrap();
+        assert_eq!(handoff["microphoneOpusPayloadType"], 113);
+        assert_eq!(handoff["microphoneRedPayloadType"], 114);
+        assert_eq!(handoff["microphoneRedundancyLevel"], 3);
+        assert!(
+            NvstVideoConfig::from_legacy_handoff(&handoff, None)
+                .unwrap()
+                .microphone_available()
+        );
+
+        for (field, invalid) in [
+            ("microphoneOpusPayloadType", 78),
+            ("microphoneRedPayloadType", 128),
+            ("microphoneRedPayloadType", 113),
+            ("microphoneRedundancyLevel", 4),
+        ] {
+            let mut invalid_handoff = handoff.clone();
+            invalid_handoff[field] = json!(invalid);
+            assert!(
+                matches!(NvstVideoConfig::from_legacy_handoff(&invalid_handoff, None),
+                Err(NvstConfigError::OutOfRange {field: rejected}) if rejected == field),
+                "the live transport parser must consume and validate {field}"
+            );
+        }
+        microphone_handoff(
+            "a=x-nv-aqos.enableRedundancyForMic:0\r\na=x-nv-aqos.redundancyLevelForMic:3\r\n",
+            &mut handoff,
+        )
+        .unwrap();
+        assert_eq!(handoff["microphoneRedundancyLevel"], 0);
+        assert!(
+            NvstVideoConfig::from_legacy_handoff(&handoff, None)
+                .unwrap()
+                .microphone_available()
+        );
+    }
 }
