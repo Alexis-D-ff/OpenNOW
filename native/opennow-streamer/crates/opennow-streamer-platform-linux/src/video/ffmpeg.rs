@@ -382,7 +382,7 @@ impl FfmpegDecoder {
             }
             return Ok(output);
         }
-        let metadata = decoded_metadata(decoded, self.negotiated_format)?;
+        let metadata = decoded_metadata(decoded, self.negotiated_format);
         #[cfg(feature = "vulkan")]
         if let Some(device) = self.shared_device.as_ref() {
             if decoded.format() != Pixel::VULKAN {
@@ -1064,7 +1064,7 @@ fn retain_request_frame(
             ));
         }
     }
-    let metadata = decoded_metadata(decoded, metadata)?;
+    let metadata = decoded_metadata(decoded, metadata);
     validate_request_profile(VideoCodec::H265, metadata)?;
     let mut retained = frame::Video::empty();
     let result = unsafe { ffi::av_frame_ref(retained.as_mut_ptr(), decoded.as_ptr()) };
@@ -1398,10 +1398,11 @@ fn vaapi_cpu_transfer_allowed(mode: FfmpegMode, metadata: StreamFormat, pixel: P
     mode == FfmpegMode::Vaapi && cpu_conversion_allowed(metadata, pixel)
 }
 
-fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<StreamFormat> {
+/// Mirrors GFN's VideoToolbox path, which classifies an unrecognized matrix as unknown and
+/// renders it with the default table instead of failing decode: metadata this presenter cannot
+/// represent falls back to the negotiated value and is reported once per field.
+fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> StreamFormat {
     use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic as Transfer};
-    let unsupported =
-        || Error::unavailable(Subsystem::Ffmpeg, "unsupported decoded color metadata");
     let color_range = match frame.color_range() {
         Range::Unspecified => defaults.color_range,
         Range::JPEG => ColorRange::Full,
@@ -1412,7 +1413,7 @@ fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<Stre
         Space::BT709 => ColorMatrix::Bt709,
         Space::BT470BG | Space::SMPTE170M => ColorMatrix::Bt601,
         Space::BT2020NCL => ColorMatrix::Bt2020,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(0, "matrix", other, defaults.color_matrix),
     };
     let color_transfer = match frame.color_transfer_characteristic() {
         Transfer::Unspecified => defaults.color_transfer,
@@ -1423,28 +1424,44 @@ fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<Stre
         | Transfer::IEC61966_2_1
         | Transfer::BT2020_10
         | Transfer::BT2020_12 => ColorTransfer::Sdr,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(1, "transfer", other, defaults.color_transfer),
     };
     let color_primaries = match frame.color_primaries() {
         Primaries::Unspecified => defaults.color_primaries,
         Primaries::BT709 => ColorPrimaries::Bt709,
         Primaries::BT2020 => ColorPrimaries::Bt2020,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(2, "primaries", other, defaults.color_primaries),
     };
     let chroma_location = match frame.chroma_location() {
         ffmpeg::chroma::Location::Unspecified => defaults.chroma_location,
         ffmpeg::chroma::Location::Center => ChromaLocation::Center,
-        ffmpeg::chroma::Location::Left => ChromaLocation::Left,
-        _ => return Err(unsupported()),
+        ffmpeg::chroma::Location::Left | ffmpeg::chroma::Location::TopLeft => ChromaLocation::Left,
+        other => unsupported_color_metadata(3, "chroma location", other, defaults.chroma_location),
     };
-    Ok(StreamFormat {
+    StreamFormat {
         color_range,
         color_matrix,
         color_transfer,
         color_primaries,
         chroma_location,
         ..defaults
-    })
+    }
+}
+
+fn unsupported_color_metadata<T: std::fmt::Debug>(
+    field_bit: u32,
+    field: &str,
+    value: impl std::fmt::Debug,
+    fallback: T,
+) -> T {
+    static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let bit = 1 << field_bit;
+    if REPORTED.fetch_or(bit, std::sync::atomic::Ordering::Relaxed) & bit == 0 {
+        eprintln!(
+            "decoded color {field} {value:?} is not presentable; using negotiated {fallback:?}"
+        );
+    }
+    fallback
 }
 
 #[cfg(test)]
@@ -1787,12 +1804,12 @@ mod tests {
             ..StreamFormat::video_default(1920, 1080).unwrap()
         };
         let mut frame = frame::Video::new(Pixel::P010LE, 2, 2);
-        assert_eq!(decoded_metadata(&frame, defaults).unwrap(), defaults);
+        assert_eq!(decoded_metadata(&frame, defaults), defaults);
         frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
         frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
         frame.set_color_space(ffmpeg::color::Space::BT709);
         frame.set_color_range(ffmpeg::color::Range::MPEG);
-        let metadata = decoded_metadata(&frame, defaults).unwrap();
+        let metadata = decoded_metadata(&frame, defaults);
         assert_eq!(metadata.color_transfer, ColorTransfer::Sdr);
         assert_eq!(metadata.color_primaries, ColorPrimaries::Bt709);
         assert_eq!(metadata.color_matrix, ColorMatrix::Bt709);
@@ -1801,16 +1818,31 @@ mod tests {
             .set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::ARIB_STD_B67);
         frame.set_color_primaries(ffmpeg::color::Primaries::BT2020);
         assert_eq!(
-            decoded_metadata(&frame, defaults).unwrap().color_transfer,
+            decoded_metadata(&frame, defaults).color_transfer,
             ColorTransfer::Hlg
         );
         frame.set_color_space(ffmpeg::color::Space::BT2020CL);
-        assert!(decoded_metadata(&frame, defaults).is_err());
+        assert_eq!(
+            decoded_metadata(&frame, defaults).color_matrix,
+            defaults.color_matrix
+        );
         frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
         unsafe {
             (*frame.as_mut_ptr()).chroma_location = ffmpeg::chroma::Location::TopLeft.into();
         }
-        assert!(decoded_metadata(&frame, defaults).is_err());
+        assert_eq!(
+            decoded_metadata(&frame, defaults).chroma_location,
+            ChromaLocation::Left
+        );
+        unsafe {
+            (*frame.as_mut_ptr()).chroma_location = ffmpeg::chroma::Location::Bottom.into();
+        }
+        frame.set_color_primaries(ffmpeg::color::Primaries::SMPTE432);
+        frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::Linear);
+        let metadata = decoded_metadata(&frame, defaults);
+        assert_eq!(metadata.chroma_location, defaults.chroma_location);
+        assert_eq!(metadata.color_primaries, defaults.color_primaries);
+        assert_eq!(metadata.color_transfer, defaults.color_transfer);
     }
 
     #[test]
