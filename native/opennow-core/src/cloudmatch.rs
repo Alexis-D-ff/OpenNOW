@@ -1724,8 +1724,6 @@ fn build_create_body(app_id: &str, params: &Value, settings: &Value, device_id: 
     }});
     if settings["allianceWebrtcCompatibility"] == true {
         let request = &mut body["sessionRequestData"];
-        request["requestedStreamingFeatures"]["bitDepth"] =
-            json!(if bit_depth == 1 { 10 } else { 0 });
         request["sdkVersion"] = json!("1.0");
         request["streamerVersion"] = json!(1);
         request["enhancedStreamMode"] = json!(1);
@@ -3990,6 +3988,25 @@ mod tests {
     }
 
     #[test]
+    fn allocation_uses_cloudmatch_bit_depth_enum_for_both_transports() {
+        let mut auth = conflict_auth();
+        auth.provider.code = "YES".into();
+        for mode in ["auto", "on", "off"] {
+            for (color, bit_depth) in [("8bit_420", 0), ("10bit_420", 1)] {
+                let requested = json!({"webrtcCompatibilityMode":mode,"codec":"h265",
+                    "colorQuality":color,"resolution":"1920x1200","fps":60});
+                let settings = allocation_settings(&requested, &auth);
+                let body = build_create_body("123", &json!({}), &settings, "device");
+                assert_eq!(
+                    body["sessionRequestData"]["requestedStreamingFeatures"]["bitDepth"], bit_depth,
+                    "{mode} {color}"
+                );
+                assert_eq!(settings["colorQuality"], color);
+            }
+        }
+    }
+
+    #[test]
     fn webrtc_hevc_allocation_preserves_requested_output() {
         let mut auth = conflict_auth();
         auth.provider.code = "YES".into();
@@ -4014,7 +4031,7 @@ mod tests {
                 );
                 assert_eq!(
                     request["requestedStreamingFeatures"]["bitDepth"],
-                    if color == "10bit_420" { 10 } else { 0 }
+                    if color == "10bit_420" { 1 } else { 0 }
                 );
                 assert_eq!(request["requestedStreamingFeatures"]["chromaFormat"], 0);
                 assert_eq!(request["requestedStreamingFeatures"]["trueHdr"], false);
