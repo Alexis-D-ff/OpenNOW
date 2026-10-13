@@ -15,6 +15,12 @@ FocusScope {
     Rectangle { anchors.fill: parent; color: "black"; z: -1 }
 
     readonly property var session: ShellStore.activeSession || ({})
+    readonly property string sessionId: String(session.sessionId || "")
+    property string clipboardPasteMessage: ""
+    onSessionIdChanged: {
+        clipboardPasteMessage = ""
+        if (clipboardPasteNotice) clipboardPasteNotice.stop()
+    }
     readonly property var profile: session.negotiatedStreamProfile || session.streamProfile || ({})
     readonly property var streamer: ShellStore.streamer || ({})
     readonly property string status: {
@@ -108,16 +114,31 @@ FocusScope {
         upscalingDenoise: Number(ShellStore.settings.upscalingDenoise ?? 0)
         z: 0
         onLocalShortcutRequested: action => ShellStore.applyStreamShortcutAction(action)
-        onClipboardPasteFailed: clipboardPasteNotice.restart()
+        onClipboardPasteFailed: {
+            root.clipboardPasteMessage = ""
+            clipboardPasteNotice.restart()
+        }
     }
 
-    Timer { id: clipboardPasteNotice; interval: 5000 }
+    Timer {
+        id: clipboardPasteNotice
+        objectName: "streamClipboardPasteNoticeTimer"
+        interval: 5000
+        onTriggered: root.clipboardPasteMessage = ""
+    }
+
+    StreamIdleWarning {
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        z: 5
+    }
 
     StreamInputNotice {
         layer.enabled: HdrOutput.chromeRequired
         layer.effect: HdrChromeEffect {}
+        title: clipboardPasteNotice.running ? qsTr("Text input unavailable") : qsTr("Relative mouse input unavailable")
         message: !root.streaming ? "" : clipboardPasteNotice.running
-            ? qsTr("Clipboard paste failed. Use plain text up to 64 KiB and try again.")
+            ? root.clipboardPasteMessage || qsTr("Clipboard paste failed. Use plain text up to 64 KiB and try again.")
             : streamVideo.relativeMouse ? streamVideo.inputCaptureError : ""
         z: 3
     }
@@ -132,6 +153,10 @@ FocusScope {
         target: ShellStore
         function onPointerLockToggleRequested() {
             streamVideo.togglePointerLock()
+        }
+        function onTextInputErrorAnnounced(message) {
+            root.clipboardPasteMessage = message
+            clipboardPasteNotice.restart()
         }
     }
 

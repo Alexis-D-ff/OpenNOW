@@ -258,6 +258,7 @@ qt_add_qml_module(opennow-qt
         qml/components/ScreenBackground.qml
         qml/components/SettingRow.qml
         qml/components/StreamCaptureStatus.qml
+        qml/components/StreamIdleWarning.qml
         qml/components/StreamInputNotice.qml
         qml/components/TogglePill.qml
         qml/components/TenBitWarningDialog.qml

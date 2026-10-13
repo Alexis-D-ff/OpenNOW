@@ -62,6 +62,26 @@ Do not commit raw official traces; they contain ICE credentials and session data
 10. `nvst-input input-unavailable`: the fixed reason string (channel closed,
     handshake timeout, input or HID delivery failure). Reasons are compile-time
     constants, never server text.
+    Temporary gameplay write rejection keeps the stream running. Discrete input
+    remains ordered in a pending encoded queue bounded to 256 messages and 64 KiB;
+    motion can drop rather than accumulate behind it. Accepted messages are removed
+    individually, so a partially written batch never replays its accepted prefix.
+    Queue exhaustion, malformed discrete input, and a closed input transport still
+    stop the session to prevent stuck input. HID retirement and shutdown retain
+    their dedicated teardown reservation and failure policy.
+    Core input-readiness races retain the oldest captured sample for retry rather
+    than restarting media. Successful meaningful wire input clears an active idle
+    warning once; rejected writes, heartbeat packets, and empty encoder output do
+    not clear it.
+    One single-flight paste also waits in this ordered FIFO, bounded to 64 KiB
+    of UTF-8 plus at most 128 KiB of encoded packets. Pending text messages/bytes
+    appear separately in the periodic counters. Cancellation discards unsent text
+    only; later key releases still follow their presses. A duplicate paste is
+    rejected with nonterminal `text-input-error` retry feedback, not silently
+    dropped or recorded as a stream failure.
+    The 10-second `nvst-input` snapshot reports `pendingMessages`, `pendingBytes`,
+    and saturating `deferredWrites` and `droppedMotion` counters without logging
+    each temporary rejection.
 11. `transport nvst-transport-stopped`: the error message carries the worker's
     typed stop cause (`cause=socket operation=<leg-operation> kind=<ErrorKind>
     os_code=<n>`, `cause=webrtc operation=<poll-output|timer|receive>

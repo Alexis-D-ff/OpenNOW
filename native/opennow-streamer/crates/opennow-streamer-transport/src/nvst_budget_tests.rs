@@ -11,8 +11,8 @@ use crate::nvst_budget::{
     admit_write,
 };
 use crate::nvst_input::{
-    NvstEncodedInput, NvstInputRoute, SonyDeviceControl, sony_device_change_command,
-    sony_report_command,
+    NvstEncodedInput, NvstInputRoute, NvstInputWrite, SonyDeviceControl,
+    sony_device_change_command, sony_report_command,
 };
 
 fn exchange(local: &mut Rtc, remote: &mut Rtc, now: Instant) {
@@ -99,6 +99,99 @@ fn sony_teardown_commands() -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn encoded_input_classifies_open_full_and_closed_channels() {
+    let (mut local, _remote, channels, _) = connect_bundle_pair();
+    let message = NvstEncodedInput {
+        route: NvstInputRoute::ControlReliable,
+        bytes: vec![1; 64],
+        meaningful: true,
+    };
+    assert_eq!(
+        channels.send_encoded(&mut local, &message),
+        NvstInputWrite::Sent
+    );
+    while channels.send_control(&mut local, &[1; 1024]) {}
+    assert_eq!(
+        channels.send_encoded(
+            &mut local,
+            &NvstEncodedInput {
+                route: NvstInputRoute::ControlReliable,
+                bytes: vec![1; 1024],
+                meaningful: true,
+            }
+        ),
+        NvstInputWrite::Deferred,
+    );
+    local.disconnect();
+    assert_eq!(
+        channels.send_encoded(&mut local, &message),
+        NvstInputWrite::Closed
+    );
+    let mut unestablished = Rtc::new(Instant::now());
+    let unopened = NvstInputChannels::create(&mut unestablished, true);
+    assert_eq!(
+        unopened.send_encoded(&mut unestablished, &message),
+        NvstInputWrite::Closed
+    );
+}
+
+#[test]
+fn input_readiness_races_defer_without_writing_but_dead_channels_are_closed() {
+    let message = NvstEncodedInput {
+        route: NvstInputRoute::ControlReliable,
+        bytes: vec![1; 64],
+        meaningful: true,
+    };
+    let mut waiting = Rtc::new(Instant::now());
+    assert_eq!(
+        classify_nvst_unready_input(&mut waiting, None, &message),
+        NvstInputWrite::Deferred
+    );
+    let (mut local, _remote, channels, _) = connect_bundle_pair();
+    let buffered = channels.buffered_total(&mut local);
+    assert_eq!(
+        classify_nvst_unready_input(&mut local, Some(channels), &message),
+        NvstInputWrite::Deferred
+    );
+    assert_eq!(channels.buffered_total(&mut local), buffered);
+    local.disconnect();
+    assert_eq!(
+        classify_nvst_unready_input(&mut local, Some(channels), &message),
+        NvstInputWrite::Closed
+    );
+    waiting.disconnect();
+    assert_eq!(
+        classify_nvst_unready_input(&mut waiting, None, &message),
+        NvstInputWrite::Closed
+    );
+}
+
+#[test]
+fn typed_unicode_wire_success_clears_idle_warning_but_cancelled_text_does_not() {
+    let (mut local, _remote, channels, _) = connect_bundle_pair();
+    let slot = opennow_streamer_protocol::text_input::TextInputSlot::default();
+    let text = slot.submit("é世界".as_bytes()).unwrap();
+    let warning = AtomicBool::new(true);
+    let (events, received) = mpsc::channel();
+    let mut delivery = NvstInputDelivery::default();
+    delivery.submit_text(text.clone(), 1, |message| {
+        let outcome = channels.send_encoded(&mut local, message);
+        report_nvst_user_input(message, outcome, &warning, &events);
+        outcome
+    }).unwrap();
+    assert!(!warning.load(Ordering::Acquire));
+    assert!(matches!(
+        received.try_recv().unwrap(),
+        NvstReceiveEvent::UserInput
+    ));
+    assert!(received.try_recv().is_err());
+    warning.store(true, Ordering::Release);
+    slot.cancel();
+    delivery.submit_text(text.clone(), 1, |_| panic!("cancelled text must not write")).unwrap();
+    assert!(warning.load(Ordering::Acquire));
+}
+
+#[test]
 fn teardown_budget_covers_the_admitted_sony_bounds_with_full_framing() {
     let commands = sony_teardown_commands();
     assert_eq!(commands.len(), 8);
@@ -140,14 +233,16 @@ fn actual_writers_reserve_teardown_capacity_under_a_normal_flood() {
         !channels.send_control(&mut local, &report_command),
         "a normal write must not spend the teardown reservation"
     );
-    assert!(
-        !channels.send_encoded(
+    assert_eq!(
+        channels.send_encoded(
             &mut local,
             &NvstEncodedInput {
                 route: NvstInputRoute::ControlReliable,
                 bytes: vec![0_u8; report_command.len()],
+                meaningful: true,
             }
         ),
+        NvstInputWrite::Deferred,
         "reliable encoded input must be normal traffic"
     );
 
@@ -230,7 +325,10 @@ fn the_text_guard_still_rejects_a_batch_that_the_shared_budget_cannot_hold() {
     );
 }
 
-fn sony_review_runtime(incarnation: u64, server_mask: u32) -> (HidRuntime, HidSession, NvstInputCodec) {
+fn sony_review_runtime(
+    incarnation: u64,
+    server_mask: u32,
+) -> (HidRuntime, HidSession, NvstInputCodec) {
     let runtime = HidRuntime::new();
     let claim = opennow_streamer_hid::SdlDeviceClaim::new(0, incarnation, 0x054c, 0x05c4).unwrap();
     runtime.replace_inventory(&[Some(claim)]);
@@ -528,9 +626,7 @@ fn sony_rich_reports_reach_the_receiving_peer_after_admission() {
         .find(|payload| payload.len() == 76)
         .expect("the peer must receive the live Sony report");
     assert_eq!(report[report.len() - 64], 0x01);
-    let buttons = u16::from_le_bytes([
-        report[report.len() - 64 + 5],
-        report[report.len() - 64 + 6],
-    ]);
+    let buttons =
+        u16::from_le_bytes([report[report.len() - 64 + 5], report[report.len() - 64 + 6]]);
     assert_eq!(buttons & 0x20, 0x20);
 }

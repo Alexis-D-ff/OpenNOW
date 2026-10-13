@@ -4,6 +4,7 @@ Rectangle {
     id: root
     objectName: "streamInputCaptureNotice"
     property string message: ""
+    property string title: qsTr("Relative mouse input unavailable")
     visible: message.length > 0
     anchors.horizontalCenter: parent.horizontalCenter
     anchors.bottom: parent.bottom
@@ -28,7 +29,7 @@ Rectangle {
         Text {
             id: heading
             width: parent.width
-            text: qsTr("Relative mouse input unavailable")
+            text: root.title
             font.pixelSize: 17
             font.weight: Font.DemiBold
             color: "#FFE0A6"

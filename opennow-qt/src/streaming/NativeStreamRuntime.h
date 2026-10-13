@@ -161,6 +161,7 @@ signals:
     void lastErrorChanged();
     void responseReceived(const QJsonObject &response);
     void eventReceived(const QJsonObject &event);
+    void sessionTimerReceived(quint8 timerType, quint32 secondsLeft, bool active);
     void frameAvailable();
     void decodedDisplaySizeChanged(const QSize &size, quint64 generation);
     void cursorUpdated(const QByteArray &bytes);

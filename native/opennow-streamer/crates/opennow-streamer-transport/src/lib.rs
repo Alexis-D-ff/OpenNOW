@@ -14,15 +14,18 @@ mod nvst_control;
 mod nvst_cursor;
 mod nvst_haptics;
 mod nvst_input;
+mod nvst_input_delivery;
 mod nvst_invalidation;
 mod nvst_microphone;
 mod nvst_network;
 mod nvst_recovery_policy;
+mod nvst_server_control;
 pub mod webrtc;
 
 pub use frame_stage_timing::{FrameStageTimings, StageSummary};
 pub use nvst_haptics::{NvstControllerRumble, NvstHaptics};
 pub use nvst_recovery_policy::NvstRecoveryPolicy;
+pub use nvst_server_control::{NvstServerTermination, NvstSessionTimer};
 
 pub use nvst::{
     BoundedFrameQueue, EncodedVideoAccessUnit, NvstBundleIdentity, NvstConfigError, NvstDropReason,
