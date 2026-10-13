@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::nvst_audio_jitter::{AudioJitterBuffer, AudioPacket};
 use aes::cipher::{BlockEncrypt, KeyIvInit, StreamCipher};
 use aes::{Aes128, Aes256};
 use crc32fast::hash as crc32;
@@ -27,7 +28,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-use super::nvst_microphone::{MICROPHONE_QUEUE_CAPACITY, MicrophoneQueue};
+use super::nvst_microphone::{
+    MICROPHONE_QUEUE_CAPACITY, MicrophonePacketizer, MicrophoneQueue, MicrophoneRtpConfig,
+};
 use super::nvst_network::is_vpn_interface;
 use str0m::channel::ChannelId;
 use str0m::config::Fingerprint;
@@ -1315,6 +1318,7 @@ pub struct NvstVideoConfig {
     codec: NvstVideoCodec,
     audio_track: Option<NvstAudioTrack>,
     microphone_available: bool,
+    microphone_rtp: MicrophoneRtpConfig,
     expected_payload_type: Option<u8>,
     expected_ssrc: Option<u32>,
     reorder_window_packets: usize,
@@ -1723,6 +1727,33 @@ impl NvstVideoConfig {
             == Some(true)
             && remote_dtls_fingerprint.is_some()
             && stun_credentials.is_some();
+        let microphone_rtp = MicrophoneRtpConfig {
+            opus_payload_type: optional_u8(object, "microphoneOpusPayloadType")?
+                .unwrap_or(GFN_OPUS_PAYLOAD_TYPE),
+            red_payload_type: optional_u8(object, "microphoneRedPayloadType")?,
+            redundancy_level: optional_u8(object, "microphoneRedundancyLevel")?.unwrap_or(0),
+        };
+        for (field, payload_type) in [
+            (
+                "microphoneOpusPayloadType",
+                Some(microphone_rtp.opus_payload_type),
+            ),
+            ("microphoneRedPayloadType", microphone_rtp.red_payload_type),
+        ] {
+            if payload_type.is_some_and(|pt| pt > 127 || (64..=95).contains(&pt)) {
+                return Err(NvstConfigError::OutOfRange { field });
+            }
+        }
+        if microphone_rtp.redundancy_level > 3 {
+            return Err(NvstConfigError::OutOfRange {
+                field: "microphoneRedundancyLevel",
+            });
+        }
+        if microphone_rtp.red_payload_type == Some(microphone_rtp.opus_payload_type) {
+            return Err(NvstConfigError::OutOfRange {
+                field: "microphoneRedPayloadType",
+            });
+        }
         Ok(Self {
             client_udp_port,
             video_peer: SocketAddr::new(peer_ip, video_peer_port),
@@ -1744,6 +1775,7 @@ impl NvstVideoConfig {
             codec,
             audio_track,
             microphone_available,
+            microphone_rtp,
             expected_payload_type,
             expected_ssrc,
             reorder_window_packets,
@@ -6175,6 +6207,21 @@ fn prepare_nvst_webrtc_bundle(
             api.declare_media(Mid::from(audio.mid.as_str()), MediaKind::Audio);
         }
         if config.microphone_available() {
+            for payload_type in [
+                Some(config.microphone_rtp.opus_payload_type),
+                config.microphone_rtp.red_payload_type,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                api.register_payload_type(
+                    payload_type.into(),
+                    Codec::Opus,
+                    Frequency::FORTY_EIGHT_KHZ,
+                    Some(1),
+                    FormatParams::default(),
+                );
+            }
             api.declare_media(Mid::from("2"), MediaKind::Audio);
             api.declare_stream_tx(Ssrc::from(1), None, Mid::from("2"), None);
         }
@@ -6709,6 +6756,7 @@ fn run_nvst_webrtc_bundle(
     let stun_credentials = config.stun_credentials.clone();
     let feedback = config.feedback();
     let audio_track = config.audio_track().cloned();
+    let mut microphone_packetizer = MicrophonePacketizer::new(config.microphone_rtp);
     let frame_time_us = config.frame_time_us;
     // With a dedicated Mjolnir video socket the bundle only carries
     // control/audio keepalive traffic; the Mjolnir receiver owns the media
@@ -6776,6 +6824,10 @@ fn run_nvst_webrtc_bundle(
     let mut upstream_allowed = upstream_ready.is_none();
     let mut pending_input_version = None;
     let mut audio_receiver = NvstAudioReceiver::default();
+    let mut audio_jitter = audio_track
+        .as_ref()
+        .map(|track| AudioJitterBuffer::new(track.clock_rate_hz));
+    let mut last_audio_jitter_log = Instant::now();
     let mut liveness = BundleLiveness::default();
     'bundle: loop {
         let now = Instant::now();
@@ -7300,17 +7352,21 @@ fn run_nvst_webrtc_bundle(
         if upstream_allowed && microphone_generation != microphone_queue.generation {
             microphone_generation = microphone_queue.generation;
             rtc.direct_api().remove_stream_tx(Ssrc::from(1));
+            microphone_packetizer.clear();
         }
         if upstream_allowed && dtls_ready {
             while let Some(frame) = microphone_queue.pop(Instant::now()) {
+                let timestamp = frame.timestamp;
+                let queued_at = frame.queued_at;
+                let (payload_type, payload) = microphone_packetizer.packetize(frame);
                 rtc.direct_api()
                     .declare_stream_tx(Ssrc::from(1), None, Mid::from("2"), None)
                     .write_rtp(str0m::rtp::RtpWrite::new(
-                        GFN_OPUS_PAYLOAD_TYPE.into(),
+                        payload_type.into(),
                         microphone_sequence.into(),
-                        frame.timestamp,
-                        frame.queued_at,
-                        frame.payload,
+                        timestamp,
+                        queued_at,
+                        payload,
                     ));
                 microphone_sequence += 1;
             }
@@ -7560,40 +7616,21 @@ fn run_nvst_webrtc_bundle(
                         });
                         if is_audio {
                             audio_streams.authenticated(&mut rtc, *packet.header.ssrc);
-                            let audio = audio_track.as_ref().expect("audio track checked above");
                             let received_at_us = packet
                                 .timestamp
                                 .saturating_duration_since(transport_origin)
                                 .as_micros()
                                 .try_into()
                                 .unwrap_or(u64::MAX);
-                            let frames = match audio_receiver.depacketize(
-                                audio,
-                                &packet.header,
-                                packet.payload,
-                                received_at_us,
-                            ) {
-                                Ok(frames) => frames,
-                                Err(reason) => {
-                                    let _ = event_sender.send(NvstReceiveEvent::Dropped(reason));
-                                    continue;
-                                }
-                            };
-                            for frame in frames {
-                                match audio_receiver.deliver(&media_consumer, frame) {
-                                    Ok(()) | Err(TransportError::MediaConsumerBackpressured) => {}
-                                    Err(_) => {
-                                        let _ = event_sender.send(NvstReceiveEvent::Dropped(
-                                            NvstDropReason::MediaConsumerClosed,
-                                        ));
-                                        rtc.disconnect();
-                                        forward_optional(
-                                            &event_sender,
-                                            receiver.stop(NvstStopCause::MediaConsumerClosed),
-                                        );
-                                        break 'bundle;
-                                    }
-                                }
+                            if let Some(jitter) = audio_jitter.as_mut() {
+                                jitter.push(
+                                    AudioPacket {
+                                        header: packet.header,
+                                        payload: packet.payload,
+                                        received_at_us,
+                                    },
+                                    Instant::now(),
+                                );
                             }
                         } else {
                             let received_at = Instant::now();
@@ -7636,6 +7673,51 @@ fn run_nvst_webrtc_bundle(
         };
 
         drop(microphone_queue);
+        if let (Some(jitter), Some(track)) = (audio_jitter.as_mut(), audio_track.as_ref()) {
+            while let Some(packet) = jitter.pop(Instant::now()) {
+                let frames = match audio_receiver.depacketize(
+                    track,
+                    &packet.header,
+                    packet.payload,
+                    packet.received_at_us,
+                ) {
+                    Ok(frames) => frames,
+                    Err(reason) => {
+                        let _ = event_sender.send(NvstReceiveEvent::Dropped(reason));
+                        continue;
+                    }
+                };
+                for frame in frames {
+                    match audio_receiver.deliver(&media_consumer, frame) {
+                        Ok(()) | Err(TransportError::MediaConsumerBackpressured) => {}
+                        Err(_) => {
+                            let _ = event_sender.send(NvstReceiveEvent::Dropped(
+                                NvstDropReason::MediaConsumerClosed,
+                            ));
+                            rtc.disconnect();
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::MediaConsumerClosed),
+                            );
+                            break 'bundle;
+                        }
+                    }
+                }
+            }
+            if last_audio_jitter_log.elapsed() >= Duration::from_secs(1) {
+                opennow_streamer_protocol::log::log_async(
+                    "INFO",
+                    "audio-jitter",
+                    &format!(
+                        "target_ms={} queued={} stats={:?}",
+                        jitter.target_ms(),
+                        jitter.len(),
+                        jitter.stats
+                    ),
+                );
+                last_audio_jitter_log = Instant::now();
+            }
+        }
         let wait = timeout
             .saturating_duration_since(Instant::now())
             .min(CONTROL_RECEIVE_POLL_INTERVAL);
