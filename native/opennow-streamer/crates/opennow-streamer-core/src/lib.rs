@@ -1826,6 +1826,7 @@ fn forward_nvst_session_events<R: NvstSessionResources>(
         start_id: start_id.clone(),
         pending: None,
         pending_timer: None,
+        pending_text_error: None,
     };
     'session: loop {
         flush_control_output(output, lifecycle, generation, &mut pending_control_output);
@@ -2113,6 +2114,7 @@ struct NvstControlOutput {
     start_id: String,
     pending: Option<bool>,
     pending_timer: Option<opennow_streamer_transport::NvstSessionTimer>,
+    pending_text_error: Option<&'static str>,
 }
 
 fn flush_control_output(
@@ -2121,6 +2123,20 @@ fn flush_control_output(
     generation: u64,
     state: &mut NvstControlOutput,
 ) {
+    if let Some(reason) = state.pending_text_error {
+        let current = lock_lifecycle(lifecycle);
+        if current.generation != generation
+            || current.context.is_none()
+            || output
+                .send(event(
+                    "text-input-error",
+                    json!({"startId": state.start_id, "reason": reason}),
+                ))
+                .is_ok()
+        {
+            state.pending_text_error = None;
+        }
+    }
     if let Some(timer) = state.pending_timer {
         let current = lock_lifecycle(lifecycle);
         if current.generation != generation
@@ -2307,6 +2323,11 @@ fn forward_nvst_event<R: NvstSessionResources>(
                     seconds_left: 0,
                     active: false,
                 });
+            flush_control_output(output, lifecycle, generation, pending_control_output);
+            false
+        }
+        NvstReceiveEvent::TextRejected(reason) => {
+            pending_control_output.pending_text_error = Some(reason);
             flush_control_output(output, lifecycle, generation, pending_control_output);
             false
         }
@@ -5740,6 +5761,7 @@ mod tests {
             start_id: "cursor-setup".to_owned(),
             pending: Some(false),
             pending_timer: None,
+            pending_text_error: None,
         };
         sender.send(json!({ "type": "log" })).unwrap();
         flush_control_output(&sender, &lifecycle, 7, &mut state);
@@ -5769,6 +5791,7 @@ mod tests {
             start_id: "cursor-session".to_owned(),
             pending: None,
             pending_timer: None,
+            pending_text_error: None,
         };
         sender.send(json!({ "type": "log" })).unwrap();
         for composited in [true, false] {

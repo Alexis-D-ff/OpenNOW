@@ -827,6 +827,7 @@ QtObject {
     signal fullscreenToggleRequested()
     signal pointerLockToggleRequested()
     signal streamCaptureAnnounced(string message)
+    signal textInputErrorAnnounced(string message)
     signal consoleScreenshotRequested()
     readonly property var resumableSession: {
         if (root.activeSession) {
@@ -3404,6 +3405,12 @@ QtObject {
 
     function acceptNativeEvent(event) {
         const type = String(event && event.type || "")
+        if (type === "text-input-error") {
+            streamControlMessage = qsTr("Text input could not be delivered. Try pasting again.")
+            accessibilityMessage = streamControlMessage
+            textInputErrorAnnounced(streamControlMessage)
+            return
+        }
         if (event && event.event === "color-format-changed") {
             if (type === "log" && event.source === "decoder"
                     && typeof event.sessionId === "string" && event.sessionId !== "")
@@ -3474,7 +3481,7 @@ QtObject {
             fields.message = String(event.message || qsTr("Native media runtime failed"))
             fields.errorCode = String(event.code || "native_stream_error")
             fields.termination = event.termination || null
-            if (activeSession && !streamerStopExpected)
+            if (activeSession && !streamerStopExpected && !isRemoteSessionTermination(event.termination))
                 bugReports.reportStreamError(fields.errorCode, fields.message, "stream")
         } else if (type === "input-ready") {
             fields.inputReady = true

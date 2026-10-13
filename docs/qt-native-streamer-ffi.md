@@ -56,3 +56,14 @@ The evidence baseline is `reports/opennow-gfn-parity/audio-input-lifecycle.md`,
 rows L3 through L5, and Windows `transport-feedback.md`, section 8. Offline Qt
 callback, orchestration, and smoke tests cover delivery and passive composition;
 they do not connect to GFN or execute GFN binaries.
+
+## Text retry feedback
+
+`text-input-error` carries the current `startId` and a fixed `reason`, with no
+paste contents. C++ rejects stale generations before forwarding it through the
+existing `eventReceived` signal. ShellStore announces localized retry feedback,
+without changing streamer state, input ownership, error telemetry, or incidents.
+Desktop and console display it for five seconds in the existing passive input
+notice, including when the Guide is closed. The normal stream video item and
+gameplay focus remain unchanged. Temporary SCTP deferral queues one bounded paste
+behind older input; only rejected local paste admission needs this notice.

@@ -273,6 +273,16 @@ optional application `reason` and `extendedCode` in `termination`, use source
 Nonresumable server termination prevents automatic restart and resume. Unknown
 classification remains null and is reconciled against CloudMatch. The JSON protocol
 version is unchanged; the native library and Qt shell must be rebuilt together.
+Expected, authoritative server endings do not create stream-error incidents or
+session-error telemetry. Resumable, unknown, and local transport/decode failures
+retain their existing reporting.
+
+Deferred input also preserves the ordering of one bounded, cancellation-aware paste
+batch. Accepted prefixes are not replayed, later discrete input waits behind text,
+and cancellation removes only unsent text. Rejected paste admission emits
+`text-input-error` with `startId` and a fixed `reason`, through the existing ABI 13
+JSON callback. It is a nonterminal retry notice, not a stream failure; Qt discards
+stale generations and shows feedback over the current video item.
 
 After a decoder-stall recovery attempt, the native engine allows one further video-timeout
 interval for decoded output to resume. Output progress or a decoder-epoch change clears

@@ -73,6 +73,12 @@ Do not commit raw official traces; they contain ICE credentials and session data
     than restarting media. Successful meaningful wire input clears an active idle
     warning once; rejected writes, heartbeat packets, and empty encoder output do
     not clear it.
+    One single-flight paste also waits in this ordered FIFO, bounded to 64 KiB
+    of UTF-8 plus at most 128 KiB of encoded packets. Pending text messages/bytes
+    appear separately in the periodic counters. Cancellation discards unsent text
+    only; later key releases still follow their presses. A duplicate paste is
+    rejected with nonterminal `text-input-error` retry feedback, not silently
+    dropped or recorded as a stream failure.
     The 10-second `nvst-input` snapshot reports `pendingMessages`, `pendingBytes`,
     and saturating `deferredWrites` and `droppedMotion` counters without logging
     each temporary rejection.

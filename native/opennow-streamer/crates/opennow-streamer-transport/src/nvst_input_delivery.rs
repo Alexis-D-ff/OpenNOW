@@ -1,8 +1,10 @@
+use opennow_streamer_protocol::text_input::UnicodeText;
 use std::collections::VecDeque;
 
+use crate::nvst_budget::TEXT_BATCH_GUARD;
 use crate::nvst_input::{
     NvstEncodedInput, NvstInputCodec, NvstInputCodecError, NvstInputWrite,
-    native_input_type_is_motion, native_input_types,
+    native_input_type_is_motion, native_input_types, text_batch_fits, unicode_text_messages,
 };
 
 const PENDING_INPUT_MESSAGES: usize = 256;
@@ -108,11 +110,14 @@ mod tests {
     fn byte_capacity_rejects_a_batch_before_any_write() {
         let mut delivery = NvstInputDelivery::default();
         let mut codec = NvstInputCodec::default();
-        delivery.pending.push_back(NvstEncodedInput {
-            route: crate::nvst_input::NvstInputRoute::ControlReliable,
-            bytes: vec![0; PENDING_INPUT_BYTES - 1],
-            meaningful: false,
-        });
+        delivery
+            .pending
+            .push_back(PendingInput::Discrete(NvstEncodedInput {
+                route: crate::nvst_input::NvstInputRoute::ControlReliable,
+                bytes: vec![0; PENDING_INPUT_BYTES - 1],
+                meaningful: false,
+            }));
+        delivery.pending_messages = 1;
         delivery.pending_bytes = PENDING_INPUT_BYTES - 1;
         let mut writes = 0;
         assert!(matches!(
@@ -184,6 +189,8 @@ mod tests {
             NvstInputDeliverySnapshot {
                 pending_messages: 1,
                 pending_bytes: bytes,
+                pending_text_messages: 0,
+                pending_text_bytes: 0,
                 deferred_writes: 1,
                 dropped_motion: 0,
             }
@@ -198,6 +205,8 @@ mod tests {
             NvstInputDeliverySnapshot {
                 pending_messages: 1,
                 pending_bytes: bytes,
+                pending_text_messages: 0,
+                pending_text_bytes: 0,
                 deferred_writes: 2,
                 dropped_motion: 1,
             }
@@ -208,6 +217,8 @@ mod tests {
             NvstInputDeliverySnapshot {
                 pending_messages: 0,
                 pending_bytes: 0,
+                pending_text_messages: 0,
+                pending_text_bytes: 0,
                 deferred_writes: 2,
                 dropped_motion: 1,
             }
@@ -220,6 +231,8 @@ mod tests {
             NvstInputDeliverySnapshot {
                 pending_messages: 0,
                 pending_bytes: 0,
+                pending_text_messages: 0,
+                pending_text_bytes: 0,
                 deferred_writes: 3,
                 dropped_motion: 2,
             }
@@ -253,20 +266,203 @@ mod tests {
         assert_eq!(delivery.snapshot().deferred_writes, u64::MAX);
         assert_eq!(delivery.snapshot().dropped_motion, u64::MAX);
     }
+
+    #[test]
+    fn paste_waits_behind_deferred_press_and_before_subsequent_release() {
+        let mut delivery = NvstInputDelivery::default();
+        let mut codec = NvstInputCodec::default();
+        let slot = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        let text = slot.submit("café 世界".as_bytes()).unwrap();
+        let mut expected = codec.clone().encode(&key(true), 1).unwrap();
+        expected.extend(unicode_text_messages(&text, 2));
+        expected.extend(codec.clone().encode(&key(false), 3).unwrap());
+        delivery
+            .submit(&mut codec, &key(true), 1, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        delivery
+            .submit_text(text, 2, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        delivery
+            .submit(&mut codec, &key(false), 3, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        assert_eq!(delivery.snapshot().pending_messages, 2);
+        assert_eq!(delivery.snapshot().pending_text_messages, 1);
+        let mut sent = Vec::new();
+        delivery
+            .flush(|message| {
+                sent.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert_eq!(sent, expected);
+        assert!(delivery.is_empty());
+        assert_eq!(delivery.snapshot().pending_bytes, 0);
+        assert_eq!(delivery.snapshot().pending_text_bytes, 0);
+    }
+
+    #[test]
+    fn partial_paste_keeps_single_flight_reservation_and_never_replays_sent_prefix() {
+        let mut delivery = NvstInputDelivery::default();
+        let slot = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        let text = slot.submit("é世界🦫\r\n".repeat(400).as_bytes()).unwrap();
+        let expected = unicode_text_messages(&text, 7);
+        assert!(expected.len() > 2);
+        let mut sent = Vec::new();
+        delivery
+            .submit_text(text, 7, |message| {
+                if sent.is_empty() {
+                    sent.push(message.clone());
+                    NvstInputWrite::Sent
+                } else {
+                    NvstInputWrite::Deferred
+                }
+            })
+            .unwrap();
+        assert!(matches!(
+            slot.submit(b"next"),
+            Err(opennow_streamer_protocol::text_input::TextInputError::Busy)
+        ));
+        assert_eq!(
+            delivery.snapshot().pending_text_messages,
+            expected.len() - 1
+        );
+        delivery
+            .flush(|message| {
+                sent.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert_eq!(sent, expected);
+        assert_eq!(delivery.snapshot().pending_text_messages, 0);
+        assert!(slot.submit(b"next").is_ok());
+    }
+
+    #[test]
+    fn cancellation_discards_remaining_text_without_discarding_key_releases() {
+        let mut delivery = NvstInputDelivery::default();
+        let mut codec = NvstInputCodec::default();
+        let slot = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        let text = slot.submit(b"paste").unwrap();
+        let mut expected = codec.clone().encode(&key(true), 1).unwrap();
+        expected.extend(codec.clone().encode(&key(false), 3).unwrap());
+        delivery
+            .submit(&mut codec, &key(true), 1, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        delivery
+            .submit_text(text, 2, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        delivery
+            .submit(&mut codec, &key(false), 3, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        slot.cancel();
+        let mut sent = Vec::new();
+        delivery
+            .flush(|message| {
+                sent.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert_eq!(sent, expected);
+        assert_eq!(delivery.snapshot().pending_text_bytes, 0);
+        assert_eq!(delivery.snapshot().pending_text_messages, 0);
+        assert!(slot.submit(b"next").is_ok());
+    }
+
+    #[test]
+    fn maximum_paste_is_bounded_and_survives_a_full_sctp_normal_budget() {
+        let mut delivery = NvstInputDelivery::default();
+        let slot = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        let text = slot
+            .submit(&vec![
+                b'a';
+                opennow_streamer_protocol::text_input::MAX_TEXT_BYTES
+            ])
+            .unwrap();
+        let expected = unicode_text_messages(&text, 9);
+        let total: usize = expected.iter().map(|message| message.bytes.len()).sum();
+        assert!(total > crate::nvst_budget::NORMAL_BUDGET);
+        assert!(total <= TEXT_BATCH_GUARD);
+        delivery
+            .submit_text(text, 9, |_| NvstInputWrite::Deferred)
+            .unwrap();
+        assert_eq!(delivery.snapshot().pending_text_bytes, total);
+        let mut budget = crate::nvst_budget::NORMAL_BUDGET;
+        let mut sent = Vec::new();
+        delivery
+            .flush(|message| {
+                if message.bytes.len() > budget {
+                    return NvstInputWrite::Deferred;
+                }
+                budget -= message.bytes.len();
+                sent.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert!(!delivery.is_empty());
+        delivery
+            .flush(|message| {
+                sent.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert_eq!(sent, expected);
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn only_one_bounded_paste_batch_can_wait_at_a_time() {
+        let mut delivery = NvstInputDelivery::default();
+        let first = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        let second = opennow_streamer_protocol::text_input::TextInputSlot::default();
+        delivery
+            .submit_text(first.submit(b"first").unwrap(), 1, |_| {
+                NvstInputWrite::Deferred
+            })
+            .unwrap();
+        let snapshot = delivery.snapshot();
+        assert!(matches!(
+            delivery.submit_text(second.submit(b"second").unwrap(), 2, |_| {
+                NvstInputWrite::Deferred
+            }),
+            Err(NvstInputDeliveryError::Exhausted)
+        ));
+        assert_eq!(
+            delivery.snapshot().pending_text_messages,
+            snapshot.pending_text_messages
+        );
+        assert_eq!(
+            delivery.snapshot().pending_text_bytes,
+            snapshot.pending_text_bytes
+        );
+        assert!(second.submit(b"retry").is_ok());
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct NvstInputDelivery {
-    pending: VecDeque<NvstEncodedInput>,
+    pending: VecDeque<PendingInput>,
+    pending_messages: usize,
     pending_bytes: usize,
+    pending_text_messages: usize,
+    pending_text_bytes: usize,
     deferred_writes: u64,
     dropped_motion: u64,
+}
+
+enum PendingInput {
+    Discrete(NvstEncodedInput),
+    Text {
+        reservation: UnicodeText,
+        messages: VecDeque<NvstEncodedInput>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NvstInputDeliverySnapshot {
     pub(crate) pending_messages: usize,
     pub(crate) pending_bytes: usize,
+    pub(crate) pending_text_messages: usize,
+    pub(crate) pending_text_bytes: usize,
     pub(crate) deferred_writes: u64,
     pub(crate) dropped_motion: u64,
 }
@@ -274,8 +470,10 @@ pub(crate) struct NvstInputDeliverySnapshot {
 impl NvstInputDelivery {
     pub(crate) fn snapshot(&self) -> NvstInputDeliverySnapshot {
         NvstInputDeliverySnapshot {
-            pending_messages: self.pending.len(),
+            pending_messages: self.pending_messages,
             pending_bytes: self.pending_bytes,
+            pending_text_messages: self.pending_text_messages,
+            pending_text_bytes: self.pending_text_bytes,
             deferred_writes: self.deferred_writes,
             dropped_motion: self.dropped_motion,
         }
@@ -322,14 +520,43 @@ impl NvstInputDelivery {
             return Ok(());
         }
         let total_bytes: usize = messages.iter().map(|message| message.bytes.len()).sum();
-        if self.pending.len().saturating_add(messages.len()) > PENDING_INPUT_MESSAGES
+        if self.pending_messages.saturating_add(messages.len()) > PENDING_INPUT_MESSAGES
             || self.pending_bytes.saturating_add(total_bytes) > PENDING_INPUT_BYTES
         {
             *codec = previous_codec;
             return Err(NvstInputDeliveryError::Exhausted);
         }
         self.pending_bytes += total_bytes;
-        self.pending.extend(messages);
+        self.pending_messages += messages.len();
+        self.pending
+            .extend(messages.into_iter().map(PendingInput::Discrete));
+        self.flush(send)
+    }
+
+    pub(crate) fn submit_text(
+        &mut self,
+        text: UnicodeText,
+        timestamp_us: u64,
+        mut send: impl FnMut(&NvstEncodedInput) -> NvstInputWrite,
+    ) -> Result<(), NvstInputDeliveryError> {
+        self.flush(&mut send)?;
+        if text.is_cancelled() {
+            return Ok(());
+        }
+        if self.pending_text_messages != 0 {
+            return Err(NvstInputDeliveryError::Exhausted);
+        }
+        let messages = unicode_text_messages(&text, timestamp_us);
+        let bytes = messages.iter().map(|message| message.bytes.len()).sum();
+        if !text_batch_fits(0, bytes, TEXT_BATCH_GUARD) {
+            return Err(NvstInputDeliveryError::Exhausted);
+        }
+        self.pending_text_messages = messages.len();
+        self.pending_text_bytes = bytes;
+        self.pending.push_back(PendingInput::Text {
+            reservation: text,
+            messages: messages.into(),
+        });
         self.flush(send)
     }
 
@@ -337,12 +564,37 @@ impl NvstInputDelivery {
         &mut self,
         mut send: impl FnMut(&NvstEncodedInput) -> NvstInputWrite,
     ) -> Result<(), NvstInputDeliveryError> {
-        while let Some(message) = self.pending.front() {
-            match send(message) {
-                NvstInputWrite::Sent => {
-                    self.pending_bytes -= message.bytes.len();
-                    self.pending.pop_front();
+        while let Some(pending) = self.pending.front_mut() {
+            if let PendingInput::Text { reservation, .. } = pending
+                && reservation.is_cancelled()
+            {
+                self.pending_text_messages = 0;
+                self.pending_text_bytes = 0;
+                self.pending.pop_front();
+                continue;
+            }
+            let message = match pending {
+                PendingInput::Discrete(message) => message,
+                PendingInput::Text { messages, .. } => {
+                    messages.front().expect("pending text message")
                 }
+            };
+            match send(message) {
+                NvstInputWrite::Sent => match pending {
+                    PendingInput::Discrete(message) => {
+                        self.pending_bytes -= message.bytes.len();
+                        self.pending_messages -= 1;
+                        self.pending.pop_front();
+                    }
+                    PendingInput::Text { messages, .. } => {
+                        self.pending_text_bytes -=
+                            messages.pop_front().expect("sent text message").bytes.len();
+                        self.pending_text_messages -= 1;
+                        if messages.is_empty() {
+                            self.pending.pop_front();
+                        }
+                    }
+                },
                 NvstInputWrite::Deferred => {
                     self.deferred_writes = self.deferred_writes.saturating_add(1);
                     return Ok(());

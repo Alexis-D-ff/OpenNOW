@@ -310,7 +310,9 @@ int AcceptanceSession::startSmokeWorkload()
                 QTimer::singleShot(150, this, finish);
             }
         });
-    } else if (m_smokeTest && m_arguments.contains(u"--smoke-stream-idle-warning"_s)) {
+    } else if (m_smokeTest && (m_arguments.contains(u"--smoke-stream-idle-warning"_s)
+            || m_arguments.contains(u"--smoke-stream-text-input-error"_s))) {
+        const bool textInputError = m_arguments.contains(u"--smoke-stream-text-input-error"_s);
         auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
         auto *runtime = m_engine.rootContext()->contextProperty(u"NativeStreamRuntime"_s).value<QObject *>();
         auto *window = m_engine.rootObjects().isEmpty() ? nullptr
@@ -329,9 +331,10 @@ int AcceptanceSession::startSmokeWorkload()
             ? (m_arguments.contains(u"--desktop"_s) ? u"desktop-stream-stats"_s : u"stream-stats"_s)
             : QString{};
         m_controller.showOverlay(overlay);
-        QTimer::singleShot(250, this, [this, store, runtime, window, overlay] {
+        QTimer::singleShot(250, this, [this, store, runtime, window, overlay, textInputError] {
             auto *surface = window->findChild<QQuickItem *>(u"streamSurfaceHost"_s);
-            auto *notice = window->findChild<QQuickItem *>(u"streamIdleWarning"_s);
+            auto *notice = window->findChild<QQuickItem *>(textInputError
+                ? u"streamInputCaptureNotice"_s : u"streamIdleWarning"_s);
             if (!surface || !notice || !surface->isVisible()) {
                 m_application.exit(EXIT_FAILURE);
                 return;
@@ -339,22 +342,29 @@ int AcceptanceSession::startSmokeWorkload()
             const auto inputEnabled = surface->property("inputEnabled").toBool();
             const auto focus = window->activeFocusItem();
             const auto route = m_controller.route();
+            const auto previousNotice = notice->property("message").toString();
+            const auto textError = [store] {
+                const QVariant event = QVariantMap{{u"type"_s, u"text-input-error"_s},
+                    {u"reason"_s, u"paste-queue-full"_s}};
+                return QMetaObject::invokeMethod(store, "acceptNativeEvent", Q_ARG(QVariant, event));
+            };
             const auto timer = [runtime](quint8 type, quint32 seconds, bool active) {
                 return QMetaObject::invokeMethod(runtime, "sessionTimerReceived",
                     Q_ARG(quint8, type), Q_ARG(quint32, seconds), Q_ARG(bool, active));
             };
-            if (!timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true)) {
+            if (!(textInputError ? textError() : timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true))) {
                 m_application.exit(EXIT_FAILURE);
                 return;
             }
             QTimer::singleShot(150, this, [this, store, window, surface, notice, timer,
-                                          inputEnabled, focus, route, overlay] {
-                const auto stable = [&] {
+                                          inputEnabled, focus, route, overlay, textInputError, textError, previousNotice] {
+                const auto stable = [this, store, window, surface, inputEnabled, focus, route, overlay] {
                     return !m_qmlWarningOccurred && surface->isVisible()
                         && window->findChild<QQuickItem *>(u"streamSurfaceHost"_s) == surface
                         && surface->property("inputEnabled").toBool() == inputEnabled
                         && window->activeFocusItem() == focus && m_controller.route() == route
                         && m_controller.overlay() == overlay
+                        && store->property("streamState").toString() == u"streaming"_s
                         && store->property("streamerStartRequestId").toString() == u"idle-warning-fixture"_s;
                 };
                 bool passed = stable() && inputEnabled && focus == surface && notice->isVisible();
@@ -367,6 +377,45 @@ int AcceptanceSession::startSmokeWorkload()
                 if (shot >= 0 && shot + 1 < m_arguments.size())
                     passed = passed && QFileInfo(m_arguments.at(shot + 1)).isAbsolute()
                         && window->grabWindow().save(m_arguments.at(shot + 1));
+                if (textInputError) {
+                    const auto message = u"Text input could not be delivered. Try pasting again."_s;
+                    auto *noticeTimer = window->findChild<QObject *>(u"streamClipboardPasteNoticeTimer"_s);
+                    passed = passed && noticeTimer && noticeTimer->property("interval").toInt() == 5000
+                        && notice->property("message").toString() == message
+                        && notice->property("title").toString() == u"Text input unavailable"_s
+                        && QMetaObject::invokeMethod(surface, "clipboardPasteFailed")
+                        && notice->property("message").toString()
+                            == u"Clipboard paste failed. Use plain text up to 64 KiB and try again."_s
+                        && textError() && notice->property("message").toString() == message && stable();
+                    if (!passed) {
+                        qCritical("Text retry notice did not preserve synchronous copy or stream ownership");
+                        m_application.exit(EXIT_FAILURE);
+                        return;
+                    }
+                    auto *expiry = new QTimer(this);
+                    expiry->setInterval(50);
+                    connect(expiry, &QTimer::timeout, this,
+                            [this, store, notice, noticeTimer, stable, textError, previousNotice, expiry,
+                             deadline = QDeadlineTimer(7'500)] {
+                        if (noticeTimer->property("running").toBool() && !deadline.hasExpired()) return;
+                        expiry->stop();
+                        expiry->deleteLater();
+                        const bool expired = !noticeTimer->property("running").toBool();
+                        const bool streamStable = stable();
+                        const auto afterTimeout = notice->property("message").toString();
+                        bool passed = streamStable && expired && afterTimeout == previousNotice;
+                        passed = passed && textError() && notice->isVisible();
+                        store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"replacement-fixture"_s}});
+                        passed = passed && !noticeTimer->property("running").toBool()
+                            && notice->property("message").toString() == previousNotice;
+                        if (!passed) qCritical() << "Text retry notice did not expire or reset on session replacement"
+                            << "stable=" << streamStable << "expired=" << expired
+                            << "message=" << afterTimeout << "previous=" << previousNotice;
+                        m_application.exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
+                    });
+                    expiry->start();
+                    return;
+                }
                 notice->setProperty("warningNowMs", double(QDateTime::currentMSecsSinceEpoch() + 2'000));
                 passed = passed && notice->property("secondsLeft").toDouble() <= 58
                     && notice->property("secondsLeft").toDouble() > 0 && notice->isVisible() && stable();

@@ -113,6 +113,120 @@ class EmbeddedOrchestrationTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void rejectedTextInputNotifiesWithoutChangingStreamOwnership()
+    {
+        QJSEngine engine;
+        QVERIFY(!engine.evaluate(QStringLiteral(R"JS(
+            var activeSession={sessionId:'seat'}, streamer={status:'streaming',inputReady:true};
+            var originalSession=activeSession, originalStreamer=streamer;
+            var streamState='streaming', streamMessage='Playing', lastError='';
+            var streamControlMessage='', accessibilityMessage='', streamerStopExpected=false;
+            var desiredStreamInputPaused=false, streamInputStateKnown=true;
+            var updates=0, reports=0, telemetry=0, announced=[];
+            var bugReports={reportStreamError:function(){reports++;},observeTelemetry:function(){telemetry++;}};
+            function updateStreamerFields(fields) {updates++;}
+            function textInputErrorAnnounced(message) {announced.push(message);}
+            function qsTr(text) {return text;}
+        )JS")).isError());
+        QVERIFY(loadShellFunction(engine, QStringLiteral("acceptNativeEvent")));
+        const auto result = engine.evaluate(QStringLiteral(R"JS(
+            acceptNativeEvent({type:'text-input-error',reason:'paste-queue-full'});
+            streamControlMessage === 'Text input could not be delivered. Try pasting again.'
+                && accessibilityMessage === streamControlMessage && lastError === ''
+                && activeSession === originalSession && streamer === originalStreamer
+                && streamer.status === 'streaming' && streamer.inputReady && streamState === 'streaming'
+                && streamMessage === 'Playing' && !streamerStopExpected
+                && !desiredStreamInputPaused && streamInputStateKnown
+                && updates === 0 && reports === 0 && telemetry === 0
+                && announced.length === 1 && announced[0] === streamControlMessage;
+        )JS"));
+        QVERIFY2(!result.isError(), qPrintable(result.toString()));
+        QVERIFY(result.toBool());
+    }
+
+    void nativeErrorReportingExcludesAuthoritativeSessionEnds_data()
+    {
+        QTest::addColumn<QString>("termination");
+        QTest::addColumn<bool>("expectedReport");
+        QTest::newRow("idle-ended") << QStringLiteral(
+            "{source:'nvst-server',code:'server-terminated',wireCode:2147680291,reason:56,extendedCode:2147680263,resumable:false}") << false;
+        QTest::newRow("server-ended") << QStringLiteral(
+            "{source:'nvst-server',code:'server-terminated',resumable:false}") << false;
+        QTest::newRow("cloudmatch-ended") << QStringLiteral(
+            "{source:'cloudmatch-session-status',status:7,resumable:false}") << false;
+        QTest::newRow("server-resumable") << QStringLiteral(
+            "{source:'nvst-server',code:'server-terminated',resumable:true}") << true;
+        QTest::newRow("server-unknown") << QStringLiteral(
+            "{source:'nvst-server',code:'server-terminated',resumable:null}") << true;
+        QTest::newRow("transport-failed") << QStringLiteral(
+            "{source:'nvst-transport',resumable:null}") << true;
+        QTest::newRow("decoder-failed") << QStringLiteral("null") << true;
+    }
+
+    void textInputRetryUsesExistingPassiveNoticeOnBothSurfaces()
+    {
+        const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
+        QVERIFY(shell.contains(QStringLiteral("signal textInputErrorAnnounced(string message)")));
+        for (const auto &path : {"qml/desktop/stream/DesktopStreamScreen.qml", "qml/screens/StreamScreen.qml"}) {
+            const auto screen = source(QString::fromLatin1(path));
+            QCOMPARE(screen.count(QStringLiteral("StreamVideoItem {")), 1);
+            QCOMPARE(screen.count(QStringLiteral("StreamInputNotice {")), 1);
+            QVERIFY(screen.contains(QStringLiteral("function onTextInputErrorAnnounced(message)")));
+            QVERIFY(screen.contains(QStringLiteral("root.clipboardPasteMessage = message")));
+            QVERIFY(screen.contains(QStringLiteral("interval: 5000")));
+            QVERIFY(screen.contains(QStringLiteral("? root.clipboardPasteMessage || qsTr(\"Clipboard paste failed.")));
+        }
+        const auto notice = source(QStringLiteral("qml/components/StreamInputNotice.qml"));
+        QVERIFY(notice.contains(QStringLiteral("Accessible.AlertMessage")));
+        for (const auto &input : {"MouseArea", "TapHandler", "Keys.", "focus:", "forceActiveFocus"})
+            QVERIFY2(!notice.contains(QString::fromLatin1(input)), input);
+    }
+
+    void nativeErrorReportingExcludesAuthoritativeSessionEnds()
+    {
+        QFETCH(QString, termination);
+        QFETCH(bool, expectedReport);
+        QJSEngine engine;
+        QVERIFY(!engine.evaluate(QStringLiteral(R"JS(
+            var activeSession={sessionId:'seat'}, streamer={status:'streaming',sessionId:'seat'};
+            var streamerStopExpected=false, streamMessage='', snapshot=null, calls=[];
+            var ready=true, signedIn=true, enabled=true, gameId='fixture-game', uiSurface='desktop';
+            var coreClient={request:function(method,params,timeout) {
+                calls.push({method:method,params:params,timeout:timeout}); return 'fixture-request';
+            }};
+            function updateStreamerFields(fields) {snapshot=fields;}
+            function qsTr(text) {return text;}
+        )JS")).isError());
+        const auto reporting = source(QStringLiteral("qml/state/reporting/BugReportState.qml"));
+        for (const auto &name : {"normalizedCode", "reportStreamError", "track", "report"}) {
+            const auto match = QRegularExpression(QStringLiteral(
+                "    function %1\\([^\\n]*\\) \\{.*?\\n    \\}").arg(QString::fromLatin1(name)),
+                QRegularExpression::DotMatchesEverythingOption).match(reporting);
+            QVERIFY2(match.hasMatch(), name);
+            QVERIFY(!engine.evaluate(match.captured()).isError());
+        }
+        QVERIFY(!engine.evaluate(QStringLiteral("var bugReports={reportStreamError:reportStreamError};")).isError());
+        QVERIFY(loadShellFunction(engine, QStringLiteral("isRemoteSessionTermination")));
+        QVERIFY(loadShellFunction(engine, QStringLiteral("acceptNativeEvent")));
+        const auto delivered = engine.evaluate(QStringLiteral(R"JS(
+            var termination=%1;
+            acceptNativeEvent({type:'error',code:'native-failure',message:'Original native message',termination:termination});
+            snapshot.status === 'error' && snapshot.errorCode === 'native-failure'
+                && snapshot.message === 'Original native message' && snapshot.termination === termination;
+        )JS").arg(termination));
+        QVERIFY2(!delivered.isError(), qPrintable(delivered.toString()));
+        QVERIFY(delivered.toBool());
+        QCOMPARE(engine.evaluate(QStringLiteral("calls.length")).toInt(), expectedReport ? 2 : 0);
+        if (expectedReport) {
+            QVERIFY(engine.evaluate(QStringLiteral(R"JS(
+                calls[0].method === 'analytics.track' && calls[0].params.event === 'session_error'
+                    && calls[0].params.props.stage === 'stream' && calls[0].params.props.code === 'native_failure'
+                    && calls[1].method === 'bug_report.incident' && calls[1].params.kind === 'stream_error'
+                    && calls[1].params.code === 'native_failure' && calls[1].params.message === 'Original native message';
+            )JS")).toBool());
+        }
+    }
+
     void localFilePersistenceWarnsAboutUnencryptedTokens()
     {
         const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
@@ -1377,7 +1491,8 @@ private slots:
             QVERIFY(stream.contains(QStringLiteral(
                 "clipboardPaste: ShellStore.settings.clipboardPaste === true")));
             QVERIFY(stream.contains(QStringLiteral(
-                "onClipboardPasteFailed: clipboardPasteNotice.restart()")));
+                "onClipboardPasteFailed: {\n            root.clipboardPasteMessage = \"\"\n"
+                "            clipboardPasteNotice.restart()\n        }")));
         }
     }
 

@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use str0m::Rtc;
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 
-use crate::nvst_budget::{TEXT_BATCH_GUARD, WriteClass, admit_write};
+#[cfg(test)]
+use crate::nvst_budget::TEXT_BATCH_GUARD;
+use crate::nvst_budget::{WriteClass, admit_write};
 
 pub(crate) const CONTROL_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const INPUT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -134,37 +136,6 @@ pub(crate) struct NvstInputChannels {
 }
 
 impl NvstInputChannels {
-    pub(crate) fn send_text(
-        self,
-        rtc: &mut Rtc,
-        text: &opennow_streamer_protocol::text_input::UnicodeText,
-        timestamp_us: u64,
-        mut sent: impl FnMut(&NvstEncodedInput),
-    ) -> bool {
-        let messages = unicode_text_messages(text, timestamp_us);
-        let total_bytes: usize = messages.iter().map(|message| message.bytes.len()).sum();
-        let buffered = self.buffered_total(rtc);
-        if !text_batch_fits(buffered, total_bytes, TEXT_BATCH_GUARD) {
-            return false;
-        }
-        if !admit_write(buffered, total_bytes, WriteClass::Normal).is_admitted() {
-            return false;
-        }
-        let Some(mut channel) = rtc.channel(self.control_reliable) else {
-            return false;
-        };
-        if text.is_cancelled() {
-            return true;
-        }
-        for message in messages {
-            if !channel.write(true, &message.bytes).unwrap_or(false) {
-                return false;
-            }
-            sent(&message);
-        }
-        true
-    }
-
     pub(crate) fn create(rtc: &mut Rtc, bundle_video: bool) -> Self {
         let mut ids = Vec::with_capacity(6);
         for definition in &NVST_CHANNEL_PROFILE[..6] {
@@ -324,7 +295,7 @@ impl NvstInputChannels {
     }
 }
 
-fn text_batch_fits(buffered: usize, batch_bytes: usize, guard: usize) -> bool {
+pub(crate) fn text_batch_fits(buffered: usize, batch_bytes: usize, guard: usize) -> bool {
     buffered.saturating_add(batch_bytes) <= guard
 }
 
@@ -1023,7 +994,7 @@ fn remote_input_packet(input_type: u32, body: &[u8]) -> Vec<u8> {
     packet
 }
 
-fn unicode_text_messages(
+pub(crate) fn unicode_text_messages(
     text: &opennow_streamer_protocol::text_input::UnicodeText,
     timestamp_us: u64,
 ) -> Vec<NvstEncodedInput> {

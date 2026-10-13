@@ -2006,6 +2006,30 @@ mod tests {
     }
 
     #[test]
+    fn text_input_rejection_crosses_the_bounded_json_callback() {
+        let messages = CallbackMessages::default();
+        let (sender, receiver) = sync_channel(1);
+        let dispatcher = spawn_dispatcher(
+            "test-text-input-events",
+            receiver,
+            Callback {
+                function: Some(collect_response),
+                user_data: ptr::from_ref(&messages) as usize,
+            },
+        )
+        .unwrap();
+        let event = json!({"type":"text-input-error", "startId":"paste-session", "reason":"paste-queue-full"});
+        sender.send(event.clone()).unwrap();
+        drop(sender);
+        dispatcher.join().unwrap();
+        assert_eq!(*messages.values.lock().unwrap(), vec![event]);
+        assert!(
+            include_str!("../include/opennow_streamer_ffi.h")
+                .contains("#define OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR \"text-input-error\"")
+        );
+    }
+
+    #[test]
     fn recording_completion_metadata_crosses_the_unchanged_json_callback() {
         use opennow_streamer_protocol::{
             PROTOCOL_VERSION, RecordingCompletion, RecordingCutReason,

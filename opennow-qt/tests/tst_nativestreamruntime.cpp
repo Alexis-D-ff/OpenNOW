@@ -146,6 +146,72 @@ class NativeStreamRuntimeTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void textInputErrorsAreNonterminalAndScopedToSessionGeneration()
+    {
+        static OpenNowStreamerConfig callbackConfig;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbackConfig = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy events(&runtime, &NativeStreamRuntime::eventReceived);
+        QVERIFY(runtime.start());
+        QJsonObject event{{QStringLiteral("type"), QString::fromLatin1(OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR)},
+            {QStringLiteral("startId"), QStringLiteral("first")},
+            {QStringLiteral("reason"), QStringLiteral("paste-queue-full")}};
+        const auto deliver = [&] {
+            const auto bytes = QJsonDocument(event).toJson(QJsonDocument::Compact);
+            callbackConfig.event_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                static_cast<std::size_t>(bytes.size()), callbackConfig.user_data);
+        };
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 0);
+        const auto start = [&](const QString &id) {
+            return runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                 {QStringLiteral("id"), id}});
+        };
+        QVERIFY(start(QStringLiteral("first")));
+        QTRY_VERIFY(runtime.inputAllowed());
+        const auto generation = runtime.presentationGeneration();
+        QSignalSpy inputReset(&runtime, &NativeStreamRuntime::inputCaptureReset);
+        QSignalSpy inputChanged(&runtime, &NativeStreamRuntime::inputAllowedChanged);
+        deliver();
+        QTRY_COMPARE(events.size(), 1);
+        QCOMPARE(events[0][0].toJsonObject(), event);
+        QVERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.presentationAllowed());
+        QCOMPARE(runtime.presentationGeneration(), generation);
+        QCOMPARE(inputReset.size(), 0);
+        QCOMPARE(inputChanged.size(), 0);
+        deliver();
+        QVERIFY(start(QStringLiteral("replacement")));
+        QTRY_VERIFY(runtime.inputAllowed());
+        QCOMPARE(events.size(), 1);
+        deliver();
+        event.remove(QStringLiteral("startId"));
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 1);
+        event[QStringLiteral("startId")] = QStringLiteral("replacement");
+        deliver();
+        QTRY_COMPARE(events.size(), 2);
+        QVERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.presentationAllowed());
+        deliver();
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 2);
+        QVERIFY(runtime.shutdown());
+        QVERIFY(runtime.start());
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 2);
+        QVERIFY(runtime.shutdown());
+    }
+
     void sessionTimersAreTypedValidatedAndScopedToLifecycle()
     {
         static OpenNowStreamerConfig callbackConfig;

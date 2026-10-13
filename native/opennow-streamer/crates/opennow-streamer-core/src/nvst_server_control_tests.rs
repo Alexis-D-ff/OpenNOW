@@ -2,6 +2,24 @@ use super::*;
 use opennow_streamer_transport::{NvstServerTermination, NvstSessionTimer};
 
 #[test]
+fn text_rejection_is_nonterminal_and_retries_after_callback_backpressure() {
+    let (events, received) = mpsc::sync_channel(1);
+    let output = EventSender::bounded(events);
+    let lifecycle = connected_lifecycle();
+    let resources = TestNvstResources::default();
+    let mut control = NvstControlOutput { start_id: "paste-session".to_owned(), ..Default::default() };
+    output.send(json!({"type":"log"})).unwrap();
+    assert!(!forward_nvst_event(&output, &lifecycle, 7, &resources, &mut 0, &mut control, None, NvstReceiveEvent::TextRejected("paste-queue-full")));
+    assert_eq!(control.pending_text_error, Some("paste-queue-full"));
+    received.try_recv().unwrap();
+    flush_control_output(&output, &lifecycle, 7, &mut control);
+    assert_eq!(received.try_recv().unwrap(), json!({"type":"text-input-error", "startId":"paste-session", "reason":"paste-queue-full"}));
+    assert_eq!(resources.stops.load(Ordering::Relaxed), 0);
+    assert_eq!(lock_lifecycle(&lifecycle).state, State::Connected);
+    assert!(control.pending_text_error.is_none());
+}
+
+#[test]
 fn idle_timer_and_input_clear_events_do_not_disturb_media() {
     let (events, received) = mpsc::channel();
     let output = EventSender::unbounded(events);

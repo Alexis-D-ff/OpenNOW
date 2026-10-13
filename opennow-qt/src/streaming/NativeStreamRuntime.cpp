@@ -899,6 +899,9 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
             continue;
         }
         const auto kind = document.object().value(u"type"_s).toString();
+        if (message.event && kind == QString::fromLatin1(OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR)
+            && (d->sessionStartId.isEmpty()
+                || document.object().value(u"startId"_s).toString() != d->sessionStartId)) continue;
         if (message.event && kind == QString::fromLatin1(OPENNOW_STREAMER_EVENT_SESSION_TIMER)) {
             const auto object = document.object();
             if (d->cursorStartId.isEmpty()

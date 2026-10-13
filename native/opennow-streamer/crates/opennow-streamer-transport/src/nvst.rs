@@ -2308,6 +2308,7 @@ pub enum NvstReceiveEvent {
     InputReady(u16),
     InputUnavailable(&'static str),
     UserInput,
+    TextRejected(&'static str),
     SessionTimer(NvstSessionTimer),
     ServerTermination(NvstServerTermination),
     MicrophoneError(String),
@@ -6849,21 +6850,41 @@ fn run_nvst_webrtc_bundle(
                     forward_optional(&event_sender, receiver.recover())
                 }
                 Ok(UdpReceiverCommand::SendText { text, timestamp_us }) => {
-                    if upstream_allowed
-                        && !text.is_cancelled()
-                        && input_state.is_ready()
-                        && let Some(channels) = input_channels
-                        && (!input_delivery.is_empty()
-                            || !channels.send_text(&mut rtc, &text, timestamp_us, |message| {
-                                report_nvst_user_input(
-                                    message,
-                                    NvstInputWrite::Sent,
-                                    &feedback.idle_warning_active,
-                                    &event_sender,
-                                );
-                            }))
-                    {
-                        eprintln!("NVST text submission rejected by reliable channel");
+                    let result = input_delivery.submit_text(text, timestamp_us, |message| {
+                        let outcome = if upstream_allowed
+                            && input_state.is_ready()
+                            && let Some(channels) = input_channels
+                        {
+                            channels.send_encoded(&mut rtc, message)
+                        } else {
+                            classify_nvst_unready_input(&mut rtc, input_channels, message)
+                        };
+                        report_nvst_user_input(
+                            message,
+                            outcome,
+                            &feedback.idle_warning_active,
+                            &event_sender,
+                        );
+                        outcome
+                    });
+                    match result {
+                        Ok(()) => {}
+                        Err(NvstInputDeliveryError::Exhausted) => {
+                            let _ = event_sender
+                                .send(NvstReceiveEvent::TextRejected("paste-queue-full"));
+                        }
+                        Err(_) => {
+                            input_ready.store(false, Ordering::Release);
+                            let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
+                                "text input channel closed",
+                            ));
+                            rtc.disconnect();
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::InputDeliveryFailed),
+                            );
+                            break 'bundle;
+                        }
                     }
                 }
                 Ok(UdpReceiverCommand::SendInput { bytes, reply }) => {
@@ -7248,9 +7269,11 @@ fn run_nvst_webrtc_bundle(
                 "INFO",
                 "nvst-input",
                 &format!(
-                    "pendingMessages={} pendingBytes={} deferredWrites={} droppedMotion={}",
+                    "pendingMessages={} pendingBytes={} pendingTextMessages={} pendingTextBytes={} deferredWrites={} droppedMotion={}",
                     input_stats.pending_messages,
                     input_stats.pending_bytes,
+                    input_stats.pending_text_messages,
+                    input_stats.pending_text_bytes,
                     input_stats.deferred_writes,
                     input_stats.dropped_motion,
                 ),

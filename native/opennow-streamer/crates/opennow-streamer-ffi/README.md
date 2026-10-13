@@ -84,6 +84,17 @@ reservation through the ordered transport command queue. A second paste or a ful
 gameplay input, or triggering the control-overflow shutdown. `OK` acknowledges whole
 local admission, not delivery to or insertion by the remote application.
 
+Deferred discrete input and paste share one ordered transport FIFO. One accepted
+paste keeps its single-flight reservation until all encoded chunks are admitted,
+cancelled, or the session stops. A paste retains at most 65,536 UTF-8 bytes plus
+bounded wire framing; the separate encoded-text bound is 128 KiB. Later gameplay
+input cannot overtake it, and successful prefixes are never resent. Cancellation
+discards only the remaining text and preserves queued key/button releases.
+Temporary SCTP pressure retries without ending media. If a second paste or an
+oversized encoded batch is rejected locally, ABI 13 emits a generation-scoped
+`text-input-error` event with `startId` and `reason`; Qt displays nonterminal retry
+feedback without including text contents in diagnostics.
+
 Capture loss, input unavailability, and session teardown cancel text still pending
 in capture or transport. Readiness changes are generation-scoped, so stale session
 events cannot enable or cancel text belonging to a replacement session. A paste

@@ -1091,6 +1091,8 @@
     "idleWarningRemaining": "Your session will end in %1 seconds due to inactivity.",
     "idleWarningInput": "Use your keyboard, mouse, or controller to keep playing.",
     "serverEnded": "The server ended the session.",
+    "textInputRetry": "Text input could not be delivered. Try pasting again.",
+    "textInputUnavailable": "Text input unavailable",
     "sessionStarted": {
       "kicker": "Ready",
       "title": "Session started"

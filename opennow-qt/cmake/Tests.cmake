@@ -1461,6 +1461,13 @@ if(BUILD_TESTING)
                     COMMAND opennow-qt ${idle_args})
                 set_tests_properties("qml-stream-idle-${surface}-${window_mode}-${chrome}" PROPERTIES
                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+                set(text_input_args ${idle_args})
+                list(REMOVE_ITEM text_input_args --smoke-stream-idle-warning)
+                list(APPEND text_input_args --smoke-stream-text-input-error)
+                add_test(NAME "qml-stream-text-input-${surface}-${window_mode}-${chrome}"
+                    COMMAND opennow-qt ${text_input_args})
+                set_tests_properties("qml-stream-text-input-${surface}-${window_mode}-${chrome}" PROPERTIES
+                    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
             endforeach()
         endforeach()
         set(input_notice_mode --console)

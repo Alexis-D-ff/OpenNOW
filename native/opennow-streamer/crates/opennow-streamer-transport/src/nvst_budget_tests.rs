@@ -173,9 +173,12 @@ fn typed_unicode_wire_success_clears_idle_warning_but_cancelled_text_does_not() 
     let text = slot.submit("é世界".as_bytes()).unwrap();
     let warning = AtomicBool::new(true);
     let (events, received) = mpsc::channel();
-    assert!(channels.send_text(&mut local, &text, 1, |message| {
-        report_nvst_user_input(message, NvstInputWrite::Sent, &warning, &events);
-    }));
+    let mut delivery = NvstInputDelivery::default();
+    delivery.submit_text(text.clone(), 1, |message| {
+        let outcome = channels.send_encoded(&mut local, message);
+        report_nvst_user_input(message, outcome, &warning, &events);
+        outcome
+    }).unwrap();
     assert!(!warning.load(Ordering::Acquire));
     assert!(matches!(
         received.try_recv().unwrap(),
@@ -184,9 +187,7 @@ fn typed_unicode_wire_success_clears_idle_warning_but_cancelled_text_does_not() 
     assert!(received.try_recv().is_err());
     warning.store(true, Ordering::Release);
     slot.cancel();
-    assert!(channels.send_text(&mut local, &text, 1, |_| panic!(
-        "cancelled text must not write"
-    )));
+    delivery.submit_text(text.clone(), 1, |_| panic!("cancelled text must not write")).unwrap();
     assert!(warning.load(Ordering::Acquire));
 }
 
