@@ -260,9 +260,19 @@ Negotiated profiles retain normalized `bitDepth` (8 or 10), CloudMatch `chromaFo
 `unreported` distinguish present values from omissions. Same-seat partial updates retain
 previously known components; explicit finalized invalid values are not replaced with
 saved preferences. Incomplete or unsupported accepted color is rejected before native
-attachment. The native ABI and protocol version are unchanged; transport terminal
+attachment. Transport terminal
 events add `termination: {source: "nvst-transport", code, resumable: null}`, preserving
 unknown cloud-session disposition rather than assigning a normal-exit reason to EOF.
+
+Native ABI 13 adds `session-timer` events through the existing JSON event callback,
+with `startId`, `timerType`, `secondsLeft` and `active`. Idle-warning type 4 shows
+stream chrome without stopping media; type 5 or successfully delivered gameplay
+input clears it. Server termination events preserve `wireCode` separately from
+optional application `reason` and `extendedCode` in `termination`, use source
+`nvst-server`, and carry a boolean `resumable` only for verified classifications.
+Nonresumable server termination prevents automatic restart and resume. Unknown
+classification remains null and is reconciled against CloudMatch. The JSON protocol
+version is unchanged; the native library and Qt shell must be rebuilt together.
 
 After a decoder-stall recovery attempt, the native engine allows one further video-timeout
 interval for decoded output to resume. Output progress or a decoder-epoch change clears

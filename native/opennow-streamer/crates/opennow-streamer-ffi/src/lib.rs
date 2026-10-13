@@ -23,7 +23,7 @@ use serde_json::Value;
 
 static FIRST_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
 
-pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 12;
+pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 13;
 pub const OPENNOW_STREAMER_MAX_TEXT_BYTES: usize =
     opennow_streamer_protocol::text_input::MAX_TEXT_BYTES;
 pub const OPENNOW_STREAMER_VULKAN_DEVICE_INFO_VERSION: u32 = 1;
@@ -1782,7 +1782,7 @@ mod tests {
 
     #[test]
     fn abi_twelve_adds_the_deterministic_graphics_unsupported_status() {
-        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 12);
+        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 13);
         assert_eq!(OpenNowStreamerStatus::GraphicsUnsupported as i32, 15);
         let header = include_str!("../include/opennow_streamer_ffi.h");
         assert!(header.contains("OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED = 15,"));
@@ -1970,6 +1970,39 @@ mod tests {
         let now = Instant::now();
         let mut last = now;
         assert!(!should_log_event("controller-rumble", &mut last, now));
+    }
+
+    #[test]
+    fn server_timer_and_termination_cross_the_bounded_json_callback() {
+        let messages = CallbackMessages::default();
+        let (sender, receiver) = sync_channel(3);
+        let dispatcher = spawn_dispatcher(
+            "test-server-control-events",
+            receiver,
+            Callback {
+                function: Some(collect_response),
+                user_data: ptr::from_ref(&messages) as usize,
+            },
+        )
+        .unwrap();
+        let events = vec![
+            json!({"type":"session-timer", "startId":"start-7", "timerType":4,"secondsLeft":60,"active":true}),
+            json!({"type":"session-timer", "startId":"start-7", "timerType":4,"secondsLeft":0,"active":false}),
+            json!({"type":"status", "status":"stopped", "termination":{"source":"nvst-server","wireCode":0x8003_0023_u32,"reason":56,"extendedCode":0x8003_0007_u32,"resumable":false}}),
+        ];
+        for event in &events {
+            sender.send(event.clone()).unwrap();
+        }
+        drop(sender);
+        dispatcher.join().unwrap();
+        assert_eq!(*messages.values.lock().unwrap(), events);
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("#define OPENNOW_STREAMER_EVENT_SESSION_TIMER \"session-timer\""));
+        assert!(
+            header.contains("#define OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER \"nvst-server\"")
+        );
+        assert!(header.contains("#define OPENNOW_STREAMER_TIMER_IDLE_WARNING 4u"));
+        assert!(header.contains("#define OPENNOW_STREAMER_TIMER_IDLE_EXPIRY 5u"));
     }
 
     #[test]

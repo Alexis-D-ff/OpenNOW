@@ -202,6 +202,7 @@ struct NativeStreamRuntime::Private {
     bool inputAuthorizationPending = false;
     bool serverCursorComposited = true;
     QString cursorStartId;
+    QString sessionStartId;
     QString presentationStartId;
     QString acceptedSessionStartId;
     QString rumbleStartId;
@@ -453,6 +454,7 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
     }
     if (type == u"start"_s || type == u"stop"_s) {
         invalidatePresentation();
+        d->sessionStartId = type == u"start"_s ? object.value(u"id"_s).toString() : QString{};
         if (type == u"start"_s) {
             d->serverCursorComposited = true;
             d->firstNotification = false;
@@ -491,6 +493,7 @@ bool NativeStreamRuntime::shutdown(int timeoutMs)
                      "thread before shutdown."_s);
         return false;
     }
+    d->sessionStartId.clear();
     if (!handle) return true;
     emit runningChanged();
 
@@ -896,6 +899,30 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
             continue;
         }
         const auto kind = document.object().value(u"type"_s).toString();
+        if (message.event && kind == QString::fromLatin1(OPENNOW_STREAMER_EVENT_SESSION_TIMER)) {
+            const auto object = document.object();
+            if (d->cursorStartId.isEmpty()
+                || object.value(u"startId"_s).toString() != d->cursorStartId) continue;
+            const auto timer = object.value(u"timerType"_s);
+            const auto seconds = object.value(u"secondsLeft"_s);
+            const auto active = object.value(u"active"_s);
+            if (timer.isDouble() && (timer.toDouble() == OPENNOW_STREAMER_TIMER_IDLE_WARNING
+                    || timer.toDouble() == OPENNOW_STREAMER_TIMER_IDLE_EXPIRY)
+                && seconds.isDouble() && seconds.toDouble() >= 0
+                && seconds.toDouble() <= std::numeric_limits<quint32>::max()
+                && std::floor(seconds.toDouble()) == seconds.toDouble() && active.isBool()) {
+                emit sessionTimerReceived(static_cast<quint8>(timer.toInt()),
+                    static_cast<quint32>(seconds.toDouble()), active.toBool());
+            }
+            continue;
+        }
+        if (message.event && (kind == u"error"_s || kind == u"status"_s)) {
+            const auto termination = document.object().value(u"termination"_s).toObject();
+            if (termination.value(u"source"_s).toString()
+                    == QString::fromLatin1(OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER)
+                && (d->sessionStartId.isEmpty()
+                    || termination.value(u"startId"_s).toString() != d->sessionStartId)) continue;
+        }
         if (message.event && kind == u"telemetry"_s) {
             const auto object = document.object();
             const auto startId = object.value(u"startId"_s).toString();

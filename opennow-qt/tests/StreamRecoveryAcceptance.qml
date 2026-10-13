@@ -13,6 +13,7 @@ QtObject {
         signal presentationError(string message, string errorCode)
         signal responseReceived(var response)
         signal eventReceived(var event)
+        signal sessionTimerReceived(int timerType, double secondsLeft, bool active)
         signal callbacksDropped(int count)
         function start() { return true }
         function send(command) { commands = commands.concat([command]); return true }

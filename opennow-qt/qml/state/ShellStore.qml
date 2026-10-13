@@ -362,6 +362,7 @@ QtObject {
     property string pinTargetName: qsTr("Profile")
     property string pinMessage: ""
     property var activeSession: null
+    property var streamIdleWarning: null
     property string colorFormatSessionId: ""
     property string pendingRequestedColorQuality: ""
     property string streamRequestedColorQuality: ""
@@ -374,6 +375,8 @@ QtObject {
     property var streamDropCounts: ({})
     onActiveSessionChanged: {
         const sessionId = String(activeSession && activeSession.sessionId || "")
+        if (streamIdleWarning && streamIdleWarning.sessionId !== sessionId)
+            streamIdleWarning = null
         if (sessionId !== mediaRecordingTargetSessionId)
             cancelRecordingTarget()
         if (streamRecordingAttempt && sessionId !== streamRecordingAttempt.sessionId) {
@@ -2075,6 +2078,7 @@ QtObject {
                 && streamer.status !== "stopped" && streamer.status !== "error"
                 && streamer.status !== "starting")
             return
+        streamIdleWarning = null
         streamer = {
             status: "starting",
             message: qsTr("Preparing the embedded native media runtime…"),
@@ -2119,8 +2123,10 @@ QtObject {
     }
 
     function acceptStreamerSnapshot(snapshot) {
+        if (!snapshot || snapshot.status === "error" || snapshot.status === "stopped")
+            streamIdleWarning = null
         if (snapshot && isRemoteSessionTermination(snapshot.termination)) {
-            finishRemoteSession(snapshot.termination)
+            finishRemoteSession(snapshot.termination, snapshot.message, snapshot)
             return
         }
         // One failure produces both error and stopped, plus late input replies.
@@ -2319,15 +2325,18 @@ QtObject {
     function isRemoteSessionTermination(termination) {
         return termination && termination.resumable === false
             && ((termination.source === "cloudmatch-session-status" && Number(termination.status) === 7)
-                || (termination.source === "cloudmatch-http" && Number(termination.httpStatus) === 404))
+                || (termination.source === "cloudmatch-http" && Number(termination.httpStatus) === 404)
+                || (termination.source === "nvst-server" && termination.code === "server-terminated"))
     }
 
-    function finishRemoteSession(termination) {
-        if (!isRemoteSessionTermination(termination))
+    function finishRemoteSession(termination, message, snapshot) {
+        if (!activeSession || !isRemoteSessionTermination(termination))
             return
-        if (termination.sessionId && activeSession
+        if (termination.sessionId
                 && String(termination.sessionId) !== String(activeSession.sessionId))
             return
+        if (snapshot)
+            streamer = snapshot
         reportSessionEnd(activeSession, "remote_ended", true)
         const pendingRequests = [streamerPrepareRequestId, streamPollRequestId]
         streamerPrepareRequestId = ""
@@ -2335,6 +2344,11 @@ QtObject {
         for (const id of pendingRequests)
             if (id !== "") CoreClient.cancel(id)
         acceptStreamingSession(null)
+        streamIdleWarning = null
+        if (termination.source === "nvst-server") {
+            lastError = message || qsTr("The server ended the session.")
+            accessibilityMessage = lastError
+        }
         if (AppController.route === "stream" || AppController.route === "inserting") {
             AppController.showOverlay("")
             AppController.navigateFromLastPrimary("game-detail")
@@ -2374,6 +2388,7 @@ QtObject {
     }
 
     function stopNativeStreamer(reason) {
+        streamIdleWarning = null
         cancelRecordingTarget()
         suspendRecordingStart()
         streamerRestartTimer.stop()
@@ -3379,6 +3394,14 @@ QtObject {
         acceptStreamColorFormat(streamRequestedColorQuality, profile.colorQuality, "server", "")
     }
 
+    function acceptSessionTimer(timerType, secondsLeft, active) {
+        if (!activeSession || !streamer || streamer.sessionId !== activeSession.sessionId
+                || ["starting", "streaming"].indexOf(streamer.status) < 0
+                || streamerStopExpected || streamStopRequestId !== "") return
+        streamIdleWarning = timerType === 4 && active
+            ? {sessionId: String(activeSession.sessionId), secondsLeft: secondsLeft, receivedAtMs: Date.now()} : null
+    }
+
     function acceptNativeEvent(event) {
         const type = String(event && event.type || "")
         if (event && event.event === "color-format-changed") {
@@ -3529,6 +3552,9 @@ QtObject {
         }
         function onResponseReceived(response) { root.acceptNativeResponse(response) }
         function onEventReceived(event) { root.acceptNativeEvent(event) }
+        function onSessionTimerReceived(timerType, secondsLeft, active) {
+            root.acceptSessionTimer(timerType, secondsLeft, active)
+        }
         function onCallbacksDropped(count) {
             root.recordQueueDrop({unit: "callbacks", count: count})
             root.updateStreamerFields({queueDropCount:
@@ -3537,6 +3563,7 @@ QtObject {
         function onRunningChanged() {
             if (NativeStreamRuntime.running)
                 return
+            root.streamIdleWarning = null
             root.nativeRuntimeReady = false
             root.audioOutputDevices = []
             root.audioOutputDevicesBusy = false

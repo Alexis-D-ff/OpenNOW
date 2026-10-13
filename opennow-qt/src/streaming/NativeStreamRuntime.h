@@ -159,6 +159,7 @@ signals:
     void lastErrorChanged();
     void responseReceived(const QJsonObject &response);
     void eventReceived(const QJsonObject &event);
+    void sessionTimerReceived(quint8 timerType, quint32 secondsLeft, bool active);
     void frameAvailable();
     void cursorUpdated(const QByteArray &bytes);
     void cursorCaptureChanged(bool composited);

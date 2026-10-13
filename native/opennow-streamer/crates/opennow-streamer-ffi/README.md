@@ -13,6 +13,27 @@ This crate exposes `opennow-streamer-core::Engine` as a C-compatible in-process 
 - `opennow_streamer_destroy` consumes the handle exactly once, waits for the engine and both callback queues to drain, and then returns. No call may race with destroy. A null handle is rejected; reusing a destroyed pointer is caller-side undefined behavior.
 - Every exported function catches Rust panics before they can unwind through the C ABI. A worker-thread panic closes the command queue.
 
+### Server timers and termination (ABI 13)
+
+Rebuild Qt and the native library together with ABI 13. Structure layouts and callback
+ownership are unchanged. `event_callback` now delivers generation-scoped
+`session-timer` events with `startId`, `timerType`, `secondsLeft` and `active`.
+Timer type 4 warns of idle expiry; type 5 clears the warning. Successful gameplay
+input also clears an active warning with a type-4 event whose `active` is false.
+The shell displays this state above its existing video item without changing capture
+or media ownership.
+
+Server termination uses the existing error and stopped-status events. Their
+`termination` object has `source: "nvst-server"`, `startId`, `code: "server-terminated"`,
+the original `wireCode`, optional `reason` and `extendedCode`, and `resumable`.
+The wire result and the application's termination reason are different namespaces.
+Unknown classification fields are null; the shell retains CloudMatch reconciliation
+for these rather than guessing that the session has ended. A false `resumable` is
+authoritative and must prevent automatic native restarts and seat-resume attempts.
+Lifecycle timers coalesce to their latest state when the callback queue is full;
+terminal delivery waits on that bounded queue from the stopped session's event worker,
+never from the network or render thread.
+
 ### Deterministic presentation incompatibility (ABI 12)
 
 `opennow_streamer_record_frame` returns `OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED` when the decoder's

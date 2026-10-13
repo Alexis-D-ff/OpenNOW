@@ -1087,6 +1087,10 @@
     }
   },
   "stream": {
+    "idleWarningTitle": "Are you still playing?",
+    "idleWarningRemaining": "Your session will end in %1 seconds due to inactivity.",
+    "idleWarningInput": "Use your keyboard, mouse, or controller to keep playing.",
+    "serverEnded": "The server ended the session.",
     "sessionStarted": {
       "kicker": "Ready",
       "title": "Session started"

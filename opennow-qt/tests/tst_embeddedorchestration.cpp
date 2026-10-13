@@ -1791,7 +1791,7 @@ private slots:
                                 "normalizedStreamingSession", "acceptStreamingSession",
                                 "isRemoteSessionTermination", "finishRemoteSession", "cancelSessionRecovery",
                                 "startNativeStreamer", "retryNativeStreamer", "acceptNativeEvent",
-                                "observeNegotiatedColorFormat", "acceptStreamColorFormat"}) {
+                                "observeNegotiatedColorFormat", "acceptStreamColorFormat", "acceptSessionTimer"}) {
             const QRegularExpression function(QStringLiteral(
                 "    function %1\\([^\\n]*\\) \\{.*?\\n    \\}").arg(QString::fromLatin1(name)),
                 QRegularExpression::DotMatchesEverythingOption);
@@ -1887,6 +1887,116 @@ private slots:
             acceptStreamerSnapshot({status:'error', message:'EOF', termination:{source:'nvst-transport', resumable:null}});
             activeSession !== null && streamerRestartTimer.running;
         )JS")));
+        QVERIFY(check(QStringLiteral(R"JS(
+            activeSession = {sessionId:'seat', status:3}; streamer = {status:'streaming', sessionId:'seat'};
+            streamerStopExpected = false; sessionRecoveryPending = false;
+            acceptSessionTimer(4, 60, true);
+            var warningPresent = streamIdleWarning.secondsLeft === 60;
+            acceptNativeEvent({type:'error', code:'server-terminated', message:'Ended due to inactivity',
+                termination:{source:'nvst-server',code:'server-terminated',wireCode:2147680291,
+                    reason:56,extendedCode:2147680263,resumable:false}});
+            warningPresent && streamIdleWarning === null && activeSession === null
+                && !sessionRecoveryPending && !streamerRestartTimer.running
+                && lastError === 'Ended due to inactivity' && accessibilityMessage === lastError
+                && streamer.termination.wireCode === 2147680291 && streamer.termination.reason === 56
+                && streamer.termination.extendedCode === 2147680263;
+        )JS")));
+        QVERIFY(check(QStringLiteral(R"JS(
+            acceptNativeEvent({type:'status',status:'stopped',
+                termination:{source:'nvst-server',code:'server-terminated',resumable:false}});
+            activeSession === null && !streamerRestartTimer.running
+                && lastError === 'Ended due to inactivity' && streamer.termination.reason === 56;
+        )JS")));
+        QVERIFY(check(QStringLiteral(R"JS(
+            activeSession = {sessionId:'seat', status:3}; streamer = {status:'error'};
+            streamerRestartTimer.restart();
+            acceptNativeEvent({type:'status',status:'stopped',message:'Server closed the session',
+                termination:{source:'nvst-server',code:'server-terminated',resumable:false}});
+            activeSession === null && !streamerRestartTimer.running && lastError === 'Server closed the session';
+        )JS")));
+        for (const auto &resumable : {QStringLiteral("null"), QStringLiteral("true")}) {
+            QVERIFY(check(QStringLiteral(R"JS(
+                activeSession = {sessionId:'seat', status:3}; streamer = {status:'streaming'};
+                streamerStopExpected = false; sessionRecoveryPending = false;
+                acceptNativeEvent({type:'error',message:'Server transport ended',
+                    termination:{source:'nvst-server',code:'server-terminated',resumable:%1}});
+                activeSession !== null && streamerRestartTimer.running && !sessionRecoveryPending
+                    && streamState === 'reconnecting';
+            )JS").arg(resumable)));
+        }
+        QVERIFY(check(QStringLiteral(R"JS(
+            cancelSessionRecovery(); streamerRestartTimer.stop(); streamerPrepareRequestId='';
+            streamerStopRequestId=''; streamerStartRequestId=''; coreSessionRestoreId=''; sessionStopIntentId='';
+            streamerRecoveryExhausted=false; streamerStopExpected=false;
+            streamer={sessionId:'seat',status:'error'}; streamIdleWarning={secondsLeft:60};
+            startNativeStreamer();
+            streamIdleWarning === null && streamer.status === 'starting' && streamerPrepareRequestId === 'prepare';
+        )JS")));
+        QVERIFY(loadShellFunction(engine, QStringLiteral("stopNativeStreamer")));
+        QVERIFY(check(QStringLiteral(R"JS(
+            streamIdleWarning={secondsLeft:60}; stopNativeStreamer('test'); streamIdleWarning === null;
+        )JS")));
+        const auto runtimeStopped = QRegularExpression(QStringLiteral(
+            "        function onRunningChanged\\(\\) \\{.*?\\n        \\}"),
+            QRegularExpression::DotMatchesEverythingOption).match(shell);
+        QVERIFY(runtimeStopped.hasMatch());
+        QVERIFY(!evaluate(runtimeStopped.captured()).isError());
+        QVERIFY(check(QStringLiteral(R"JS(
+            var root=this, audioOutputDevicesTimeout={stop:function(){}};
+            streamer={status:'stopped'}; streamIdleWarning={secondsLeft:60}; NativeStreamRuntime.running=true;
+            onRunningChanged(); var keptWhileRunning=streamIdleWarning !== null;
+            NativeStreamRuntime.running=false; onRunningChanged();
+            keptWhileRunning && streamIdleWarning === null && !nativeRuntimeReady;
+        )JS")));
+    }
+
+    void idleWarningIsTransportDrivenAndPassive()
+    {
+        QJSEngine engine;
+        QVERIFY(!engine.evaluate(QStringLiteral(R"JS(
+            var activeSession={sessionId:'seat'}, streamer={sessionId:'seat',status:'streaming'};
+            var streamerStopExpected=false, streamStopRequestId='', streamIdleWarning=null;
+        )JS")).isError());
+        QVERIFY(loadShellFunction(engine, QStringLiteral("acceptSessionTimer")));
+        const auto check = [&](const QString &expression) {
+            const auto result = engine.evaluate(expression);
+            QVERIFY2(!result.isError(), qPrintable(result.toString()));
+            QVERIFY(result.toBool());
+        };
+        check(QStringLiteral("acceptSessionTimer(4,60,true); streamIdleWarning.secondsLeft === 60"));
+        check(QStringLiteral("acceptSessionTimer(4,0,true); streamIdleWarning !== null && streamIdleWarning.secondsLeft === 0"));
+        check(QStringLiteral("acceptSessionTimer(4,4294967295,true); streamIdleWarning.secondsLeft === 4294967295"));
+        check(QStringLiteral("acceptSessionTimer(4,0,false); streamIdleWarning === null"));
+        check(QStringLiteral("acceptSessionTimer(4,60,true); acceptSessionTimer(5,0,true); streamIdleWarning === null"));
+        for (const auto &inactive : {QStringLiteral("activeSession=null"), QStringLiteral("streamer=null"),
+                 QStringLiteral("streamer.sessionId='old'"), QStringLiteral("streamer.status='stopped'"),
+                 QStringLiteral("streamer.status='error'"), QStringLiteral("streamerStopExpected=true"),
+                 QStringLiteral("streamStopRequestId='stop'")}) {
+            check(QStringLiteral("activeSession={sessionId:'seat'}; streamer={sessionId:'seat',status:'streaming'}; "
+                "streamerStopExpected=false;streamStopRequestId='';streamIdleWarning=null; %1; "
+                "acceptSessionTimer(4,60,true); streamIdleWarning === null").arg(inactive));
+        }
+        const auto component = source(QStringLiteral("qml/components/StreamIdleWarning.qml"));
+        QVERIFY(component.contains(QStringLiteral("Accessible.AlertMessage")));
+        for (const auto &input : {"MouseArea", "TapHandler", "Keys.", "focus:", "forceActiveFocus"})
+            QVERIFY2(!component.contains(QString::fromLatin1(input)), input);
+        for (const auto &path : {"qml/desktop/stream/DesktopStreamScreen.qml", "qml/screens/StreamScreen.qml"}) {
+            const auto screen = source(QString::fromLatin1(path));
+            QCOMPARE(screen.count(QStringLiteral("StreamVideoItem {")), 1);
+            QCOMPARE(screen.count(QStringLiteral("StreamIdleWarning {")), 1);
+        }
+        const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
+        QVERIFY(shell.contains(QStringLiteral("function onSessionTimerReceived(timerType, secondsLeft, active)")));
+        QVERIFY(shell.contains(QStringLiteral("root.acceptSessionTimer(timerType, secondsLeft, active)")));
+        QVERIFY(source(QStringLiteral("cmake/QmlModule.cmake")).contains(QStringLiteral("qml/components/StreamIdleWarning.qml")));
+        for (const auto &path : {"tests/RecordingAcceptance.qml", "tests/MicrophoneAcceptance.qml",
+                 "tests/StreamRecoveryAcceptance.qml", "tests/QueueDropsAcceptance.qml"})
+            QVERIFY2(source(QString::fromLatin1(path)).contains(QStringLiteral(
+                "signal sessionTimerReceived(int timerType, double secondsLeft, bool active)")), path);
+        const auto contract = source(QStringLiteral("../docs/qt-native-streamer-ffi.md"));
+        for (const auto &field : {"session-timer", "startId", "secondsLeft", "sessionTimerReceived",
+                 "nvst-server", "wireCode", "extendedCode", "resumable:false", "CloudMatch"})
+            QVERIFY2(contract.contains(QString::fromLatin1(field)), field);
     }
 
     void shellUsesCoreOnlyToPrepareEmbeddedContext()

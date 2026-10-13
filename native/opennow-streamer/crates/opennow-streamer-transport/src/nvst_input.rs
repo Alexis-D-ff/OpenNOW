@@ -139,6 +139,7 @@ impl NvstInputChannels {
         rtc: &mut Rtc,
         text: &opennow_streamer_protocol::text_input::UnicodeText,
         timestamp_us: u64,
+        mut sent: impl FnMut(&NvstEncodedInput),
     ) -> bool {
         let messages = unicode_text_messages(text, timestamp_us);
         let total_bytes: usize = messages.iter().map(|message| message.bytes.len()).sum();
@@ -155,9 +156,13 @@ impl NvstInputChannels {
         if text.is_cancelled() {
             return true;
         }
-        messages
-            .iter()
-            .all(|message| channel.write(true, &message.bytes).unwrap_or(false))
+        for message in messages {
+            if !channel.write(true, &message.bytes).unwrap_or(false) {
+                return false;
+            }
+            sent(&message);
+        }
+        true
     }
 
     pub(crate) fn create(rtc: &mut Rtc, bundle_video: bool) -> Self {
@@ -249,21 +254,52 @@ impl NvstInputChannels {
         self.send_control(rtc, &remote_cursor_tracking(enabled))
     }
 
-    pub(crate) fn send_encoded(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> bool {
-        let id = match message.route {
+    pub(crate) fn send_encoded(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> NvstInputWrite {
+        self.write_classified(
+            rtc,
+            self.encoded_channel(message),
+            &message.bytes,
+            WriteClass::Normal,
+        )
+    }
+
+    pub(crate) fn encoded_channel_is_open(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> bool {
+        rtc.channel(self.encoded_channel(message)).is_some()
+    }
+
+    fn encoded_channel(self, message: &NvstEncodedInput) -> ChannelId {
+        match message.route {
             NvstInputRoute::ControlReliable => self.control_reliable,
             NvstInputRoute::ControlPartial => self.control_partial,
             NvstInputRoute::InputPartial => self.input_partial,
-        };
-        self.write(rtc, id, &message.bytes, WriteClass::Normal)
+        }
     }
 
     fn write(self, rtc: &mut Rtc, id: ChannelId, bytes: &[u8], class: WriteClass) -> bool {
-        if !admit_write(self.buffered_total(rtc), bytes.len(), class).is_admitted() {
-            return false;
+        self.write_classified(rtc, id, bytes, class).is_sent()
+    }
+
+    fn write_classified(
+        self,
+        rtc: &mut Rtc,
+        id: ChannelId,
+        bytes: &[u8],
+        class: WriteClass,
+    ) -> NvstInputWrite {
+        if rtc.channel(id).is_none() {
+            return NvstInputWrite::Closed;
         }
-        rtc.channel(id)
-            .is_some_and(|mut channel| channel.write(true, bytes).unwrap_or(false))
+        if !admit_write(self.buffered_total(rtc), bytes.len(), class).is_admitted() {
+            return NvstInputWrite::Deferred;
+        }
+        match rtc
+            .channel(id)
+            .map(|mut channel| channel.write(true, bytes))
+        {
+            Some(Ok(true)) => NvstInputWrite::Sent,
+            Some(Ok(false)) => NvstInputWrite::Deferred,
+            Some(Err(_)) | None => NvstInputWrite::Closed,
+        }
     }
 
     pub(crate) fn buffered_total(self, rtc: &mut Rtc) -> usize {
@@ -563,6 +599,26 @@ pub(crate) enum NvstInputRoute {
 pub(crate) struct NvstEncodedInput {
     pub(crate) route: NvstInputRoute,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) meaningful: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NvstInputWrite {
+    Sent,
+    Deferred,
+    Closed,
+}
+
+impl NvstInputWrite {
+    pub(crate) fn is_sent(self) -> bool {
+        self == Self::Sent
+    }
+}
+
+impl NvstEncodedInput {
+    pub(crate) fn is_meaningful(&self) -> bool {
+        self.meaningful
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +693,7 @@ impl NvstInputCodec {
                 encoded.push(NvstEncodedInput {
                     route: NvstInputRoute::ControlReliable,
                     bytes: control_command(COMMAND_GAMEPAD, &payload),
+                    meaningful: false,
                 });
             }
         }
@@ -649,6 +706,7 @@ impl NvstInputCodec {
         encoded.push(NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: device_descriptor(timestamp_us, filtered),
+            meaningful: false,
         });
     }
 
@@ -791,6 +849,7 @@ impl NvstInputCodec {
                             timestamp,
                             self.gamepad_sequences[controller_id],
                         ),
+                        meaningful: true,
                     });
                 }
                 INPUT_HAPTICS_ENABLED => {
@@ -942,6 +1001,17 @@ fn remote_input_message(inner: Vec<u8>, timestamp_us: u64) -> NvstEncodedInput {
             NvstInputRoute::ControlReliable
         },
         bytes: control_command(COMMAND_REMOTE_INPUT, &remote_input_packet(0x0e, &body)),
+        meaningful: matches!(
+            input_type,
+            INPUT_KEY_DOWN
+                | INPUT_KEY_UP
+                | INPUT_MOUSE_ABSOLUTE
+                | INPUT_MOUSE_RELATIVE
+                | INPUT_MOUSE_BUTTON_DOWN
+                | INPUT_MOUSE_BUTTON_UP
+                | INPUT_MOUSE_WHEEL
+                | INPUT_TEXT
+        ),
     }
 }
 
@@ -973,6 +1043,7 @@ fn unicode_text_messages(
         messages.push(NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: control_command(COMMAND_REMOTE_INPUT, &packet),
+            meaningful: true,
         });
         remaining = &remaining[end..];
     }
@@ -2123,6 +2194,7 @@ mod tests {
         let encoded = NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: command,
+            meaningful: true,
         };
         assert_eq!(encoded.route, NvstInputRoute::ControlReliable);
         assert_ne!(encoded.route, NvstInputRoute::InputPartial);

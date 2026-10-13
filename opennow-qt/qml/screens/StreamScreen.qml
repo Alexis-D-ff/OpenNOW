@@ -149,6 +149,12 @@ FocusScope {
 
     Timer { id: clipboardPasteNotice; interval: 5000 }
 
+    StreamIdleWarning {
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        z: 13
+    }
+
     StreamInputNotice {
         layer.enabled: HdrOutput.chromeRequired
         layer.effect: HdrChromeEffect {}

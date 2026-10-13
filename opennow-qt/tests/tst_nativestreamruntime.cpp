@@ -15,6 +15,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -145,6 +146,125 @@ class NativeStreamRuntimeTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void sessionTimersAreTypedValidatedAndScopedToLifecycle()
+    {
+        static OpenNowStreamerConfig callbackConfig;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbackConfig = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy timers(&runtime, &NativeStreamRuntime::sessionTimerReceived);
+        QSignalSpy generic(&runtime, &NativeStreamRuntime::eventReceived);
+        bool guiThread = false;
+        connect(&runtime, &NativeStreamRuntime::sessionTimerReceived, &runtime,
+                [&] { guiThread = QThread::currentThread() == runtime.thread(); });
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("first")}}));
+        QTRY_VERIFY(runtime.inputAllowed());
+        const auto deliver = [](const QJsonObject &event) {
+            const auto bytes = QJsonDocument(event).toJson(QJsonDocument::Compact);
+            std::thread callback([bytes] {
+                callbackConfig.event_callback(
+                    reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                    static_cast<std::size_t>(bytes.size()), callbackConfig.user_data);
+            });
+            callback.join();
+        };
+        QJsonObject event{{QStringLiteral("type"), QString::fromLatin1(OPENNOW_STREAMER_EVENT_SESSION_TIMER)},
+                          {QStringLiteral("startId"), QStringLiteral("first")},
+                          {QStringLiteral("timerType"), int(OPENNOW_STREAMER_TIMER_IDLE_WARNING)},
+                          {QStringLiteral("secondsLeft"), 60}, {QStringLiteral("active"), true}};
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 1);
+        QVERIFY(guiThread);
+        QCOMPARE(timers[0][0].value<quint8>(), quint8(4));
+        QCOMPARE(timers[0][1].value<quint32>(), quint32(60));
+        QVERIFY(timers[0][2].toBool());
+        event[QStringLiteral("active")] = false;
+        deliver(event);
+        event[QStringLiteral("timerType")] = int(OPENNOW_STREAMER_TIMER_IDLE_EXPIRY);
+        event[QStringLiteral("secondsLeft")] = 0;
+        deliver(event);
+        event[QStringLiteral("secondsLeft")] = double(std::numeric_limits<quint32>::max());
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 4);
+        QVERIFY(!timers[1][2].toBool());
+        QCOMPARE(timers[2][0].value<quint8>(), quint8(5));
+        QCOMPARE(timers[2][1].value<quint32>(), quint32(0));
+        QCOMPARE(timers[3][1].value<quint32>(), std::numeric_limits<quint32>::max());
+        for (const auto &invalid : {QJsonValue(-1), QJsonValue(4294967296.0), QJsonValue(0.5),
+                                    QJsonValue(QStringLiteral("60")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("secondsLeft")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(3), QJsonValue(4.5), QJsonValue(QStringLiteral("4")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("timerType")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(1), QJsonValue(QStringLiteral("true")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("active")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(QStringLiteral("old")), QJsonValue()}) {
+            auto stale = event;
+            stale[QStringLiteral("startId")] = invalid;
+            deliver(stale);
+        }
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 4);
+        QCOMPARE(generic.size(), 0);
+        deliver(event);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("replacement")}}));
+        QTRY_VERIFY(runtime.inputAllowed());
+        QCOMPARE(timers.size(), 4);
+        deliver(event);
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 4);
+        event[QStringLiteral("startId")] = QStringLiteral("replacement");
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 5);
+        QJsonObject termination{{QStringLiteral("source"), QString::fromLatin1(OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER)},
+            {QStringLiteral("code"), QStringLiteral("server-terminated")},
+            {QStringLiteral("startId"), QStringLiteral("old")},
+            {QStringLiteral("wireCode"), 2147680291.0}, {QStringLiteral("reason"), 56},
+            {QStringLiteral("extendedCode"), 2147680263.0}, {QStringLiteral("resumable"), false}};
+        QJsonObject terminal{{QStringLiteral("type"), QStringLiteral("error")},
+            {QStringLiteral("termination"), termination}};
+        deliver(terminal);
+        QCoreApplication::processEvents();
+        QCOMPARE(generic.size(), 0);
+        QVERIFY(runtime.presentationAllowed());
+        termination[QStringLiteral("startId")] = QStringLiteral("replacement");
+        terminal[QStringLiteral("termination")] = termination;
+        deliver(terminal);
+        QTRY_COMPARE(generic.size(), 1);
+        QCOMPARE(generic[0][0].toJsonObject().value(QStringLiteral("termination")).toObject(), termination);
+        QVERIFY(!runtime.presentationAllowed());
+        terminal[QStringLiteral("type")] = QStringLiteral("status");
+        terminal[QStringLiteral("status")] = QStringLiteral("stopped");
+        deliver(terminal);
+        QTRY_COMPARE(generic.size(), 2);
+        deliver(event);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 5);
+        deliver(event);
+        QVERIFY(runtime.shutdown());
+        QVERIFY(runtime.start());
+        deliver(terminal);
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 5);
+        QCOMPARE(generic.size(), 2);
+        QVERIFY(runtime.shutdown());
+    }
+
     void rumbleCallbacksValidateFieldsAndRejectReplacedSessions()
     {
         static OpenNowStreamerConfig callbackConfig;

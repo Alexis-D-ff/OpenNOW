@@ -1,11 +1,13 @@
 #include "acceptance/AcceptanceSession.h"
 #include "app/AppController.h"
 #include "core/CoreClient.h"
+#include "streaming/NativeStreamRuntime.h"
 #include "acceptance/MotionAcceptance.h"
 
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QDeadlineTimer>
+#include <QDateTime>
 #include <QQmlComponent>
 #include <QFileInfo>
 #include <QQmlApplicationEngine>
@@ -307,6 +309,87 @@ int AcceptanceSession::startSmokeWorkload()
             } else {
                 QTimer::singleShot(150, this, finish);
             }
+        });
+    } else if (m_smokeTest && m_arguments.contains(u"--smoke-stream-idle-warning"_s)) {
+        auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
+        auto *runtime = m_engine.rootContext()->contextProperty(u"NativeStreamRuntime"_s).value<QObject *>();
+        auto *window = m_engine.rootObjects().isEmpty() ? nullptr
+            : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+        if (!store || !runtime || !window || m_coreClient.state() == u"ready"_s) return EXIT_FAILURE;
+        store->setProperty("streamerStartRequestId", u"idle-warning-fixture"_s);
+        store->setProperty("streamInputPauseRequestId", u"idle-warning-fixture"_s);
+        store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"idle-warning-fixture"_s},
+            {u"phase"_s, u"ready"_s}});
+        store->setProperty("streamer", QVariantMap{{u"status"_s, u"streaming"_s},
+            {u"sessionId"_s, u"idle-warning-fixture"_s}, {u"firstFrameLatencyMs"_s, 37}});
+        store->setProperty("streamState", u"streaming"_s);
+        if (m_arguments.contains(u"--smoke-idle-fullscreen"_s)) window->showFullScreen();
+        window->requestActivate();
+        const auto overlay = m_arguments.contains(u"--smoke-idle-stats"_s)
+            ? (m_arguments.contains(u"--desktop"_s) ? u"desktop-stream-stats"_s : u"stream-stats"_s)
+            : QString{};
+        m_controller.showOverlay(overlay);
+        QTimer::singleShot(250, this, [this, store, runtime, window, overlay] {
+            auto *surface = window->findChild<QQuickItem *>(u"streamSurfaceHost"_s);
+            auto *notice = window->findChild<QQuickItem *>(u"streamIdleWarning"_s);
+            if (!surface || !notice || !surface->isVisible()) {
+                m_application.exit(EXIT_FAILURE);
+                return;
+            }
+            const auto inputEnabled = surface->property("inputEnabled").toBool();
+            const auto focus = window->activeFocusItem();
+            const auto route = m_controller.route();
+            const auto timer = [runtime](quint8 type, quint32 seconds, bool active) {
+                return QMetaObject::invokeMethod(runtime, "sessionTimerReceived",
+                    Q_ARG(quint8, type), Q_ARG(quint32, seconds), Q_ARG(bool, active));
+            };
+            if (!timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true)) {
+                m_application.exit(EXIT_FAILURE);
+                return;
+            }
+            QTimer::singleShot(150, this, [this, store, window, surface, notice, timer,
+                                          inputEnabled, focus, route, overlay] {
+                const auto stable = [&] {
+                    return !m_qmlWarningOccurred && surface->isVisible()
+                        && window->findChild<QQuickItem *>(u"streamSurfaceHost"_s) == surface
+                        && surface->property("inputEnabled").toBool() == inputEnabled
+                        && window->activeFocusItem() == focus && m_controller.route() == route
+                        && m_controller.overlay() == overlay
+                        && store->property("streamerStartRequestId").toString() == u"idle-warning-fixture"_s;
+                };
+                bool passed = stable() && inputEnabled && focus == surface && notice->isVisible();
+                QKeyEvent press(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QGuiApplication::sendEvent(window, &press);
+                QKeyEvent release(QEvent::KeyRelease, Qt::Key_Escape, Qt::NoModifier);
+                QGuiApplication::sendEvent(window, &release);
+                passed = passed && stable() && notice->isVisible();
+                const auto shot = m_arguments.indexOf(u"--screenshot"_s);
+                if (shot >= 0 && shot + 1 < m_arguments.size())
+                    passed = passed && QFileInfo(m_arguments.at(shot + 1)).isAbsolute()
+                        && window->grabWindow().save(m_arguments.at(shot + 1));
+                notice->setProperty("warningNowMs", double(QDateTime::currentMSecsSinceEpoch() + 2'000));
+                passed = passed && notice->property("secondsLeft").toDouble() <= 58
+                    && notice->property("secondsLeft").toDouble() > 0 && notice->isVisible() && stable();
+                notice->setProperty("warningNowMs", double(QDateTime::currentMSecsSinceEpoch() + 61'000));
+                passed = passed && notice->property("secondsLeft").toDouble() == 0
+                    && notice->isVisible() && stable();
+                passed = passed && timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 0, false)
+                    && !notice->isVisible() && stable();
+                passed = passed && timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true)
+                    && notice->isVisible() && notice->property("secondsLeft").toDouble() == 60
+                    && timer(OPENNOW_STREAMER_TIMER_IDLE_EXPIRY, 0, true)
+                    && !notice->isVisible() && stable();
+                passed = passed && timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true)
+                    && notice->isVisible();
+                store->setProperty("activeSession", QVariant());
+                passed = passed && !notice->isVisible();
+                store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"idle-warning-fixture"_s}});
+                passed = passed && timer(OPENNOW_STREAMER_TIMER_IDLE_WARNING, 60, true) && notice->isVisible();
+                store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"replacement-fixture"_s}});
+                passed = passed && !notice->isVisible();
+                if (!passed) qCritical("Idle warning changed stream identity, focus, input ownership, or lifecycle");
+                m_application.exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
+            });
         });
     } else if (m_smokeTest && m_arguments.contains(u"--smoke-input-capture-error"_s)) {
         auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
