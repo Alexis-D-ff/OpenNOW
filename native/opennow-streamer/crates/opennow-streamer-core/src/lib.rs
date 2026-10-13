@@ -3526,14 +3526,17 @@ mod tests {
             if self.input_closed {
                 return Err(TransportError::Closed);
             }
-            if self
-                .input_not_ready
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                return Err(TransportError::InputNotReady);
+            let mut remaining = self.input_not_ready.load(Ordering::Acquire);
+            while remaining != 0 {
+                match self.input_not_ready.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Err(TransportError::InputNotReady),
+                    Err(current) => remaining = current,
+                }
             }
             if let Some(sent) = &self.input_sent {
                 let _ = sent.send(bytes.clone());
