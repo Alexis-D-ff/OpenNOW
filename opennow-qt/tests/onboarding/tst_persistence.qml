@@ -70,6 +70,18 @@ TestCase {
         verify(!state.needed)
     }
 
+    function test_resetReturnsOnlyNamedKeysToPersistedValues() {
+        state.setSetting("fps", 120)
+        state.setSetting("frameGeneration", "2x")
+        state.setSetting("upscaling", "fsr1")
+        state.resetSettings(["frameGeneration", "upscaling", "upscalingSharpness"])
+        compare(state.settings.frameGeneration, "off")
+        compare(state.settings.upscaling, undefined)
+        compare(state.settings.fps, 120)
+        compare(Object.keys(state.draft), ["fps"])
+        compare(core.calls.length, 0)
+    }
+
     function test_stageWithoutSavingOrChangingShell() {
         state.setSetting("launchInConsoleMode", true)
         state.setSetting("fps", 120)

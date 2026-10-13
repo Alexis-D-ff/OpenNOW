@@ -51,6 +51,16 @@ QtObject {
         error = ""
     }
 
+    function resetSettings(keys) {
+        if (saving)
+            return
+        const updated = Object.assign({}, draft)
+        for (const key of keys)
+            delete updated[key]
+        draft = updated
+        error = ""
+    }
+
     function finish() {
         if (saving || replaying)
             return

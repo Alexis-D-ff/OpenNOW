@@ -222,7 +222,7 @@ if(BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     foreach(width 960 1440)
-        foreach(step 0 2 5)
+        foreach(step 0 1 3)
             add_test(NAME "qml-onboarding-layout-${width}-${step}" COMMAND opennow-qt
                 --smoke-test --allow-multiple-instances --desktop --route home
                 --smoke-onboarding --onboarding-ui-check --onboarding-step ${step}
@@ -232,7 +232,7 @@ if(BUILD_TESTING)
         endforeach()
         add_test(NAME "qml-onboarding-resolution-${width}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
-            --smoke-onboarding --onboarding-ui-check --onboarding-step 2 --onboarding-resolution-expanded
+            --smoke-onboarding --onboarding-ui-check --onboarding-step 1 --onboarding-resolution-expanded
             --smoke-width ${width} --smoke-height 540 --onboarding-ui-scale 1.25 --reduced-motion)
         set_tests_properties("qml-onboarding-resolution-${width}" PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
@@ -247,7 +247,7 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME "qml-onboarding-awdl-${width}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
-            --smoke-onboarding --onboarding-awdl-check --onboarding-step 3
+            --smoke-onboarding --onboarding-awdl-check --onboarding-step 2
             --smoke-width ${width} --smoke-height ${awdl_height}
             --onboarding-ui-scale ${awdl_scale} --reduced-motion)
         set_tests_properties("qml-onboarding-awdl-${width}" PROPERTIES
@@ -255,7 +255,7 @@ if(BUILD_TESTING)
     endforeach()
     add_test(NAME qml-onboarding-awdl-fullscreen COMMAND opennow-qt
         --smoke-test --allow-multiple-instances --desktop --route home
-        --smoke-onboarding --onboarding-awdl-check --onboarding-step 3
+        --smoke-onboarding --onboarding-awdl-check --onboarding-step 2
         --onboarding-awdl-fullscreen --reduced-motion)
     set_tests_properties(qml-onboarding-awdl-fullscreen PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
@@ -265,7 +265,7 @@ if(BUILD_TESTING)
         --smoke-width 960 --smoke-height 540 --reduced-motion)
     set_tests_properties(qml-onboarding-login-scroll PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
-    foreach(step RANGE 0 5)
+    foreach(step RANGE 0 3)
         add_test(NAME "qml-onboarding-scroll-${step}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
             --smoke-onboarding --onboarding-scroll-check --onboarding-step ${step}
@@ -279,7 +279,7 @@ if(BUILD_TESTING)
             --smoke-onboarding --smoke-width ${width} --reduced-motion)
         set_tests_properties("qml-onboarding-${width}" PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
-        foreach(step RANGE 0 5)
+        foreach(step RANGE 0 3)
             add_test(NAME "qml-onboarding-render-${width}-${step}" COMMAND opennow-qt
                 --smoke-test --allow-multiple-instances --desktop --route home
                 --smoke-onboarding --onboarding-step ${step} --smoke-width ${width} --reduced-motion)

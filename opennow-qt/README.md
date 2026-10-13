@@ -301,12 +301,17 @@ the server/client cursor handoff.
 
 ### First-run onboarding
 
-New profiles enter setup after provider sign-in. The flow covers the 1.0.0 beta
-notice, desktop or console mode, streaming preferences, optional frame generation,
-macOS-only MetalFX upscaling, and optional GitHub Sponsors support. Existing
-profiles migrate with onboarding completed and retain their preferences.
+New profiles enter setup after provider sign-in. Setup asks one question per
+screen: **Mode** (desktop or console, with the beta notice and a bug-report link),
+**Picture** (resolution and frame rate up front; HDR, codec and bitrate under
+**Fine-tune**), **Network check** (macOS only), optional **Boost** (frame generation
+and upscaling, with **Skip for now**), and **Ready** (a summary plus an optional
+GitHub Sponsors card). A segmented progress bar in the header shows the steps for
+the current platform. Existing profiles migrate with onboarding completed and
+retain their preferences.
 
-Choices stay in a local draft until **Finish setup** or **Skip setup**. Both actions
+Choices stay in a local draft until **Finish and open library** or **Skip setup**.
+**Skip for now** on Boost discards only the staged boost choices. Both actions
 save the current choices, then persist `onboardingCompleted` last. If a write fails,
 setup keeps the draft and presents the error for retry. Selecting console mode does
 not replace the wizard while its settings are being saved. No payment or diagnostic
@@ -324,11 +329,12 @@ stepper as Settings. Selection still edits the onboarding draft rather than savi
 immediately. Short pages center within the available content area; longer pages
 remain scrollable, including keyboard focus inside the expanded resolution picker.
 
-On macOS, setup requires the `awdl0` interface to be down. Boost offers an explicit,
+On macOS, setup requires the `awdl0` interface to be down. The Network check step,
+which appears only where the AWDL controller is supported, offers an explicit,
 confirmed disable action using the macOS administrator prompt. Finish and Skip
 both check the current interface state, with a fresh check before sending the
 completion-marker write after the other settings. Enabled, unreadable and busy
-states block completion and return to Boost without discarding the draft. A
+states block completion and return to the Network check without discarding the draft. A
 confirmed absent interface needs no change; other platforms have no AWDL requirement.
 Re-enabling AWDL from the card undoes the network change and blocks completion again.
 OpenNOW never disables AWDL automatically, stores administrator credentials, or
@@ -347,23 +353,24 @@ QT_QPA_PLATFORM=offscreen build/opennow-qt/opennow-qt \
   --reduced-motion --screenshot /absolute/path/onboarding.png
 ```
 
-`--onboarding-step` accepts 0 through 5. Add `--smoke-light-theme` or
+`--onboarding-step` accepts 0 through 3 (Mode, Picture, Boost, Ready) where the
+Network check is absent. Add `--smoke-light-theme` or
 `--onboarding-ui-scale 1.25` to inspect alternate appearances. For the existing
 provider sign-in screen, replace `--onboarding-step 0` with `--onboarding-login`.
 Add `--onboarding-ui-check` to verify centering and draft resolution selection, and
-`--onboarding-resolution-expanded --onboarding-step 2` to exercise the expanded
+`--onboarding-resolution-expanded --onboarding-step 1` to exercise the expanded
 picker. Use `--onboarding-replay-check` to verify the Settings confirmation,
 cancellation and failed-save retry; add `--onboarding-replay-dialog` for a dialog
 screenshot. These replay UI fixtures do not restart the test process.
-Add `--onboarding-awdl-check --onboarding-step 3` to exercise the macOS card with an
-injected controller on any platform. This checks confirmation, cancellation,
+Add `--onboarding-awdl-check --onboarding-step 2` to exercise the macOS Network check
+with an injected controller on any platform. This checks confirmation, cancellation,
 restore, busy, error and unsupported states without changing a network interface.
 These switches run only with the smoke fixture; they do not start provider login,
 open donation links, or write account settings. Real provider approval and native
 MetalFX output still require the corresponding account and macOS device.
 
-Capture every setup step in desktop, compact 1.25×, and light appearances, plus
-desktop and compact login, for visual comparison with the Paper design:
+Capture every setup step in desktop, compact 1.25×, and light appearances, the
+macOS Network check, plus desktop and compact login, for visual comparison with the Paper design:
 
 ```sh
 bash scripts/capture-qt-onboarding.sh build/opennow-qt/opennow-qt /absolute/path/onboarding-review
