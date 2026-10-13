@@ -144,13 +144,18 @@ capturing a different device.
 The native RTSP path requires the server's DESCRIBE to advertise
 `x-nv-general.rtcMicOnNativeBundle:1`. Only then, and with microphone opt-in,
 ANNOUNCE includes that flag and `x-nv-mic.micSsrcConfig.senderSsrc:1`. The existing
-str0m bundle sends Opus payload type 111 on SSRC 1, independently of downlink
-audio. This follows the native bundle findings documented in OpenNOW-Mac's
+str0m bundle sends the negotiated microphone Opus payload type on SSRC 1,
+independently of downlink audio. Handoffs without a microphone payload type retain
+PT 111. When the handoff supplies a RED payload type and a nonzero redundancy
+level, the sender wraps Opus in RFC 2198 RED with up to three previous frames.
+History is cleared on mute/unmute, and unrepresentable offsets, block lengths,
+or packets above the payload budget reduce redundancy rather than dropping the
+primary frame. This follows the native bundle findings documented in OpenNOW-Mac's
 `docs/StreamTransportArchitecture.md` (reference revision `88a09bd68598651b367aa4744e7528da9c074d28`).
 Legacy RTSP/UDP microphone carriage is not implemented.
 
 Capture produces mono 48 kHz PCM and an off-callback encoder produces 10 ms Opus
-frames at 32 kbps. The frame size must match the server's `mic.frameSize:10`: the
+frames at 16 kbps. The frame size must match the server's `mic.frameSize:10`: the
 cloud PC's microphone stays silent when it receives 20 ms frames. PCM, encoded audio, and transport queues each hold at most five
 frames and drop old data under load. Mute closes capture and clears pending audio;
 unmute preserves the RTP clock and transport sequence lifetime. Capture or uplink
@@ -166,6 +171,34 @@ reclaims stopped capture on its next bounded poll. The host sleeps without a
 polling timer when no capture is active. Output enumeration and input-pause
 commands never open, mute, or restart capture. The actual audio-device-aware
 stream-start entry point resets the microphone clock; mute/unmute does not.
+When SDL reports an active capture device as disconnected, the same host closes
+it and tries the default endpoint again at 250 ms intervals for up to one second.
+PCM, encoded, and in-flight encoder generations are flushed during reopening.
+The original sample-clock origin is retained. Reopening failure disables only
+the mic. Disabled capture never opens or retries a device.
+
+### Timestamp audio jitter buffer
+
+Authenticated NVST audio RTP is reordered by sender timestamp and sequence before
+RED recovery and decoding. The network buffer starts at 45 ms and increases its
+target by 20 ms for a new late-arrival burst after playout starts, capped at 200 ms.
+It bounds timestamp span to 200 ms, packet count to 80, and individual payload
+size to the existing eight-redundant-block RED receive limit. Duplicates and stale
+originals are discarded; source changes reset the timeline. `audio-jitter` logs
+report the target, queue depth, reordering, stale/overflow/invalid drops, source
+resets, and underflow observations once a second without audio contents.
+
+The Windows GFN logs establish an 80 ms initial target, a dynamic 45 ms floor,
+the ceiling, and the growth value, but not the complete target-reduction
+predicate. OpenNOW deliberately starts at that 45 ms floor rather than imposing
+80 ms permanently without a verified downward adaptation path. After N distinct
+underflow bursts, the target is `min(45 + 20*N, 200)` ms until a source reset.
+Downward adaptation remains deferred. This adds 45 ms before decode on a clean
+network, rising only on late bursts; the existing PCM capacity and roughly 40 ms
+catch-up target are unchanged. These are separate queues, so the addition is
+45 ms, not merely 5 ms compared with the PCM catch-up target. This is not a total
+end-to-end latency cap. OS endpoint buffering is outside the network buffer's
+bound.
 
 The local JSON protocol is version 7; the C ABI is unchanged. `hello` exposes
 `supportsMicrophone` for runtime capture support, while the `start` response

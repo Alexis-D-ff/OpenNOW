@@ -155,7 +155,7 @@ IDR waited for a video SSRC, and a successful enqueue consumed the request
 without confirming keyframe receipt. Startup now arms recovery before channel
 opening; control IDR can send without a video SSRC, while PLI still requires the
 authenticated stream identifier. Successful and failed send attempts are limited
-to the existing 250 ms cooldown. Requests remain pending until a complete
+to a separate 100 ms retry interval. Requests remain pending until a complete
 keyframe is assembled, and subsequent loss or decoder rejection can re-arm them.
 The existing wire messages and sender identifiers are unchanged.
 

@@ -7,7 +7,7 @@ mod ffmpeg;
 mod mediacodec;
 mod v4l2;
 pub(crate) use mediacodec::MediaCodecDecoder;
-pub use mediacodec::probe_mediacodec;
+pub use mediacodec::{MEDIACODEC_MAX_HEIGHT, MEDIACODEC_MAX_WIDTH, probe_mediacodec};
 #[cfg(any(feature = "ffmpeg", test))]
 #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
 mod v4l2_request;

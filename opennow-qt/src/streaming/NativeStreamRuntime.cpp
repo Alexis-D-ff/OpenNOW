@@ -197,6 +197,11 @@ struct NativeStreamRuntime::Private {
     bool firstNotification = false;
     std::atomic<quint64> presentationGeneration{0};
     std::atomic_bool presentationAllowed{false};
+    QSize decodedDisplaySize;
+    std::mutex displaySizeMutex;
+    QSize pendingDisplaySize;
+    quint64 pendingDisplayGeneration = 0;
+    bool displaySizeScheduled = false;
     UpstreamProgressSnapshot upstreamProgressSamples;
     std::atomic_bool inputAllowed{false};
     bool inputAuthorizationPending = false;
@@ -302,10 +307,50 @@ bool NativeStreamRuntime::inputAllowed() const
     return d->inputAllowed.load(std::memory_order_acquire);
 }
 
+QSize NativeStreamRuntime::decodedDisplaySize() const
+{
+    return d->decodedDisplaySize;
+}
+
+void NativeStreamRuntime::publishDecodedDisplaySize(const QSize &size, quint64 generation)
+{
+    if (!size.isValid() || size.isEmpty()) return;
+    const std::lock_guard lock(d->displaySizeMutex);
+    if (generation != presentationGeneration() || !presentationAllowed()) return;
+    if (d->pendingDisplaySize == size && d->pendingDisplayGeneration == generation) return;
+    d->pendingDisplaySize = size;
+    d->pendingDisplayGeneration = generation;
+    if (d->displaySizeScheduled) return;
+    d->displaySizeScheduled = true;
+    QMetaObject::invokeMethod(this, [this] {
+        QSize size;
+        quint64 generation;
+        {
+            const std::lock_guard lock(d->displaySizeMutex);
+            size = d->pendingDisplaySize;
+            generation = d->pendingDisplayGeneration;
+            d->displaySizeScheduled = false;
+        }
+        if (generation != presentationGeneration() || !presentationAllowed()
+            || size.isEmpty() || d->decodedDisplaySize == size) return;
+        d->decodedDisplaySize = size;
+        emit decodedDisplaySizeChanged(size, generation);
+    }, Qt::QueuedConnection);
+}
+
 void NativeStreamRuntime::invalidatePresentation()
 {
     d->presentationAllowed.store(false, std::memory_order_release);
-    d->presentationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    const auto generation = d->presentationGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    {
+        const std::lock_guard lock(d->displaySizeMutex);
+        d->pendingDisplaySize = {};
+        d->pendingDisplayGeneration = generation;
+    }
+    if (!d->decodedDisplaySize.isEmpty()) {
+        d->decodedDisplaySize = {};
+        emit decodedDisplaySizeChanged({}, generation);
+    }
     d->presentationStartId.clear();
     d->acceptedSessionStartId.clear();
     d->rumbleStartId.clear();
@@ -572,6 +617,7 @@ OpenNowStreamerStatus NativeStreamRuntime::recordLatestFrame(
         return OPENNOW_STREAMER_CLOSED;
     }
 
+    const auto generation = presentationGeneration();
     auto status = d->api.acquireLatestFrame(d->handle, frame, info);
     if (status != OPENNOW_STREAMER_OK) return status;
     if (!*frame) return OPENNOW_STREAMER_NULL_POINTER;
@@ -584,6 +630,11 @@ OpenNowStreamerStatus NativeStreamRuntime::recordLatestFrame(
             info->height = recorded->height;
         }
         info->presentation_time_ns = recorded->presentation_time_ns;
+        if (recorded->resource && info->width > 0 && info->height > 0
+            && info->width <= std::uint32_t(std::numeric_limits<int>::max())
+            && info->height <= std::uint32_t(std::numeric_limits<int>::max())) {
+            publishDecodedDisplaySize(QSize(int(info->width), int(info->height)), generation);
+        }
     }
     return status;
 }

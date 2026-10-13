@@ -20,13 +20,16 @@ incomplete protocol replies are bounded and retried rather than reused as stale 
 
 Frame generation is disabled for HDR sources because the current interpolation path is designed for SDR. Native frames retain their original cadence and HDR precision; enabling HDR does not insert SDR-generated frames into the stream.
 
-HDR requests use ten bits and preserve the selected chroma format. Auto prefers HEVC and falls back to AV1 for 4:2:0 only when the runtime reports the required hardware support. HDR 4:4:4 requires HEVC and a supported ten-bit 4:4:4 decode and conversion path. Explicit incompatible codecs or unavailable output produce an actionable error before allocating a new session. An explicit server SDR response remains SDR; a saved HDR preference does not override the accepted session format.
+HDR requests use ten bits and preserve the selected chroma format. Auto prefers AV1, then HEVC, then H.264 for SDR and HDR, subject to the runtime's exact decode profiles. AV1 Auto remains limited to 120 FPS and 5120x2880 pixels; explicit AV1 above 120 FPS also caps at 120 because higher throughput is not confirmed by the current probes. HDR 4:4:4 requires HEVC and a supported ten-bit 4:4:4 decode and conversion path. Unsupported HDR falls back to SDR before allocation and records a `stream_profile_fallback` diagnostic. An unavailable explicit codec still fails. An explicit server SDR response remains SDR; a saved HDR preference does not override the accepted session format.
+
+Every H.264 selection caps at 120 FPS and fewer than 4,953,600 pixels. Per-codec maximum decode dimensions also constrain allocation: Windows enforces 4096x2304, and Linux Vulkan reports limits from the attached device. Core selects the closest supported aspect mode that fits those limits and logs each change without rewriting saved preferences. An oversized accepted session fails attachment instead of silently changing its mode.
 
 ## 10-bit 4:4:4
 
 Ten-bit 4:4:4 does not imply HDR. Select Auto or HEVC;
 the supported GFN request policy does not request AV1 4:4:4. Explicit incompatible codec
-choices fail before session allocation instead of silently reducing chroma. Enabling HDR
+choices become HEVC when the selected backend supports the requested 4:4:4 profile.
+Otherwise preflight reduces chroma to 4:2:0 and records the fallback. Enabling HDR
 preserves 4:4:4 and promotes an eight-bit selection to ten bits for that session without rewriting the saved SDR preference.
 
 - Linux uses the attached Vulkan Video device's exact HEVC range-extension profile and P410
@@ -48,13 +51,14 @@ preserves 4:4:4 and promotes an eight-bit selection to ten bits for that session
 
 Platform profile and conversion tests are not evidence of a successful GFN session or an HDR
 display's output. The exact GPU, driver, decoder, service tier, and compositor must support
-the requested mode. Unsupported profiles remain explicit errors rather than CPU fallbacks.
+the requested mode. New allocations log unsupported-profile reductions; an incompatible
+accepted profile fails attachment rather than switching to a CPU fallback.
 
 ## Color and ownership contract
 
 CloudMatch receives `sdrHdrMode=1` for native HDR and `trueHdr=false`. TrueHDR requests a separate server-side AI SDR-to-HDR filter, which OpenNOW does not offer. SDR requests send `displayData:null`. HDR requests include measured output luminance when a validated snapshot is available, or requested-content defaults of 1000 nits maximum, 400 nits frame average, and zero minimum. A complete, validated runtime metadata group can additionally supply maximum full-frame luminance and display primaries and white point. Missing or invalid optional metadata is omitted rather than inferred. The luminance defaults are not physical-display measurements. Wayland color-management continues to supply only its target luminance pair: its PQ description does not establish a display peak from primary color volume luminance or expose a sustained full-frame value. The accepted HDR mode is carried through resume, stream preparation, and NVST's dynamic-range and bit-depth settings.
 
-Decoder metadata carries transfer function, primaries, matrix, range, and supported chroma location. Explicit metadata takes precedence over negotiated defaults; unspecified fields use those defaults. Unsupported combinations and precision-losing paths fail explicitly. Pixel depth alone never selects an HDR transfer function.
+Decoder metadata carries transfer function, primaries, matrix, range, and supported chroma location. Recognized decoded metadata takes precedence over negotiated defaults; unspecified fields use those defaults. Windows MF and Linux FFmpeg also retain each negotiated field when a decoded descriptor is unsupported, with bounded warnings. Incompatible color combinations and precision-losing paths still fail explicitly. Pixel depth alone never selects an HDR transfer function.
 
 The texture format and encoded RGB color space are separate fields introduced in FFI ABI 6 and retained in later ABI releases. Windows publishes PQ BT.2020 in RGB10A2; Linux preserves PQ/HLG BT.2020 in RGBA16F. Qt performs the transfer-function and gamut conversion for the actual output. HDR/SDR changes retain per-frame metadata and bounded GPU resource ownership. Build and deploy the Qt shell and native streamer together; an older ABI is rejected.
 
