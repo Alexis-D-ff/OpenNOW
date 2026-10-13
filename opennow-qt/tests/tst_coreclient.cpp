@@ -607,8 +607,14 @@ private slots:
             QCOMPARE(choices.size(), 4);
             for (const auto &entry : choices) {
                 const auto choice = entry.toObject();
-                const auto expected = supported && choice.value(QStringLiteral("value")).toString().endsWith(QStringLiteral("420"));
-                QCOMPARE(choice.value(QStringLiteral("disabled")).toBool(), !expected);
+                const auto value = choice.value(QStringLiteral("value")).toString();
+                QCOMPARE(choice.value(QStringLiteral("disabled")).toBool(), value.endsWith(QStringLiteral("444")));
+                if (value == QStringLiteral("8bit_444")) {
+                    const auto delivered = supported ? QStringLiteral("falls back to 10bit_420")
+                                                     : QStringLiteral("falls back to 8bit_420");
+                    QVERIFY2(choice.value(QStringLiteral("reason")).toString().contains(delivered),
+                             qPrintable(choice.value(QStringLiteral("reason")).toString()));
+                }
             }
             QCOMPARE(callerCapabilities.value(QStringLiteral("nativeHdrSupported")).toBool(), !supported);
         }
