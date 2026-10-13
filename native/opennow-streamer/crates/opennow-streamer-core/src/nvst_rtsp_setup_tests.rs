@@ -105,6 +105,7 @@ fn video_setup_keeps_the_official_first_attempt_and_its_metadata() {
     }])
     .unwrap();
     assert_eq!(setup.peer, ("192.0.2.10".to_owned(), 5004, 5005));
+    assert!(!setup.bundle_fallback);
     assert_eq!(
         header_value(&setup.response, "x-nv-ping-payload"),
         Some("00ff")
@@ -432,6 +433,7 @@ fn video_setup_uses_bundle_peer_on_first_peerless_success_without_retry() {
     )
     .unwrap();
     assert_eq!(setup.peer, ("192.0.2.99".to_owned(), 13749, 13749));
+    assert!(setup.bundle_fallback);
     assert_eq!(
         header_value(&setup.response, "x-nv-ping-payload"),
         Some("00ff")

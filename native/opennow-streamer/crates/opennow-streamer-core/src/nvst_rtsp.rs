@@ -85,6 +85,58 @@ struct RtspClient {
 struct VideoSetup {
     response: RtspResponse,
     peer: (String, u16, u16),
+    bundle_fallback: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BundleEndpoint<'a> {
+    ip: &'a str,
+    port: u32,
+    source: &'static str,
+}
+
+/// Resolves the ICE/DTLS bundle peer the way GFN's `getBundlePortNumber` does: the
+/// CloudMatch BUNDLE connection (usage 17) wins over the VIDEO one (usage 2), which
+/// alliance seats publish as a separate NAT mapping.
+fn bundle_endpoint(context: &SessionContext) -> Option<BundleEndpoint<'_>> {
+    context
+        .session
+        .connection_info
+        .iter()
+        .flatten()
+        .find_map(|connection| {
+            let ip = connection.ip.as_deref()?;
+            (connection.usage == 17
+                && (1..=65535).contains(&connection.port)
+                && ip.parse::<IpAddr>().is_ok())
+            .then_some(BundleEndpoint {
+                ip,
+                port: connection.port,
+                source: "cloudmatch-bundle",
+            })
+        })
+        .or_else(|| {
+            context
+                .session
+                .media_connection_info
+                .as_ref()
+                .map(|media| BundleEndpoint {
+                    ip: &media.ip,
+                    port: media.port,
+                    source: "cloudmatch-media",
+                })
+        })
+}
+
+fn connection_usage_summary(context: &SessionContext) -> String {
+    context
+        .session
+        .connection_info
+        .iter()
+        .flatten()
+        .map(|connection| format!("{}:{}", connection.usage, connection.port))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -278,6 +330,7 @@ impl RtspClient {
                             return Ok(VideoSetup {
                                 response: *response,
                                 peer,
+                                bundle_fallback: true,
                             });
                         }
                     }
@@ -374,7 +427,11 @@ impl RtspClient {
                 match response.status {
                     200 => {
                         if let Some(peer) = peer {
-                            return Ok(VideoSetup { response, peer });
+                            return Ok(VideoSetup {
+                                response,
+                                peer,
+                                bundle_fallback: false,
+                            });
                         }
                         // 200 without a peer: stop sweeping immediately. Live
                         // alliance rigs accept the first SETUP but poison the
@@ -1043,33 +1100,48 @@ fn prepare_on_endpoint(
     let mut setup_headers = common_headers.clone();
     setup_headers.push(("Session", rtsp_session.clone()));
     setup_headers.push(("x-nv-ping", described_ping_version.to_string()));
+    let bundle_endpoint = bundle_endpoint(context);
+    let described_unified_socket = sdp_attribute(&describe.body, "general.enableUnifiedSocket")
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|value| value != 0);
+    opennow_streamer_protocol::log::log_line(
+        "INFO",
+        "rtsps",
+        &format!(
+            "bundle-route source={} unified_socket={described_unified_socket} server_bundle_port={} rtc_video_on_native_bundle={} connection_usages=[{}]",
+            bundle_endpoint.map_or("setup", |endpoint| endpoint.source),
+            sdp_attribute(&describe.body, "general.serverBundlePort").unwrap_or_default(),
+            sdp_attribute(&describe.body, "general.rtcVideoOnNativeBundle").unwrap_or_default(),
+            connection_usage_summary(context),
+        ),
+    );
     // CloudMatch bundle peer doubles as the video peer when rigs omit
     // Transport (validated here; the substitution itself is logged where it
     // happens inside setup_video).
-    let bundle_video_peer = context
-        .session
-        .media_connection_info
-        .as_ref()
-        .and_then(|media| {
-            let port = u16::try_from(media.port).ok().filter(|port| *port != 0)?;
-            media.ip.parse::<IpAddr>().ok()?;
-            Some((media.ip.clone(), port, port))
-        });
+    let bundle_video_peer = bundle_endpoint.and_then(|endpoint| {
+        let port = u16::try_from(endpoint.port)
+            .ok()
+            .filter(|port| *port != 0)?;
+        endpoint.ip.parse::<IpAddr>().ok()?;
+        Some((endpoint.ip.to_owned(), port, port))
+    });
     let VideoSetup {
         response: setup,
         peer: (video_peer_ip, video_peer_port, video_peer_port_end),
+        bundle_fallback,
     } = client.setup_video(
         &video_control,
         &target,
         &setup_headers,
-        mjolnir_port,
+        if described_unified_socket {
+            client_port
+        } else {
+            mjolnir_port
+        },
         bundle_video_peer,
     )?;
-    let (bundle_peer_ip, bundle_peer_port) = context
-        .session
-        .media_connection_info
-        .as_ref()
-        .map(|media| (media.ip.as_str(), media.port))
+    let (bundle_peer_ip, bundle_peer_port) = bundle_endpoint
+        .map(|endpoint| (endpoint.ip, endpoint.port))
         .unwrap_or((&video_peer_ip, u32::from(video_peer_port)));
     let bundle_peer_port = u16::try_from(bundle_peer_port)
         .ok()
@@ -1083,6 +1155,21 @@ fn prepare_on_endpoint(
         .map_err(|_| {
             NvstRtspError::new("invalid-media-peer", "NVST media peer is not an IP address")
         })?;
+    let unified_socket = described_unified_socket || bundle_fallback;
+    let (video_peer_ip, video_peer_port, video_peer_port_end) = if unified_socket {
+        (
+            bundle_peer.ip().to_string(),
+            bundle_peer.port(),
+            bundle_peer.port(),
+        )
+    } else {
+        (video_peer_ip, video_peer_port, video_peer_port_end)
+    };
+    let video_local_port = if unified_socket {
+        client_port
+    } else {
+        mjolnir_port
+    };
     let local_address = bundle
         .advertised_local_address_for(bundle_peer)
         .map_err(|error| {
@@ -1104,7 +1191,7 @@ fn prepare_on_endpoint(
         "INFO",
         "transport",
         &format!(
-            "NVST media route local={local_address} bundlePort={client_port} videoPort={mjolnir_port} bundlePeer={bundle_peer} videoPeer={video_peer_ip}:{video_peer_port}"
+            "NVST media route local={local_address} bundlePort={client_port} videoPort={video_local_port} bundlePeer={bundle_peer} videoPeer={video_peer_ip}:{video_peer_port} unifiedSocket={unified_socket}"
         ),
     );
     let setup_ping_payload = header_value(&setup, "x-nv-ping-payload").map(ToOwned::to_owned);
@@ -1151,7 +1238,8 @@ fn prepare_on_endpoint(
     let mut handoff = json!({
         "clientUdpPort":client_port,
         "packetSize":video_packet_size,
-        "mjolnirUdpPort":mjolnir_port,
+        "mjolnirUdpPort":(!unified_socket).then_some(mjolnir_port),
+        "unifiedSocket":unified_socket,
         "videoPeerIp":video_peer_ip,
         "videoPeerPort":video_peer_port,
         "videoPeerPortEnd":video_peer_port_end,
@@ -1183,27 +1271,17 @@ fn prepare_on_endpoint(
     if let Some(username) = bundle_username {
         handoff["bundleNattRemoteUsername"] = json!(username);
     }
-    if let Some(media) = context.session.media_connection_info.as_ref() {
-        handoff["bundlePeerIp"] = json!(media.ip);
-        handoff["bundlePeerPort"] = json!(media.port);
-    }
+    handoff["bundlePeerIp"] = json!(bundle_peer.ip().to_string());
+    handoff["bundlePeerPort"] = json!(bundle_peer.port());
 
     // Only log transport shape, never SDP, runtime keys, or ICE credentials.
     opennow_streamer_protocol::log::log_line(
         "INFO",
         "nvst-handoff",
         &format!(
-            "video_local_port={mjolnir_port} bundle_local_port={client_port} video_peer_port={video_peer_port} video_peer_port_end={video_peer_port_end} bundle_peer_port={} same_peer_host={} ping_version={ping_version} ping_bytes={} legacy_ping_payload={} srtp_profile={srtp_profile} rtcp_on_sctp={rtcp_on_sctp} sockets_retained=true reachability=unverified video_startup_timeout_ms={VIDEO_STARTUP_TIMEOUT_MS} video_idle_timeout_ms={VIDEO_TIMEOUT_MS}",
-            context
-                .session
-                .media_connection_info
-                .as_ref()
-                .map_or(u32::from(video_peer_port), |media| media.port),
-            context
-                .session
-                .media_connection_info
-                .as_ref()
-                .is_none_or(|media| media.ip == video_peer_ip),
+            "video_local_port={video_local_port} bundle_local_port={client_port} video_peer_port={video_peer_port} video_peer_port_end={video_peer_port_end} bundle_peer_port={} same_peer_host={} unified_socket={unified_socket} ping_version={ping_version} ping_bytes={} legacy_ping_payload={} srtp_profile={srtp_profile} rtcp_on_sctp={rtcp_on_sctp} sockets_retained=true reachability=unverified video_startup_timeout_ms={VIDEO_STARTUP_TIMEOUT_MS} video_idle_timeout_ms={VIDEO_TIMEOUT_MS}",
+            bundle_peer.port(),
+            bundle_peer.ip().to_string() == video_peer_ip,
             ping_payload.len(),
             ping_payload == "PING"
         ),
@@ -1228,6 +1306,7 @@ fn prepare_on_endpoint(
                 rtcp_on_sctp,
                 microphone_available,
                 qos_timings_v5: video_qos_offers.uses_v5_timings(),
+                unified_socket,
             },
         ),
         &describe.body,
@@ -1274,6 +1353,7 @@ struct AnnounceParams<'a> {
     rtcp_on_sctp: bool,
     microphone_available: bool,
     qos_timings_v5: bool,
+    unified_socket: bool,
 }
 
 fn negotiate_microphone(context: &SessionContext, describe: &str) -> bool {
@@ -1489,7 +1569,10 @@ fn build_announce(context: &SessionContext, params: AnnounceParams<'_>) -> Strin
         "a=x-nv-general.rtcVideoOnNativeBundle:0".to_owned(),
         "a=x-nv-general.rtcAudioOnNativeBundle:1".to_owned(),
         "a=x-nv-general.rtcDataChannelOnNativeBundle:1".to_owned(),
-        "a=x-nv-general.enableUnifiedSocket:0".to_owned(),
+        format!(
+            "a=x-nv-general.enableUnifiedSocket:{}",
+            u8::from(params.unified_socket)
+        ),
         format!(
             "a=x-nv-general.rtcpOnSctp:{}",
             u8::from(params.rtcp_on_sctp)
@@ -2418,6 +2501,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bundle_peer_prefers_the_cloudmatch_bundle_mapping_over_video() {
+        let mut context = context();
+        context.session.media_connection_info = Some(
+            serde_json::from_value(json!({"ip":"203.0.113.2","port":17181,"usage":2})).unwrap(),
+        );
+        context.session.connection_info = Some(
+            serde_json::from_value(json!([
+                {"ip":"203.0.113.2","port":17181,"usage":2},
+                {"ip":"seat.partner.example","port":17999,"usage":17},
+                {"ip":"203.0.113.2","port":0,"usage":17},
+                {"ip":"203.0.113.2","port":17182,"usage":17},
+                {"ip":"203.0.113.2","port":322,"usage":16}
+            ]))
+            .unwrap(),
+        );
+        let endpoint = bundle_endpoint(&context).expect("bundle endpoint");
+        assert_eq!((endpoint.ip, endpoint.port), ("203.0.113.2", 17182));
+        assert_eq!(endpoint.source, "cloudmatch-bundle");
+        assert_eq!(
+            connection_usage_summary(&context),
+            "2:17181,17:17999,17:0,17:17182,16:322"
+        );
+
+        context.session.connection_info = None;
+        let endpoint = bundle_endpoint(&context).expect("media endpoint");
+        assert_eq!((endpoint.ip, endpoint.port), ("203.0.113.2", 17181));
+        assert_eq!(endpoint.source, "cloudmatch-media");
+
+        context.session.media_connection_info = None;
+        assert!(bundle_endpoint(&context).is_none());
+    }
+
     fn context() -> SessionContext {
         serde_json::from_value(json!({
             "session": {
@@ -2465,6 +2581,36 @@ mod tests {
     }
 
     #[test]
+    fn announce_reports_the_selected_socket_layout() {
+        let value = context();
+        for (unified_socket, expected) in [
+            (false, "a=x-nv-general.enableUnifiedSocket:0\r\n"),
+            (true, "a=x-nv-general.enableUnifiedSocket:1\r\n"),
+        ] {
+            let sdp = build_announce(
+                &value,
+                AnnounceParams {
+                    stream: stream_config(&value),
+                    key: &"01".repeat(32),
+                    key_id: 7,
+                    port: 49006,
+                    address: "192.0.2.10",
+                    ufrag: "abcd",
+                    password: "abcdefghijklmnopqrstuv",
+                    fingerprint: "AA:BB",
+                    video_port: 5004,
+                    video_packet_size: 1280,
+                    rtcp_on_sctp: true,
+                    microphone_available: false,
+                    qos_timings_v5: false,
+                    unified_socket,
+                },
+            );
+            assert!(sdp.contains(expected));
+        }
+    }
+
+    #[test]
     fn announce_carries_the_documented_top_tier_frame_rate() {
         let mut value = context();
         value.session.extra["negotiatedStreamProfile"] = json!({"codec":"AV1", "fps":360});
@@ -2484,6 +2630,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].maxFPS:360"));
@@ -2507,6 +2654,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].maxFPS:360"));
@@ -2532,6 +2680,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: true,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].framePacing.mode:2\r\n"));
@@ -2557,6 +2706,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].maxFPS:120"));
@@ -2595,6 +2745,7 @@ mod tests {
                     rtcp_on_sctp: true,
                     microphone_available: false,
                     qos_timings_v5: false,
+                    unified_socket: false,
                 },
             );
             assert_eq!(
@@ -2632,6 +2783,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert_eq!(
@@ -2696,6 +2848,7 @@ mod tests {
                     rtcp_on_sctp: true,
                     microphone_available: false,
                     qos_timings_v5: false,
+                    unified_socket: false,
                 },
             );
             assert!(sdp.contains(&format!("a=x-nv-vqos[0].dynamicStreamingMode:{policy}\r\n")));
@@ -2732,6 +2885,7 @@ mod tests {
                     rtcp_on_sctp: true,
                     microphone_available: false,
                     qos_timings_v5: false,
+                    unified_socket: false,
                 },
             );
             // HDR carries an explicit :1; SDR omits the line, like the official client.
@@ -2762,6 +2916,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].initialBitrateKbps:200000"));
@@ -2790,6 +2945,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: false,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].initialBitrateKbps:220"));
@@ -2829,6 +2985,7 @@ mod tests {
                         rtcp_on_sctp: true,
                         microphone_available: available,
                         qos_timings_v5: false,
+                        unified_socket: false,
                     },
                 );
                 assert_eq!(
@@ -2910,6 +3067,7 @@ mod tests {
                     rtcp_on_sctp: true,
                     microphone_available: false,
                     qos_timings_v5: false,
+                    unified_socket: false,
                 },
             );
             assert_eq!(
@@ -2964,6 +3122,7 @@ mod tests {
                 rtcp_on_sctp: true,
                 microphone_available: true,
                 qos_timings_v5: false,
+                unified_socket: false,
             },
         );
         for server_value in ["0", "23"] {
