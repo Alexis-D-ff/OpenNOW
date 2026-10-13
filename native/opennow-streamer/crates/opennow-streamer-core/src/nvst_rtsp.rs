@@ -1120,7 +1120,7 @@ fn prepare_on_endpoint(
     })?;
     let video_qos_offers = video_qos_offers(&describe.body);
     video_qos_offers.validate()?;
-    let pacing_feedback_mode = video_qos_offers.pacing_feedback_mode(&describe.body)?;
+    video_qos_offers.pacing_feedback_mode(&describe.body)?;
     let max_control_report_bytes = qos_messages_size(&describe.body)?;
     let described_ping_version = sdp_attribute(&describe.body, "general.pingVersion")
         .and_then(|value| value.parse::<u8>().ok())
@@ -1312,7 +1312,6 @@ fn prepare_on_endpoint(
         "startupTimeoutMs":VIDEO_STARTUP_TIMEOUT_MS
     });
     video_qos_offers.add_to_handoff(&mut handoff);
-    handoff["framePacingFeedbackMode"] = json!(pacing_feedback_mode);
     if let Some(max_control_report_bytes) = max_control_report_bytes {
         handoff["maxQosMessagesSize"] = json!(max_control_report_bytes);
     }
@@ -1360,6 +1359,7 @@ fn prepare_on_endpoint(
             },
         ),
         &describe.body,
+        &mut handoff,
     )?;
     let announce_body = omit_server_announce_attributes(&effective_announce, &describe.body);
     Ok(PreparedNvstRtspSession {
@@ -2612,7 +2612,7 @@ mod tests {
             },
         );
         let offer = "a=x-nv-video[0].initialBitrateKbps:12135\r\na=x-nv-video[0].initialPeakBitrateKbps:12135\r\na=x-nv-vqos[0].fec.repairMinPercent:5\r\na=x-nv-vqos[0].fec.repairMaxPercent:40\r\na=x-nv-vqos[0].bllFec.enable:1\r\na=x-nv-packetPacing.minNumPacketsPerGroup:0\r\na=x-nv-packetPacing.maxDelayUs:1000\r\n";
-        let effective = negotiated_announce(&announce, offer).unwrap();
+        let effective = negotiated_announce(&announce, offer, &mut json!({})).unwrap();
         for (name, expected) in [
             ("video[0].initialBitrateKbps", "12135"),
             ("video[0].initialPeakBitrateKbps", "12135"),
@@ -2634,7 +2634,7 @@ mod tests {
         );
         assert_eq!(
             sdp_attribute(
-                &negotiated_announce(&announce, "").unwrap(),
+                &negotiated_announce(&announce, "", &mut json!({})).unwrap(),
                 "video[0].initialBitrateKbps"
             ),
             sdp_attribute(&announce, "video[0].initialBitrateKbps")
@@ -2647,7 +2647,7 @@ mod tests {
             "a=x-nv-video[0].initialBitrateKbps:0",
         ] {
             assert!(
-                negotiated_announce(&announce, invalid).is_err(),
+                negotiated_announce(&announce, invalid, &mut json!({})).is_err(),
                 "{invalid}"
             );
         }
@@ -3361,7 +3361,8 @@ mod tests {
                 sdp_attribute(&describe, "video[0].framePacing.feedbackMode"),
                 Some("0".to_owned())
             );
-            let effective = negotiated_announce(&sdp, &describe).unwrap();
+            let mut handoff = json!({"framePacingFeedbackMode":0});
+            let effective = negotiated_announce(&sdp, &describe, &mut handoff).unwrap();
             let announce = omit_server_announce_attributes(&effective, &describe);
             for field in [
                 "vqos[0].fec.repairMinPercent",
@@ -3378,6 +3379,10 @@ mod tests {
             assert_eq!(
                 sdp_attribute(&announce, "video[0].framePacing.feedbackMode").as_deref(),
                 Some("1")
+            );
+            assert_eq!(
+                handoff["framePacingFeedbackMode"], 1,
+                "transport must use the announced client intent, not the differing server baseline"
             );
             assert_eq!(
                 sdp_attribute(&announce, "vqos[0].fec.enable"),

@@ -46,7 +46,11 @@ pub(super) fn recovery_policy(sdp: &str) -> Result<NvstRecoveryPolicy, NvstRtspE
     })
 }
 
-pub(super) fn negotiated_announce(announce: &str, describe: &str) -> Result<String, NvstRtspError> {
+pub(super) fn negotiated_announce(
+    announce: &str,
+    describe: &str,
+    handoff: &mut Value,
+) -> Result<String, NvstRtspError> {
     for name in [
         "general.disablePlay",
         "general.rtcpOnSctp",
@@ -134,6 +138,8 @@ pub(super) fn negotiated_announce(announce: &str, describe: &str) -> Result<Stri
             result.push_str(line);
         }
     }
+    handoff["framePacingFeedbackMode"] =
+        json!(super::video_qos_offers(describe).pacing_feedback_mode(&result)?);
     Ok(result)
 }
 

@@ -20,6 +20,8 @@ the `||` upstream-video offer is excluded. An offered unified-socket value of 0
 does not erase a client value of 1 selected by bundle fallback. The official
 serializer evidence is macOS `0x4599c0` and `0x3798c0`, and Windows
 `0x1803f7970` and `0x1803f77b0` in the parity report `session-signaling.md`.
+The transport's frame-pacing feedback mode follows the effective ANNOUNCE value,
+including a client value that differs from the server baseline.
 
 Server FEC and packet-pacing parameters are retained when supported. Malformed
 values, unsupported pacing versions or modes, invalid booleans, percentages
