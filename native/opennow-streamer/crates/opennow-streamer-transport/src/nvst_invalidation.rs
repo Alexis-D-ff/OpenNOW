@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use super::nvst::{EncodedVideoAccessUnit, NvstFeedbackState};
 
+const RFI_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 /// `GsFrameDescriptor.frameType`, carried in byte 3 of the GameStream frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NvstFrameType {
@@ -44,6 +46,7 @@ impl NvstFrameType {
 struct UnsentInvalidation {
     range: Option<(u64, u64)>,
     in_flight: bool,
+    last_sent_at: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -84,13 +87,17 @@ impl FrameInvalidationFeedback {
         }
     }
 
-    pub(crate) fn record_sent(&self) {
-        self.unsent().in_flight = false;
+    pub(crate) fn record_sent(&self, now: Instant) {
+        let mut unsent = self.unsent();
+        if !std::mem::take(&mut unsent.in_flight) {
+            return;
+        }
+        unsent.last_sent_at = Some(now);
         self.sent.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn sent(&self) -> u64 {
-        self.sent.load(Ordering::Relaxed)
+    fn last_sent_at(&self) -> Option<Instant> {
+        self.unsent().last_sent_at
     }
 
     fn discard(&self) {
@@ -117,10 +124,8 @@ pub(crate) struct FrameInvalidation {
     frame_types_known: bool,
     pending: Option<(u64, u64)>,
     active_since: Option<Instant>,
-    sent_before_episode: Option<u64>,
+    last_retry_at: Option<Instant>,
     backstop_requested: bool,
-    recovered_once: bool,
-    unsupported: bool,
 }
 
 impl FrameInvalidation {
@@ -132,7 +137,7 @@ impl FrameInvalidation {
     /// Returns whether invalidation owns recovery for this loss. Streams without a frame
     /// type keep the immediate keyframe request.
     pub(crate) fn lose(&mut self, now: Instant) -> bool {
-        if !self.frame_types_known || self.unsupported {
+        if !self.frame_types_known {
             return false;
         }
         self.active_since.get_or_insert(now);
@@ -145,21 +150,19 @@ impl FrameInvalidation {
         cooldown: Duration,
         feedback: &NvstFeedbackState,
     ) {
+        if let Some(range) = self.pending
+            && self
+                .last_retry_at
+                .max(feedback.frame_invalidation.last_sent_at())
+                .is_none_or(|last| now.saturating_duration_since(last) >= RFI_RETRY_INTERVAL)
+        {
+            feedback.frame_invalidation.queue(range);
+            self.last_retry_at = Some(now);
+        }
         if self
             .active_since
             .is_some_and(|since| now.saturating_duration_since(since) >= cooldown)
         {
-            let invalidation_sent = self
-                .sent_before_episode
-                .is_some_and(|before| feedback.frame_invalidation.sent() > before);
-            if invalidation_sent && !self.backstop_requested && !self.recovered_once {
-                self.unsupported = true;
-                opennow_streamer_protocol::log::log_async(
-                    "WARN",
-                    "nvst-rfi",
-                    "no reference-invalidation recovery frame arrived; using keyframe recovery for this session",
-                );
-            }
             self.request_idr_backstop(feedback);
         }
     }
@@ -170,10 +173,16 @@ impl FrameInvalidation {
         &mut self,
         frame: &mut EncodedVideoAccessUnit,
         loss_before: bool,
+        now: Instant,
         feedback: &NvstFeedbackState,
     ) -> bool {
         let previous = self.last_frame.replace(frame.frame_index);
         self.frame_types_known = frame.frame_type.is_some();
+        let frame_gap =
+            previous.is_some_and(|previous| frame.frame_index > previous.saturating_add(1));
+        if frame_gap {
+            self.lose(now);
+        }
         let invalidating = self.active_since.is_some();
         let Some(frame_type) = frame.frame_type else {
             if invalidating {
@@ -192,10 +201,6 @@ impl FrameInvalidation {
                     _ => &counters.recovered_i,
                 };
                 recovered.fetch_add(1, Ordering::Relaxed);
-                self.recovered_once |= matches!(
-                    frame_type,
-                    NvstFrameType::IntraRefresh | NvstFrameType::RefPicI
-                );
                 opennow_streamer_protocol::log::log_async(
                     "INFO",
                     "nvst-rfi",
@@ -213,8 +218,8 @@ impl FrameInvalidation {
             frame.contiguous = !loss_before;
             return true;
         }
-        if loss_before {
-            self.invalidate(previous, frame.frame_index, feedback);
+        if loss_before || frame_gap {
+            self.invalidate(previous, frame.frame_index, now, feedback);
         }
         if frame_type == NvstFrameType::Header {
             frame.contiguous = true;
@@ -231,6 +236,7 @@ impl FrameInvalidation {
         &mut self,
         previous: Option<u32>,
         frame_index: u32,
+        now: Instant,
         feedback: &NvstFeedbackState,
     ) {
         let Some(previous) = previous.filter(|previous| frame_index > previous.saturating_add(1))
@@ -243,9 +249,8 @@ impl FrameInvalidation {
             (pending.0.min(lost.0), pending.1.max(lost.1))
         });
         self.pending = Some(range);
-        self.sent_before_episode
-            .get_or_insert_with(|| feedback.frame_invalidation.sent());
         feedback.frame_invalidation.queue(range);
+        self.last_retry_at = Some(now);
     }
 
     fn request_idr_backstop(&mut self, feedback: &NvstFeedbackState) {
@@ -264,7 +269,7 @@ impl FrameInvalidation {
         feedback.frame_invalidation.discard();
         self.pending = None;
         self.active_since = None;
-        self.sent_before_episode = None;
+        self.last_retry_at = None;
         self.backstop_requested = false;
     }
 }
