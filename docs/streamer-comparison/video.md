@@ -34,7 +34,7 @@ support, and the dynamic quality policy are omitted from the feature bag: the
 official client resolves the codec locally and carries bitrate/policy purely in
 the RTSP ANNOUNCE (`x-nv-vqos` and `MediaStreamConfig`).
 
-Desktop AUTO FPS writes `0`. Core resolves the request through `frame_rate::request_frame_rate`: a missing `fps` defaults to 60 and any present value clamps to the 30–360 request range, so the stored AUTO `0` clamps to 30. Resolution then caps that at 360 for 1920x1080 and 1920x1200 and 240 elsewhere, and rates above 240 additionally need an entitlement at least that high plus a confirmed hardware decoder for the selected codec, otherwise they fall back to the entitlement capped at 240, or to 240 when no entitlement is reported.
+Desktop AUTO FPS writes `0`. Core resolves the request through `frame_rate::request_frame_rate`: a missing `fps` defaults to 60 and any present value clamps to the 30–360 request range, so the stored AUTO `0` clamps to 30. Resolution then caps that at 360 for 1920x1080 and 1920x1200 and 240 elsewhere, and rates above 240 additionally need an entitlement at least that high plus a confirmed hardware decoder for the selected codec, otherwise they fall back to the entitlement capped at 240, or to 240 when no entitlement is reported. Rates snap to the supported 30/60/90/120/144/165/240/360 modes. Embedded preflight additionally caps H.264 and unconfirmed high-FPS AV1 at 120 FPS and applies H.264's pixel budget and reported decoder dimension limits before allocation.
 
 `OPENNOW_NATIVE_VIDEO_BACKEND` comes from `nativeVideoBackend` and `decoderPreference`. Auto prefers D3D12 for H.264 and H.265 when the probe succeeds. AV1 auto stays on D3D11 because D3D11-on-12 would flush every frame.
 

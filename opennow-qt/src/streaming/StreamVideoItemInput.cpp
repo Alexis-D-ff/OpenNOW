@@ -1024,8 +1024,10 @@ void StreamVideoItem::updateCursorConfinement()
         releaseCursorConfinement();
         return;
     }
-    const auto first = mapToItem(content, QPointF(0, 0));
-    const auto second = mapToItem(content, QPointF(width(), height()));
+    const auto viewport = aspectFitRect(m_videoSize, QSize(qRound(width()), qRound(height())));
+    const auto first = mapToItem(content, QPointF(viewport.x(), viewport.y()));
+    const auto second = mapToItem(content, QPointF(viewport.x() + viewport.width(),
+                                                viewport.y() + viewport.height()));
     const QRectF itemRect(QPointF(std::min(first.x(), second.x()),
                                  std::min(first.y(), second.y())),
                           QPointF(std::max(first.x(), second.x()),

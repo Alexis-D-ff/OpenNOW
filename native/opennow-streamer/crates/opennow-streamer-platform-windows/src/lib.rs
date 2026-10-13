@@ -2,6 +2,8 @@
 
 #[cfg(any(windows, test))]
 mod aperture;
+#[cfg(any(windows, test))]
+mod decoder_color;
 mod decoder_order;
 mod format;
 mod queue;
@@ -31,9 +33,10 @@ use opennow_streamer_protocol::log;
 use crate::queue::BoundedQueue;
 
 pub use format::{
-    AudioFormat, BackendConfig, Bounds, EncodedVideoFrame, ExistingWindow, OwnedWindow, PcmFrame,
-    SurfaceTarget, VideoChromaFormat, VideoChromaSiting, VideoCodec, VideoColorMatrix,
-    VideoColorPrimaries, VideoFormat, VideoPixelFormat, VideoTransferFunction, WindowHandle,
+    AudioFormat, BackendConfig, Bounds, EncodedVideoFrame, ExistingWindow, MAX_DECODE_HEIGHT,
+    MAX_DECODE_WIDTH, OwnedWindow, PcmFrame, SurfaceTarget, VideoChromaFormat, VideoChromaSiting,
+    VideoCodec, VideoColorMatrix, VideoColorPrimaries, VideoFormat, VideoPixelFormat,
+    VideoTransferFunction, WindowHandle,
 };
 pub use queue::{CompressedAdmit, GapAdmit, PushOutcome, ReferenceGap, admit_compressed_frame};
 

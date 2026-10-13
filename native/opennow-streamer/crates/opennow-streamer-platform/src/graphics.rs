@@ -940,6 +940,62 @@ mod tests {
     }
 
     #[test]
+    fn decoded_resize_keeps_source_dimensions_on_retained_tokens() {
+        struct DecodedFrame(GraphicsFrameInfo);
+
+        impl GraphicsFrame for DecodedFrame {
+            fn info(&self) -> GraphicsFrameInfo {
+                self.0
+            }
+
+            fn record(
+                &self,
+                _: GraphicsContext,
+                command: GraphicsRecordCommand,
+            ) -> Result<GraphicsRecordedFrame, GraphicsFrameError> {
+                Ok(GraphicsRecordedFrame {
+                    resource: 10,
+                    resource_view: 11,
+                    texture_format: GraphicsTextureFormat::Rgba8,
+                    color_space: GraphicsColorSpace::Sdr709,
+                    width: self.0.width,
+                    height: self.0.height,
+                    frame_slot: command.frame_slot,
+                    generation: 1,
+                    presentation_time_ns: self.0.presentation_time_ns,
+                })
+            }
+        }
+
+        let (graphics, publisher) = RenderThreadGraphics::new(|| {});
+        graphics.initialize(context()).unwrap();
+        let lease = publisher.context().unwrap();
+        let mut retained: Vec<(GraphicsFrameToken, GraphicsFrameInfo)> = Vec::new();
+        for (width, height, sequence) in [(1920, 1080, 42), (1600, 1200, 47), (3440, 1440, 53)] {
+            let info = GraphicsFrameInfo {
+                width,
+                height,
+                sequence,
+                presentation_time_ns: sequence * 1_000,
+            };
+            publisher
+                .publish(lease, Arc::new(DecodedFrame(info)))
+                .unwrap();
+            let token = graphics.acquire_latest().unwrap();
+            assert_eq!(token.info(), info);
+            let recorded = graphics.record(&token, command()).unwrap();
+            assert_eq!((recorded.width, recorded.height), (width, height));
+            assert_eq!(recorded.presentation_time_ns, info.presentation_time_ns);
+            for (old, old_info) in &retained {
+                assert_eq!(old.info(), *old_info);
+            }
+            retained.push((token, info));
+        }
+        drop(retained);
+        graphics.shutdown().unwrap();
+    }
+
+    #[test]
     fn publication_progress_survives_consumption_and_rejects_stale_frames() {
         let (graphics, publisher) = RenderThreadGraphics::new(|| {});
         graphics.initialize(context()).unwrap();

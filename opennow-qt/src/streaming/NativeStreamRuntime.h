@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QSize>
 #include <QString>
 
 #include <cstddef>
@@ -99,6 +100,7 @@ public:
     [[nodiscard]] QString lastError() const;
     [[nodiscard]] quint64 presentationGeneration() const;
     [[nodiscard]] bool presentationAllowed() const;
+    [[nodiscard]] QSize decodedDisplaySize() const;
     struct UpstreamProgress
     {
         bool stalled = false;
@@ -160,6 +162,7 @@ signals:
     void responseReceived(const QJsonObject &response);
     void eventReceived(const QJsonObject &event);
     void frameAvailable();
+    void decodedDisplaySizeChanged(const QSize &size, quint64 generation);
     void cursorUpdated(const QByteArray &bytes);
     void cursorCaptureChanged(bool composited);
     void cursorStateReset();
@@ -187,6 +190,7 @@ private:
     void drainCallbacks(const std::shared_ptr<CallbackState> &state);
     void setLastError(const QString &error);
     void invalidatePresentation();
+    void publishDecodedDisplaySize(const QSize &size, quint64 generation);
     void resetInputCapture();
 
     std::unique_ptr<Private> d;

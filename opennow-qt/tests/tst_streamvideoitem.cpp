@@ -17,6 +17,7 @@
 #include <QScopeGuard>
 #include <QtQml/qqml.h>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSGSimpleRectNode>
 #include <QSignalSpy>
 #include <QTest>
@@ -162,8 +163,10 @@ public:
             imported.store(imported.load() && renderer.selectTexture(texture.get()));
     }
     void setClip(bool enabled, int reference) override { stencil = enabled; stencilReference = reference; }
-    void recordFrame(QRhiCommandBuffer *cb, const QRect &) override
+    void recordFrame(QRhiCommandBuffer *cb, const QRect &viewport) override
     {
+        viewportWidth.store(viewport.width());
+        viewportHeight.store(viewport.height());
         renderer.render(cb, stencil, stencilReference);
         if (imported.load()) textureWasSampled = true;
         ++frames;
@@ -180,6 +183,8 @@ public:
     std::atomic_bool imported = false;
     std::atomic_bool directTarget = false;
     std::atomic_int frames = 0;
+    std::atomic_int viewportWidth = 0;
+    std::atomic_int viewportHeight = 0;
     std::atomic_int importedSlots = 0;
     std::atomic_bool showVideo = true;
     std::atomic_int releases = 0;
@@ -2644,6 +2649,150 @@ private slots:
             QVERIFY(item.renderCallbackAvailable());
         }
         StreamVideoItem::setNativeStreamRuntime(nullptr);
+    }
+
+    void decodedResizeKeepsItemAndCaptureGeometry_data()
+    {
+        QTest::addColumn<bool>("fullscreen");
+        QTest::newRow("windowed") << false;
+        QTest::newRow("fullscreen") << true;
+    }
+
+    void decodedResizeKeepsItemAndCaptureGeometry()
+    {
+        QFETCH(bool, fullscreen);
+        if (QGuiApplication::platformName() == QStringLiteral("offscreen"))
+            QSKIP("The offscreen platform plugin does not create a QRhi.");
+        static QSize decodedSize;
+        static QRect lastMouse;
+        static QList<QList<quint16>> keys;
+        decodedSize = QSize(1920, 1080);
+        lastMouse = {};
+        keys.clear();
+        auto api = CursorSession::api();
+        api.acquireLatestFrame = [](const OpenNowStreamer *, OpenNowStreamerFrame **frame,
+                                     OpenNowStreamerFrameInfo *info) {
+            *frame = reinterpret_cast<OpenNowStreamerFrame *>(new int(1));
+            *info = {1920, 1088, 1, 0};
+            return OPENNOW_STREAMER_OK;
+        };
+        api.releaseFrame = [](OpenNowStreamerFrame *frame) {
+            delete reinterpret_cast<int *>(frame);
+            return OPENNOW_STREAMER_OK;
+        };
+        api.recordFrame = [](const OpenNowStreamer *, const OpenNowStreamerFrame *,
+                               const OpenNowStreamerRecordCommand *, OpenNowStreamerRecordedFrame *recorded) {
+            *recorded = {1, 0, OPENNOW_STREAMER_GRAPHICS_API_D3D11,
+                         OPENNOW_STREAMER_TEXTURE_FORMAT_RGBA8, OPENNOW_STREAMER_COLOR_SPACE_SDR709,
+                         std::uint32_t(decodedSize.width()), std::uint32_t(decodedSize.height()), 0, 1, 0};
+            return OPENNOW_STREAMER_OK;
+        };
+        api.submitMouseAbsolute = [](const OpenNowStreamer *, std::uint16_t x, std::uint16_t y,
+                                      std::uint16_t width, std::uint16_t height) {
+            lastMouse = QRect(x, y, width, height);
+            return OPENNOW_STREAMER_OK;
+        };
+        api.submitKey = [](const OpenNowStreamer *, std::uint16_t key, std::uint16_t modifiers, bool pressed) {
+            keys.append({key, modifiers, quint16(pressed)});
+            return OPENNOW_STREAMER_OK;
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        StreamVideoItem::setNativeStreamRuntime(&runtime);
+        const auto reset = qScopeGuard([] { StreamVideoItem::setNativeStreamRuntime(nullptr); });
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("decoded-resize")}}));
+        const QByteArray ready = R"({"id":"decoded-resize","type":"ok"})";
+        CursorSession::callbacks.response_callback(
+            reinterpret_cast<const std::uint8_t *>(ready.constData()), ready.size(),
+            CursorSession::callbacks.user_data);
+        QTRY_VERIFY(runtime.presentationAllowed());
+        const auto generation = runtime.presentationGeneration();
+        const auto callback = std::make_shared<TextureRenderCallback>(true);
+        QQuickWindow window;
+        window.setColor(Qt::black);
+        window.resize(800, 600);
+        auto *item = new StreamVideoItem(window.contentItem());
+        item->setVideoSize(QSize(1920, 1080));
+        item->setRenderCallback(callback);
+        WhiteOverlay overlay(window.contentItem());
+        overlay.setZ(10);
+        if (fullscreen) window.showFullScreen();
+        else window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        if (fullscreen) QTRY_COMPARE(window.size(), window.screen()->size());
+        window.requestActivate();
+        QTRY_VERIFY(window.isActive());
+        item->forceActiveFocus();
+        item->setSize(window.size());
+        overlay.setSize(QSizeF(40, 40));
+        for (const bool overlayVisible : {false, true}) {
+            overlay.setVisible(overlayVisible);
+            item->setInputEnabled(!overlayVisible);
+            for (const QSize size : {QSize(1920, 1080), QSize(1600, 1200), QSize(3440, 1440)}) {
+                decodedSize = size;
+                OpenNowStreamerFrameInfo info{};
+                OpenNowStreamerRecordedFrame recorded{};
+                OpenNowStreamerFrame *frame = nullptr;
+                OpenNowStreamerRecordCommand command{};
+                QCOMPARE(runtime.recordLatestFrame(command, &info, &recorded, &frame), OPENNOW_STREAMER_OK);
+                QCOMPARE(runtime.releaseFrame(frame), OPENNOW_STREAMER_OK);
+                QTRY_COMPARE(runtime.decodedDisplaySize(), size);
+                QTRY_COMPARE(item->videoSize(), size);
+                item->setVideoSize(QSize(2560, 1440));
+                QCOMPARE(item->videoSize(), size);
+                const auto viewport = StreamVideoItem::aspectFitRect(size, window.size());
+                overlay.setPosition(viewport.topLeft());
+                item->requestFrame();
+                QTRY_COMPARE(callback->viewportWidth.load(), viewport.width());
+                QTRY_COMPARE(callback->viewportHeight.load(), viewport.height());
+                QTRY_VERIFY(callback->imported.load());
+                const auto image = window.grabWindow();
+                QVERIFY(!image.isNull());
+                const auto pixel = [&](int x, int y) {
+                    return image.pixelColor(x * image.width() / window.width(),
+                                            y * image.height() / window.height());
+                };
+                QCOMPARE(pixel(viewport.center().x(), viewport.y() + viewport.height() / 4), QColor(Qt::red));
+                QCOMPARE(pixel(viewport.center().x(), viewport.y() + viewport.height() * 3 / 4), QColor(Qt::green));
+                QCOMPARE(pixel(viewport.x() + 10, viewport.y() + 10),
+                         QColor(overlayVisible ? Qt::white : Qt::red));
+                if (viewport.x() > 0 || viewport.y() > 0) QCOMPARE(pixel(0, 0), QColor(Qt::black));
+                const auto screenshotDirectory = qEnvironmentVariable("OPENNOW_TEST_RESIZE_SCREENSHOTS");
+                if (!screenshotDirectory.isEmpty()) {
+                    QVERIFY(image.save(QStringLiteral("%1/decoded-resize-%2-%3x%4-%5.png")
+                        .arg(screenshotDirectory, fullscreen ? QStringLiteral("fullscreen") : QStringLiteral("windowed"))
+                        .arg(size.width()).arg(size.height())
+                        .arg(overlayVisible ? QStringLiteral("overlay") : QStringLiteral("gameplay"))));
+                }
+                item->submitAbsoluteMouse(viewport.topLeft());
+                QCOMPARE(lastMouse, QRect(QPoint(), viewport.size()));
+                item->submitAbsoluteMouse(viewport.bottomRight());
+                QCOMPARE(lastMouse, QRect(QPoint(viewport.width() - 1, viewport.height() - 1),
+                                          viewport.size()));
+                QTRY_COMPARE(item->captureActive(), !overlayVisible);
+                lastMouse = {};
+                QMouseEvent move(QEvent::MouseMove, QPointF(viewport.center()), QPointF(viewport.center()),
+                                 Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                item->mouseMoveEvent(&move);
+                QCOMPARE(move.isAccepted(), !overlayVisible);
+                QCOMPARE(lastMouse, overlayVisible ? QRect() : StreamVideoItem::absoluteMouseCoordinates(
+                    viewport.center(), size, window.size()));
+                keys.clear();
+                QKeyEvent press(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QKeyEvent release(QEvent::KeyRelease, Qt::Key_Escape, Qt::NoModifier);
+                item->keyPressEvent(&press);
+                item->keyReleaseEvent(&release);
+                if (overlayVisible) QVERIFY(keys.isEmpty());
+                else QCOMPARE(keys, (QList<QList<quint16>>{{0x1b, 0, 1}, {0x1b, 0, 0}}));
+                QCOMPARE(item->renderCallback(), callback);
+                QCOMPARE(runtime.presentationGeneration(), generation);
+                QVERIFY(runtime.presentationAllowed());
+            }
+        }
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QCOMPARE(item->videoSize(), QSize(2560, 1440));
+        QCOMPARE(item->renderCallback(), callback);
     }
 
     void upscalingTargetTracksViewportAcrossOverlaysAndWindowChanges_data()
