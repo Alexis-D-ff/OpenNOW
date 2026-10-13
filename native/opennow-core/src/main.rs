@@ -812,11 +812,16 @@ fn dispatch(
                 .map_err(gfn_error)?;
             let settings = cloudmatch::allocation_settings(&settings, &auth);
             let settings = if !params["runtimeCapabilities"].is_null() {
-                StreamerService::embedded_session_settings(
+                let (resolved, fallbacks) = StreamerService::resolve_embedded_session(
                     &settings,
                     &params["runtimeCapabilities"],
                 )
-                .map_err(streamer_error)?
+                .map_err(streamer_error)?;
+                for fallback in fallbacks {
+                    core.diagnostics
+                        .record("streamer", "stream_profile_fallback", fallback);
+                }
+                resolved
             } else {
                 core.streamer
                     .validate_codec(&settings)

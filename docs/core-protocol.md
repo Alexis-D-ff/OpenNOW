@@ -983,7 +983,7 @@ surface support, not merely a GPU or decoder capability. Missing, false, or malf
 deny HDR. This value is transient: `settings.set` rejects `nativeHdrSupported`, the settings
 loader discards legacy copies, and the core never saves runtime capability results.
 
-With HDR enabled, the core requires an available hardware HEVC or AV1 decoder whose
+With HDR enabled, an HDR session needs an available hardware HEVC or AV1 decoder whose
 `colorQualities` explicitly includes the requested ten-bit profile. The optional per-codec
 `hdrSupported: true` permits `10bit_420` when `colorQualities` is absent, but does not establish
 4:4:4 support. The optional per-codec `hdrColorQualities` array lists verified HDR profiles.
@@ -996,13 +996,36 @@ ten-bit 4:4:4 similarly require hardware-required fixture decode and Metal conve
 Linux uses exact attached-device profiles for Vulkan Video. An explicit false or
 malformed `hdrSupported` denies HDR even if 10-bit profiles exist. A true value never
 overrides an explicit empty or incompatible `colorQualities` array. Neither setting
-changes SDR capability filtering. Auto prefers HEVC then AV1. HDR constrains the
-session-local color quality to ten bits while preserving the selected chroma format and saved
-SDR color preference. HEVC supports `10bit_420` and `10bit_444`; AV1 remains limited to `10bit_420`.
-Explicit H.264, software decoding, missing output support, and unavailable 10-bit profiles
-fail before allocating a seat. Without HDR,
-the saved color preference is used, subject to exact hardware profiles and the GFN codec
-restrictions below. Callers without embedded runtime
+changes SDR capability filtering. HDR constrains the session-local color quality to ten
+bits while preserving the selected chroma format and saved SDR color preference. HEVC
+supports `10bit_420` and `10bit_444`; AV1 remains limited to `10bit_420`.
+
+Unsupported color and HDR requests degrade before a seat is allocated instead of failing,
+matching the official macOS client's video-settings selection. The core resolves them in
+this order and returns the effective `codec`, `colorQuality`, `enableHdr`, and `fps` that
+CloudMatch and the streamer use:
+
+1. Missing HDR output (`nativeHdrSupported` not `true`) clears HDR.
+2. Software decoding resolves to 8-bit 4:2:0 SDR.
+3. A 4:4:4 request selects HEVC, replacing Auto or any explicit codec, when the selected
+   backend decodes HEVC at that 4:4:4 profile (or HEVC HDR 10-bit 4:4:4 with HDR).
+   Otherwise the chroma becomes 4:2:0 and the bit depth is kept.
+4. HDR that the selected codec cannot decode is cleared. Explicit H.264 is SDR-only.
+   Auto prefers HEVC then AV1 for HDR; when neither decodes it, Auto continues as SDR,
+   and an Auto selection that lands on H.264 caps the frame rate at 120 FPS.
+5. Ten-bit SDR that the selected codec, or every Auto candidate, cannot decode falls back
+   to 8-bit 4:2:0 BT.709.
+
+`session.create` records each applied fallback as a `streamer`/`stream_profile_fallback`
+diagnostics event. An explicitly selected codec that the selected backend cannot decode at
+all, an unavailable backend, or a backend that cannot decode 8-bit 4:2:0 with any candidate
+still fails with `streamer_codec_unavailable` or `streamer_backend_unavailable`. The core
+never substitutes another codec for an unavailable explicit codec except for the HEVC 4:4:4
+rule above. `streamer.prepare` repeats the same resolution against the accepted session; when
+the accepted codec, color quality, or HDR mode differs from what the current decoder can
+present, it fails with `streamer_color_unavailable` instead of attaching a mismatched decoder.
+Without HDR, the saved color preference is used, subject to exact hardware profiles and the
+GFN codec restrictions below. Callers without embedded runtime
 capabilities cannot request HDR through the external-streamer probe path.
 
 CloudMatch receives `sessionRequestData.sdrHdrMode=1` and monitor `sdrHdrMode=1`
@@ -1601,9 +1624,11 @@ core holds no subscription data.
 `settings.choices.get({runtimeCapabilities})` returns `colorQualities` for the current
 persisted settings and embedded streamer capability snapshot. Each of the four
 descriptors contains `value`, `disabled`, and nullable `reason`. The operation
-calls the same profile validator as final launch, including backend, codec,
-HDR, and chroma restrictions. Missing or incompatible capabilities do not imply
-support. This read does not persist or coerce any setting. Protocol 5 and native
+calls the same profile resolver as final launch. A color quality is disabled when
+resolution fails or when the launch would fall back to a lower bit depth or a
+different chroma format; the reason names the delivered profile. Codec descriptors
+are disabled only when the codec itself cannot decode 8-bit 4:2:0 SDR on the selected
+backend. Missing or incompatible capabilities do not imply support. This read does not persist or coerce any setting. Protocol 5 and native
 streamer protocol 7 are unchanged.
 
 CoreClient injects the current native window's `nativeHdrSupported` into

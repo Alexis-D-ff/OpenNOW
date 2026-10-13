@@ -6080,6 +6080,67 @@ mod tests {
     }
 
     #[test]
+    fn resolved_capability_fallbacks_reach_the_request_unchanged() {
+        let capabilities = json!({"protocolVersion":7,"nativeHdrSupported":true,"videoBackends":[{
+            "backend":"d3d11","platform":"windows","available":true,"codecs":[
+                {"codec":"h264","available":true,"colorQualities":["8bit_420"]},
+                {"codec":"h265","available":true,"hdrSupported":false,
+                    "colorQualities":["8bit_420","10bit_420","10bit_444"]},
+                {"codec":"av1","available":true,"colorQualities":["8bit_420","10bit_420"]}
+            ]
+        }]});
+        for (requested, codec, depth, chroma, hdr) in [
+            (
+                json!({"codec":"av1","colorQuality":"10bit_444"}),
+                "h265",
+                1,
+                1,
+                0,
+            ),
+            (
+                json!({"codec":"h264","colorQuality":"8bit_444"}),
+                "h264",
+                0,
+                0,
+                0,
+            ),
+            (
+                json!({"codec":"h264","colorQuality":"10bit_420"}),
+                "h264",
+                0,
+                0,
+                0,
+            ),
+            (
+                json!({"codec":"h265","colorQuality":"10bit_420","enableHdr":true}),
+                "h265",
+                1,
+                0,
+                0,
+            ),
+            (json!({"codec":"h264","enableHdr":true}), "h264", 0, 0, 0),
+        ] {
+            let resolved = crate::streamer::StreamerService::embedded_session_settings(
+                &requested,
+                &capabilities,
+            )
+            .unwrap();
+            assert_eq!(resolved["codec"], codec, "{requested}");
+            let body = build_create_body("123", &json!({}), &resolved, "device");
+            let request = &body["sessionRequestData"];
+            let features = &request["requestedStreamingFeatures"];
+            assert_eq!(features["bitDepth"], depth, "{requested}");
+            assert_eq!(features["chromaFormat"], chroma, "{requested}");
+            assert_eq!(request["sdrHdrMode"], hdr, "{requested}");
+            let profile = negotiated_profile(&request["clientRequestMonitorSettings"][0], features);
+            assert_eq!(
+                profile["colorQuality"], resolved["colorQuality"],
+                "{requested}"
+            );
+        }
+    }
+
+    #[test]
     fn bandwidth_saving_stays_client_side_and_out_of_the_cloudmatch_request() {
         // The official client never sends dynamicStreamingMode to CloudMatch: the
         // bandwidth policy is an RTSP ANNOUNCE value resolved from live settings.
