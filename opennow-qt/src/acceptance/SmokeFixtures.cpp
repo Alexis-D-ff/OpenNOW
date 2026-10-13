@@ -188,7 +188,7 @@ int AcceptanceSession::prepareWindow()
             store->setProperty("settings", QVariantMap{
                 {u"microphoneMode"_s, muted ? u"voice-activity"_s : u"disabled"_s}});
             if (muted) {
-                store->setProperty("sessionMicrophoneMode", u"voice-activity"_s);
+                store->setProperty("sessionMicrophoneMode", muted ? u"disabled"_s : u"voice-activity"_s);
                 store->setProperty("selectedGame", QVariantMap{{u"title"_s, u"Microphone acceptance fixture"_s}});
                 store->setProperty("activeSession", QVariantMap{
                     {u"sessionId"_s, u"microphone-visual-fixture"_s}, {u"phase"_s, u"ready"_s}});

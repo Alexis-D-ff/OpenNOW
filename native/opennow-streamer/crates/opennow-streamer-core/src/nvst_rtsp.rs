@@ -20,9 +20,12 @@ use tungstenite::{Message, WebSocket, connect};
 
 #[path = "nvst_rtsp_color.rs"]
 mod color;
+#[path = "nvst_rtsp_negotiation.rs"]
+mod negotiation;
 #[path = "nvst_rtsp_transport_diagnostics.rs"]
 mod transport_diagnostics;
 use color::announce_color_lines;
+use negotiation::{microphone_handoff, negotiated_announce, offered_bool, recovery_policy};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 // A rig whose video streamer is still starting answers SETUP with 200 but no
@@ -61,6 +64,26 @@ impl NvstRtspError {
             code,
             message: message.into(),
         }
+    }
+}
+
+pub(crate) fn wait_authenticated_transport(
+    mut ready: impl FnMut() -> Result<bool, NvstRtspError>,
+    timeout: Duration,
+) -> Result<(), NvstRtspError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if ready()? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(NvstRtspError::new(
+                "nvst-transport-ready-timeout",
+                "NVST transport did not authenticate before the startup deadline",
+            ));
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 }
 
@@ -603,16 +626,14 @@ impl RtspClient {
                 }
                 Ok(Message::Close(_)) => {
                     return Err(NvstRtspError::new(
-                        "nvst-rtsp-failed",
+                        "nvst-network-failed",
                         "RTSPS control channel closed",
                     ));
                 }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(error))
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(error) => {
-                    return Err(NvstRtspError::new("nvst-rtsp-failed", error.to_string()));
-                }
+                Err(error) => return Err(rtsp_io_error(&error)),
             }
         }
     }
@@ -639,7 +660,7 @@ impl RtspClient {
         request.push_str(body);
         self.socket
             .send(Message::Text(request.into()))
-            .map_err(|error| NvstRtspError::new("nvst-rtsp-failed", error.to_string()))?;
+            .map_err(|error| rtsp_io_error(&error))?;
         Ok(self.cseq)
     }
 }
@@ -651,9 +672,11 @@ fn connect_with_retry<T>(
         match attempt() {
             Ok(value) => return Ok(value),
             Err(error) => {
-                let transient = matches!(&error, tungstenite::Error::Io(_))
-                    || matches!(&error, tungstenite::Error::Http(response) if response.status().is_server_error());
                 let failure = rtsp_connect_error(&error);
+                let transient = matches!(
+                    failure.code,
+                    "nvst-connect-failed" | "nvst-service-unavailable"
+                );
                 opennow_streamer_protocol::log::log_line(
                     "WARN",
                     "rtsp",
@@ -679,12 +702,12 @@ fn rtsp_connect_error(error: &tungstenite::Error) -> NvstRtspError {
     if let tungstenite::Error::Http(response) = error {
         let status = response.status().as_u16();
         return NvstRtspError::new(
-            if status == 403 {
+            if status == 401 || status == 403 {
                 "nvst-signaling-forbidden"
             } else if status == 503 {
                 "nvst-service-unavailable"
             } else {
-                "nvst-connect-failed"
+                "nvst-signaling-rejected"
             },
             if status == 503 {
                 "The GeForce NOW RTSPS service is temporarily unavailable (HTTP 503). The media connection was not established; this is not a video decoder error.".to_owned()
@@ -694,8 +717,33 @@ fn rtsp_connect_error(error: &tungstenite::Error) -> NvstRtspError {
         );
     }
     NvstRtspError::new(
-        "nvst-connect-failed",
+        if matches!(
+            error,
+            tungstenite::Error::Io(_)
+                | tungstenite::Error::ConnectionClosed
+                | tungstenite::Error::AlreadyClosed
+        ) {
+            "nvst-connect-failed"
+        } else {
+            "nvst-signaling-rejected"
+        },
         format!("Could not open RTSPS control channel: {error}"),
+    )
+}
+
+fn rtsp_io_error(error: &tungstenite::Error) -> NvstRtspError {
+    NvstRtspError::new(
+        if matches!(
+            error,
+            tungstenite::Error::Io(_)
+                | tungstenite::Error::ConnectionClosed
+                | tungstenite::Error::AlreadyClosed
+        ) {
+            "nvst-network-failed"
+        } else {
+            "nvst-rtsp-failed"
+        },
+        error.to_string(),
     )
 }
 
@@ -749,12 +797,7 @@ impl PreparedNvstRtspSession {
                     NvstRtspError::new("nvst-rtsp-failed", "RTSPS client is unavailable")
                 })?
                 .request("PLAY", &self.target, &play_headers, "")?;
-            if play.status != 200 && play.status != 455 {
-                return Err(NvstRtspError::new(
-                    "nvst-rtsp-failed",
-                    format!("PLAY failed: {} {}", play.status, play.status_text),
-                ));
-            }
+            ensure_rtsp_ok("PLAY", &play)?;
         }
 
         let client = self
@@ -971,7 +1014,13 @@ fn try_signaling_endpoints<T>(
                         error.code
                     ),
                 );
-                if error.code == "nvst-signaling-forbidden" {
+                if !matches!(
+                    error.code,
+                    "nvst-connect-failed"
+                        | "nvst-network-failed"
+                        | "nvst-rtsp-timeout"
+                        | "nvst-service-unavailable"
+                ) {
                     return Err(error);
                 }
                 failures.push((index + 1, error));
@@ -1101,9 +1150,8 @@ fn prepare_on_endpoint(
     setup_headers.push(("Session", rtsp_session.clone()));
     setup_headers.push(("x-nv-ping", described_ping_version.to_string()));
     let bundle_endpoint = bundle_endpoint(context);
-    let described_unified_socket = sdp_attribute(&describe.body, "general.enableUnifiedSocket")
-        .and_then(|value| value.parse::<u32>().ok())
-        .is_some_and(|value| value != 0);
+    let described_unified_socket =
+        offered_bool(&describe.body, "general.enableUnifiedSocket")?.unwrap_or(false);
     opennow_streamer_protocol::log::log_line(
         "INFO",
         "rtsps",
@@ -1273,6 +1321,8 @@ fn prepare_on_endpoint(
     }
     handoff["bundlePeerIp"] = json!(bundle_peer.ip().to_string());
     handoff["bundlePeerPort"] = json!(bundle_peer.port());
+    handoff["recoveryPolicy"] = json!(recovery_policy(&describe.body)?);
+    microphone_handoff(&describe.body, &mut handoff)?;
 
     // Only log transport shape, never SDP, runtime keys, or ICE credentials.
     opennow_streamer_protocol::log::log_line(
@@ -1287,7 +1337,7 @@ fn prepare_on_endpoint(
         ),
     );
 
-    let announce_body = omit_server_announce_attributes(
+    let effective_announce = negotiated_announce(
         &build_announce(
             context,
             AnnounceParams {
@@ -1310,7 +1360,8 @@ fn prepare_on_endpoint(
             },
         ),
         &describe.body,
-    );
+    )?;
+    let announce_body = omit_server_announce_attributes(&effective_announce, &describe.body);
     Ok(PreparedNvstRtspSession {
         control_ping: NvstControlPing::default(),
         client: Some(client),
@@ -1356,13 +1407,8 @@ struct AnnounceParams<'a> {
     unified_socket: bool,
 }
 
-fn negotiate_microphone(context: &SessionContext, describe: &str) -> bool {
-    context
-        .settings
-        .get("microphoneMode")
-        .and_then(Value::as_str)
-        == Some("voice-activity")
-        && sdp_attribute(describe, "general.rtcMicOnNativeBundle").as_deref() == Some("1")
+fn negotiate_microphone(_context: &SessionContext, describe: &str) -> bool {
+    sdp_attribute(describe, "general.rtcMicOnNativeBundle").as_deref() == Some("1")
 }
 
 fn advertised_bitrate_kbps(settings: &Value) -> u64 {
@@ -1428,12 +1474,15 @@ fn omit_server_announce_attributes(announce: &str, describe: &str) -> String {
         "general.rtcDataChannelOnNativeBundle",
         "general.enableUnifiedSocket",
         "general.rtcpOnSctp",
+        "video[0].refPicInvalidation",
+        "general.clientSupportsIntraRefresh",
     ];
     let server_values: HashMap<String, &str> = describe
         .split("||")
         .next()
         .unwrap_or_default()
-        .lines()
+        .split(";;")
+        .flat_map(str::lines)
         .filter_map(|line| {
             let (name, value) = line.trim().strip_prefix("a=")?.split_once(':')?;
             let name = name.strip_prefix("x-nv-").unwrap_or(name);
@@ -1443,7 +1492,7 @@ fn omit_server_announce_attributes(announce: &str, describe: &str) -> String {
         .collect();
     let mut filtered = String::with_capacity(announce.len());
     for line in announce.split_inclusive("\r\n") {
-        let Some((name, _value)) = line
+        let Some((name, value)) = line
             .strip_prefix("a=x-nv-")
             .and_then(|attribute| attribute.split_once(':'))
         else {
@@ -1451,7 +1500,16 @@ fn omit_server_announce_attributes(announce: &str, describe: &str) -> String {
             continue;
         };
         if SERVER_NEGOTIATED.contains(&name)
-            && server_values.contains_key(&name.to_ascii_lowercase())
+            && server_values
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|server| {
+                    *server == value.trim()
+                        || server
+                            .parse::<i64>()
+                            .ok()
+                            .zip(value.trim().parse::<i64>().ok())
+                            .is_some_and(|(server, client)| server == client)
+                })
         {
             continue;
         }
@@ -1500,6 +1558,8 @@ fn build_announce(context: &SessionContext, params: AnnounceParams<'_>) -> Strin
             if params.qos_timings_v5 { 0 } else { 1 }
         ),
         "a=x-nv-video[0].maxNumReferenceFrames:0".to_owned(),
+        "a=x-nv-video[0].refPicInvalidation:1".to_owned(),
+        "a=x-nv-general.clientSupportsIntraRefresh:1".to_owned(),
         "a=x-nv-video[0].prefilterParams.prefilterMode:0".to_owned(),
         "a=x-nv-video[0].prefilterParams.prefilterModel:4".to_owned(),
         "a=x-nv-video[0].prefilterParams.denoiseLevel:0".to_owned(),
@@ -1719,7 +1779,13 @@ fn ensure_rtsp_ok(step: &str, response: &RtspResponse) -> Result<(), NvstRtspErr
         Ok(())
     } else {
         let failure = NvstRtspError::new(
-            "nvst-rtsp-failed",
+            if response.status == 503 {
+                "nvst-service-unavailable"
+            } else if matches!(response.status, 401 | 403) {
+                "nvst-signaling-forbidden"
+            } else {
+                "nvst-rtsp-failed"
+            },
             format!(
                 "{step} failed: {} {}",
                 response.status, response.status_text
@@ -2430,6 +2496,164 @@ mod tests {
     }
 
     #[test]
+    fn semantic_and_auth_failures_do_not_try_other_endpoints() {
+        for code in [
+            "nvst-offer-unsupported",
+            "invalid-rtsps-endpoint",
+            "missing-ice-credentials",
+            "nvst-signaling-forbidden",
+            "nvst-signaling-rejected",
+            "nvst-rtsp-failed",
+        ] {
+            let mut attempts = 0;
+            let failure = try_signaling_endpoints::<()>(&[Some("first"), Some("second")], |_| {
+                attempts += 1;
+                Err(NvstRtspError::new(code, "semantic failure"))
+            })
+            .unwrap_err();
+            assert_eq!(attempts, 1, "{code}");
+            assert_eq!(failure.code, code);
+        }
+        for status in [401, 400, 404] {
+            let failure = rtsp_connect_error(&tungstenite::Error::Http(Box::new(
+                tungstenite::http::Response::builder()
+                    .status(status)
+                    .body(None)
+                    .unwrap(),
+            )));
+            assert!(!matches!(
+                failure.code,
+                "nvst-connect-failed" | "nvst-service-unavailable"
+            ));
+        }
+    }
+
+    #[test]
+    fn play_rejects_invalid_state_and_readiness_has_a_bounded_deadline() {
+        let response = RtspResponse {
+            status: 455,
+            status_text: "Invalid State".to_owned(),
+            headers: HashMap::new(),
+            body: String::new(),
+        };
+        assert!(ensure_rtsp_ok("PLAY", &response).is_err());
+        assert!(wait_authenticated_transport(|| Ok(true), Duration::ZERO).is_ok());
+        assert_eq!(
+            wait_authenticated_transport(|| Ok(false), Duration::from_millis(1))
+                .unwrap_err()
+                .code,
+            "nvst-transport-ready-timeout"
+        );
+        let mut calls = 0;
+        assert!(
+            wait_authenticated_transport(
+                || {
+                    calls += 1;
+                    Ok(calls > 1)
+                },
+                Duration::from_secs(1)
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            wait_authenticated_transport(
+                || Err(NvstRtspError::new(
+                    "nvst-start-aborted",
+                    "transport stopped"
+                )),
+                Duration::from_secs(20)
+            )
+            .unwrap_err()
+            .code,
+            "nvst-start-aborted"
+        );
+    }
+
+    #[test]
+    fn announce_suppresses_only_equal_values_and_retains_unified_fallback() {
+        let announce = "a=x-nv-general.enableUnifiedSocket:1\r\na=x-nv-ri.timestampsEnabled:1\r\na=x-nv-runtime.videoSrtp:1\r\n";
+        let describe = "a=x-nv-general.enableUnifiedSocket:0\r\na=x-nv-ri.timestampsEnabled:01\r\n;;a=x-nv-runtime.videoSrtp:1\r\n||a=x-nv-general.enableUnifiedSocket:1\r\n";
+        let filtered = omit_server_announce_attributes(announce, describe);
+        assert_eq!(
+            sdp_attribute(&filtered, "general.enableUnifiedSocket").as_deref(),
+            Some("1")
+        );
+        assert_eq!(sdp_attribute(&filtered, "ri.timestampsEnabled"), None);
+        assert_eq!(sdp_attribute(&filtered, "runtime.videoSrtp"), None);
+        assert!(
+            offered_bool(
+                "a=x-nv-general.enableUnifiedSocket:2\r\n",
+                "general.enableUnifiedSocket"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn negotiation_preserves_server_limits_and_initial_rate_without_deriving_a_ratio() {
+        let value = context();
+        let announce = build_announce(
+            &value,
+            AnnounceParams {
+                stream: stream_config(&value),
+                key: &"01".repeat(32),
+                key_id: 7,
+                port: 49006,
+                address: "192.0.2.10",
+                ufrag: "abcd",
+                password: "abcdefghijklmnopqrstuv",
+                fingerprint: "AA:BB",
+                video_port: 5004,
+                video_packet_size: 1280,
+                rtcp_on_sctp: true,
+                microphone_available: true,
+                qos_timings_v5: false,
+                unified_socket: false,
+            },
+        );
+        let offer = "a=x-nv-video[0].initialBitrateKbps:12135\r\na=x-nv-video[0].initialPeakBitrateKbps:12135\r\na=x-nv-vqos[0].fec.repairMinPercent:5\r\na=x-nv-vqos[0].fec.repairMaxPercent:40\r\na=x-nv-vqos[0].bllFec.enable:1\r\na=x-nv-packetPacing.minNumPacketsPerGroup:0\r\na=x-nv-packetPacing.maxDelayUs:1000\r\n";
+        let effective = negotiated_announce(&announce, offer).unwrap();
+        for (name, expected) in [
+            ("video[0].initialBitrateKbps", "12135"),
+            ("video[0].initialPeakBitrateKbps", "12135"),
+            ("vqos[0].fec.repairMinPercent", "5"),
+            ("vqos[0].fec.repairMaxPercent", "40"),
+            ("vqos[0].bllFec.enable", "1"),
+            ("packetPacing.minNumPacketsPerGroup", "0"),
+            ("packetPacing.maxDelayUs", "1000"),
+        ] {
+            assert_eq!(sdp_attribute(&effective, name).as_deref(), Some(expected));
+            assert_eq!(
+                sdp_attribute(&omit_server_announce_attributes(&effective, offer), name),
+                None
+            );
+        }
+        assert_eq!(
+            sdp_attribute(&effective, "vqos[0].bw.maximumBitrateKbps"),
+            sdp_attribute(&announce, "vqos[0].bw.maximumBitrateKbps")
+        );
+        assert_eq!(
+            sdp_attribute(
+                &negotiated_announce(&announce, "").unwrap(),
+                "video[0].initialBitrateKbps"
+            ),
+            sdp_attribute(&announce, "video[0].initialBitrateKbps")
+        );
+        for invalid in [
+            "a=x-nv-vqos[0].fec.repairMinPercent:101",
+            "a=x-nv-vqos[0].fec.repairMinPercent:40\r\na=x-nv-vqos[0].fec.repairMaxPercent:5",
+            "a=x-nv-packetPacing.version:4",
+            "a=x-nv-video[0].framePacing.mode:3",
+            "a=x-nv-video[0].initialBitrateKbps:0",
+        ] {
+            assert!(
+                negotiated_announce(&announce, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn transient_connection_retries_are_bounded_per_endpoint() {
         let mut attempts = 0;
         let result = connect_with_retry(|| {
@@ -2461,7 +2685,7 @@ mod tests {
     fn signaling_attempts_every_endpoint_in_order_with_a_fresh_handshake() {
         let mut attempted = Vec::new();
         let session = try_signaling_endpoints(
-            &[None, Some("unavailable"), Some("working"), Some("unused")],
+            &[Some("unavailable"), Some("working"), Some("unused")],
             |endpoint| {
                 attempted.push(endpoint.to_owned());
                 match endpoint {
@@ -2476,22 +2700,25 @@ mod tests {
         assert_eq!(session, "working");
         assert_eq!(attempted, ["unavailable", "working"]);
 
-        let error = try_signaling_endpoints::<()>(&[None, Some("unavailable")], |endpoint| {
-            Err(NvstRtspError::new(
-                if endpoint == "invalid" {
-                    "invalid-rtsps-endpoint"
-                } else {
-                    "nvst-service-unavailable"
-                },
-                "failed",
-            ))
-        })
+        let error = try_signaling_endpoints::<()>(
+            &[Some("unavailable"), Some("unavailable")],
+            |endpoint| {
+                Err(NvstRtspError::new(
+                    if endpoint == "invalid" {
+                        "invalid-rtsps-endpoint"
+                    } else {
+                        "nvst-service-unavailable"
+                    },
+                    "failed",
+                ))
+            },
+        )
         .unwrap_err();
         assert_eq!(error.code, "nvst-service-unavailable");
         assert!(
             error
                 .message
-                .contains("1:invalid-rtsps-endpoint, 2:nvst-service-unavailable")
+                .contains("1:nvst-service-unavailable, 2:nvst-service-unavailable")
         );
         assert_eq!(
             try_signaling_endpoints::<()>(&[], |_| Ok(()))
@@ -2956,7 +3183,7 @@ mod tests {
     #[test]
     fn microphone_announce_requires_request_and_server_offer() {
         let mut value = context();
-        assert!(!negotiate_microphone(
+        assert!(negotiate_microphone(
             &value,
             "a=x-nv-general.rtcMicOnNativeBundle:1\r\n"
         ));
@@ -2968,7 +3195,7 @@ mod tests {
                 "a=x-nv-general.rtcMicOnNativeBundle:1\r\n",
             ] {
                 let available = negotiate_microphone(&value, offer);
-                assert_eq!(available, mode == "voice-activity" && offer.contains(":1"));
+                assert_eq!(available, offer.contains(":1"));
                 let sdp = build_announce(
                     &value,
                     AnnounceParams {
@@ -3134,10 +3361,9 @@ mod tests {
                 sdp_attribute(&describe, "video[0].framePacing.feedbackMode"),
                 Some("0".to_owned())
             );
-            let announce = omit_server_announce_attributes(&sdp, &describe);
+            let effective = negotiated_announce(&sdp, &describe).unwrap();
+            let announce = omit_server_announce_attributes(&effective, &describe);
             for field in [
-                "video[0].framePacing.mode",
-                "video[0].framePacing.feedbackMode",
                 "vqos[0].fec.repairMinPercent",
                 "vqos[0].grc.enable",
                 "packetPacing.maxDelayUs",
@@ -3145,6 +3371,14 @@ mod tests {
             ] {
                 assert_eq!(sdp_attribute(&announce, field), None, "{field}");
             }
+            assert_eq!(
+                sdp_attribute(&announce, "video[0].framePacing.mode").as_deref(),
+                Some("1")
+            );
+            assert_eq!(
+                sdp_attribute(&announce, "video[0].framePacing.feedbackMode").as_deref(),
+                Some("1")
+            );
             assert_eq!(
                 sdp_attribute(&announce, "vqos[0].fec.enable"),
                 Some("1".to_owned())

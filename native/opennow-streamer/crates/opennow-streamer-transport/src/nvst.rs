@@ -618,6 +618,7 @@ pub struct NvstFeedbackState {
     report_prior: Mutex<(u32, u32)>,
     recent_network_metrics: Mutex<RecentNetworkMetrics>,
     bundle_receive_bytes: AtomicU64,
+    authenticated_transport_ready: AtomicBool,
     video_receive_bytes: AtomicU64,
     reception_timing: Mutex<ReceptionTiming>,
     ice_ping: Mutex<Option<(Instant, Duration)>>,
@@ -645,6 +646,7 @@ impl Default for NvstFeedbackState {
             report_prior: Mutex::new((0, 0)),
             recent_network_metrics: Mutex::new(RecentNetworkMetrics::default()),
             bundle_receive_bytes: AtomicU64::new(0),
+            authenticated_transport_ready: AtomicBool::new(false),
             video_receive_bytes: AtomicU64::new(0),
             reception_timing: Mutex::new(ReceptionTiming::default()),
             ice_ping: Mutex::new(None),
@@ -663,6 +665,11 @@ impl Default for NvstFeedbackState {
 }
 
 impl NvstFeedbackState {
+    pub fn authenticated_transport_ready(&self) -> bool {
+        self.authenticated_transport_ready.load(Ordering::Acquire)
+            || self.socket_receive_bytes() > 0
+    }
+
     fn record_socket_receive(
         &self,
         socket: StreamSocket,
@@ -1291,6 +1298,7 @@ pub type SharedNvstFeedback = Arc<NvstFeedbackState>;
 /// `AEAD_AES_256_GCM`; every SRTP profile requires an explicit `srtpSaltHex`.
 #[derive(Clone)]
 pub struct NvstVideoConfig {
+    pub recovery_policy: crate::NvstRecoveryPolicy,
     client_udp_port: u16,
     video_peer: SocketAddr,
     video_peer_port_end: Option<u16>,
@@ -1727,6 +1735,15 @@ impl NvstVideoConfig {
             && remote_dtls_fingerprint.is_some()
             && stun_credentials.is_some();
         Ok(Self {
+            recovery_policy: object
+                .get("recoveryPolicy")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| NvstConfigError::InvalidFieldType {
+                    field: "recoveryPolicy",
+                    expected: "a recovery policy object",
+                })?
+                .unwrap_or_default(),
             client_udp_port,
             video_peer: SocketAddr::new(peer_ip, video_peer_port),
             video_peer_port_end,
@@ -7319,6 +7336,9 @@ fn run_nvst_webrtc_bundle(
                     }
                     Event::Connected => {
                         dtls_ready = true;
+                        feedback
+                            .authenticated_transport_ready
+                            .store(true, Ordering::Release);
                         let _ = event_sender.send(NvstReceiveEvent::TransportReady("dtls"));
                         eprintln!("NVST DTLS handshake complete; waiting for SRTP/Mjolnir");
                         if !sctp_started {
@@ -9138,6 +9158,37 @@ mod tests {
 
     fn config() -> NvstVideoConfig {
         NvstVideoConfig::from_legacy_handoff(&legacy_handoff(), None).expect("valid config")
+    }
+
+    #[test]
+    fn recovery_policy_handoff_is_optional_typed_and_preserved() {
+        assert_eq!(
+            config().recovery_policy,
+            crate::NvstRecoveryPolicy::default()
+        );
+        let mut handoff = legacy_handoff();
+        handoff["recoveryPolicy"] = json!({"refPicInvalidation":false,"streamRecoveryType":2,"framesWithInvalidRefThreshold":4});
+        let config = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
+        assert_eq!(config.recovery_policy.ref_pic_invalidation, Some(false));
+        assert_eq!(config.recovery_policy.stream_recovery_type, Some(2));
+        handoff["recoveryPolicy"] = json!({"refPicInvalidation":"1"});
+        assert!(NvstVideoConfig::from_legacy_handoff(&handoff, None).is_err());
+    }
+
+    #[test]
+    fn readiness_requires_dtls_or_authenticated_peer_media() {
+        let feedback = NvstFeedbackState::default();
+        assert!(!feedback.authenticated_transport_ready());
+        feedback.record_socket_receive(StreamSocket::Video, false, true, 10);
+        feedback.record_socket_receive(StreamSocket::Video, true, false, 10);
+        assert!(!feedback.authenticated_transport_ready());
+        feedback.record_socket_receive(StreamSocket::Video, true, true, 10);
+        assert!(feedback.authenticated_transport_ready());
+        let feedback = NvstFeedbackState::default();
+        feedback
+            .authenticated_transport_ready
+            .store(true, Ordering::Release);
+        assert!(feedback.authenticated_transport_ready());
     }
 
     #[test]
@@ -13065,6 +13116,8 @@ mod tests {
         config.video_peer = server_addr;
         config.remote_dtls_fingerprint = Some(server_identity.dtls_fingerprint);
         config.stun_credentials = Some(credentials);
+        let feedback = config.feedback();
+        assert!(!feedback.authenticated_transport_ready());
         let (media_consumer, _media_receiver) = mpsc::sync_channel(1);
         let (event_sender, event_receiver) = mpsc::channel();
         let (play_sender, play_receiver) = mpsc::sync_channel(1);
@@ -13135,6 +13188,10 @@ mod tests {
             }
         }
         assert!(version_sent, "SCTP version exchange must precede PLAY");
+        assert!(
+            feedback.authenticated_transport_ready(),
+            "DTLS readiness must precede PLAY"
+        );
         let until = Instant::now() + Duration::from_millis(300);
         while Instant::now() < until {
             let now = Instant::now();
