@@ -1815,6 +1815,12 @@ impl NvstVideoConfig {
     pub fn mjolnir_udp_port(&self) -> Option<u16> {
         self.mjolnir_udp_port
     }
+
+    /// Unified-socket video is still Mjolnir video: it recovers through the private
+    /// NACK-v2 and control IDR dialect, not bundle RTCP Generic NACK/PLI.
+    fn carries_mjolnir_video(&self) -> bool {
+        self.mjolnir_udp_port.is_some() || self.unified_socket
+    }
 }
 
 fn parse_audio_track(value: &Value) -> Result<NvstAudioTrack, NvstConfigError> {
@@ -6588,9 +6594,9 @@ fn run_nvst_webrtc_bundle(
     // With a dedicated Mjolnir video socket the bundle only carries
     // control/audio keepalive traffic; the Mjolnir receiver owns the media
     // timeout, so the bundle must not raise a spurious media recovery.
-    let mjolnir = config.mjolnir_udp_port.is_some();
     let unified_socket = config.unified_socket;
-    let owns_media_timeout = !mjolnir;
+    let owns_media_timeout = config.mjolnir_udp_port.is_none();
+    let mjolnir = config.carries_mjolnir_video();
     let hid_device_mask = config.hid_device_mask();
     let physical_local = socket.local_addr().ok().map_or_else(
         || bundle_peer,
@@ -12938,6 +12944,11 @@ mod tests {
         let config = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
         assert!(config.unified_socket);
         assert_eq!(config.mjolnir_udp_port(), None);
+        assert!(config.carries_mjolnir_video());
+        handoff["unifiedSocket"] = json!(false);
+        let bundle_only = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
+        assert!(!bundle_only.carries_mjolnir_video());
+        handoff["unifiedSocket"] = json!(true);
         handoff["unifiedSocket"] = json!("yes");
         assert!(matches!(
             NvstVideoConfig::from_legacy_handoff(&handoff, None),
