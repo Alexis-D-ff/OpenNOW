@@ -3,6 +3,7 @@ use std::time::Duration;
 pub(crate) const FRAME_ACK_CODE: u16 = 0x204;
 pub(crate) const FRAME_PACING_CODE: u16 = 0x203;
 pub(crate) const QOS_REPORT_CODE: u16 = 0x207;
+pub(crate) const FRAME_INVALIDATION_CODE: u16 = 0x301;
 pub(crate) const IDR_REQUEST_CODE: u16 = 0x302;
 pub(crate) const NACK_V2_CODE: u16 = 0x317;
 pub(crate) const MAX_NACK_PACKET_COUNT: usize = 64;
@@ -10,6 +11,7 @@ pub(crate) const MAX_NACK_PACKET_COUNT: usize = 64;
 pub(crate) const FRAME_ACK_PAYLOAD_LEN: usize = 102;
 pub(crate) const FRAME_PACING_PAYLOAD_LEN: usize = 28;
 pub(crate) const QOS_REPORT_PAYLOAD_LEN: usize = 52;
+pub(crate) const FRAME_INVALIDATION_PAYLOAD_LEN: usize = 24;
 // The official GFN client keeps the frame-pacing PID target at 16.666 ms even for a
 // 120 FPS encoded stream. This is a renderer/feedback target, not the encoded-frame interval.
 pub(crate) const DEFAULT_FRAME_TIME_US: u32 = 16_666;
@@ -156,6 +158,23 @@ pub(crate) fn idr_request() -> NvstControlCommand {
     NvstControlCommand {
         code: IDR_REQUEST_CODE,
         payload: 0_u16.to_le_bytes().to_vec(),
+    }
+}
+
+/// `ServerControl::sendFrameInvalidationRange`: inclusive sender frame range, then the
+/// zero-extended stream index, matching GameStream `IDX_INVALIDATE_REF_FRAMES`.
+pub(crate) fn frame_invalidation_range(
+    first_frame: u64,
+    last_frame: u64,
+    stream_index: u16,
+) -> NvstControlCommand {
+    let mut payload = vec![0; FRAME_INVALIDATION_PAYLOAD_LEN];
+    put_u64(&mut payload, 0, first_frame);
+    put_u64(&mut payload, 8, last_frame);
+    put_u64(&mut payload, 16, u64::from(stream_index));
+    NvstControlCommand {
+        code: FRAME_INVALIDATION_CODE,
+        payload,
     }
 }
 
@@ -367,5 +386,29 @@ mod tests {
     #[test]
     fn idr_request_matches_the_source_layout() {
         assert_eq!(idr_request().encoded(), [0x02, 0x03, 0x02, 0x00, 0, 0]);
+    }
+
+    #[test]
+    fn frame_invalidation_range_matches_the_bifrost_layout() {
+        let command = frame_invalidation_range(0x0102_0304_0506_0708, 0x1122_3344, 7);
+        assert_eq!(command.code, FRAME_INVALIDATION_CODE);
+        assert_eq!(
+            command.encoded(),
+            hex(concat!(
+                "01031800",
+                "0807060504030201",
+                "4433221100000000",
+                "0700000000000000"
+            ))
+        );
+        assert_eq!(
+            frame_invalidation_range(41, 43, 0).encoded(),
+            hex(concat!(
+                "01031800",
+                "2900000000000000",
+                "2b00000000000000",
+                "0000000000000000"
+            ))
+        );
     }
 }

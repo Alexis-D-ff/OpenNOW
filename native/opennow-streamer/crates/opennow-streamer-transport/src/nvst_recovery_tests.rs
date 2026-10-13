@@ -302,3 +302,453 @@ fn conflicting_fec_layout_invalidates_only_discarded_picture_data() {
         assert_eq!(receiver.next_frame_contiguous, parity);
     }
 }
+
+fn typed_frame(sequence: u16, frame: u32, frame_type: u8, nal: u8) -> Vec<u8> {
+    build_plaintext_rtp(
+        sequence,
+        FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+        frame,
+        &[0x01, 0, 0, frame_type, 0, 0, 0, 0, 0, 0, 0, 1, nal, 0x88],
+    )
+}
+
+struct TypedStream {
+    receiver: NvstVideoReceiver,
+    crypto: SrtpReceiver,
+    feedback: SharedNvstFeedback,
+    origin: Instant,
+}
+
+impl TypedStream {
+    fn new() -> Self {
+        let mut config = config();
+        config.reorder_window_packets = DEFAULT_REORDER_WINDOW;
+        Self {
+            feedback: config.feedback(),
+            crypto: test_srtp(&config),
+            receiver: NvstVideoReceiver::new(config),
+            origin: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, packet: Vec<u8>, after: Duration) -> Vec<NvstReceiveEvent> {
+        let packet = protect_for_test(&self.crypto, packet, 0);
+        self.receiver
+            .process_datagram(peer(), &packet, self.origin + after)
+    }
+
+    fn frames(&mut self, packet: Vec<u8>, after: Duration) -> Vec<(u32, bool, bool)> {
+        delivered(self.push(packet, after))
+    }
+
+    fn stats(&self) -> String {
+        self.feedback.frame_invalidation.stats()
+    }
+
+    /// Frames 1 (I) and 2 (P) arrive, frame 3 is lost beyond NACK recovery, and frames 4 and
+    /// 5 are released by the reorder timeout.
+    fn lose_frame_three(&mut self) -> Vec<NvstReceiveEvent> {
+        assert_eq!(
+            self.frames(typed_frame(0, 1, 2, 0x65), Duration::ZERO),
+            [(1, true, true)]
+        );
+        assert_eq!(
+            self.frames(typed_frame(1, 2, 1, 0x41), Duration::ZERO),
+            [(2, false, true)]
+        );
+        assert!(self.push(typed_frame(3, 4, 1, 0x41), Duration::ZERO).is_empty());
+        assert_eq!(self.feedback.take_nack(self.origin, None), Some((2, 2)));
+        self.push(
+            typed_frame(4, 5, 1, 0x41),
+            MJOLNIR_REORDER_DEQUEUE_TIMEOUT + Duration::from_millis(1),
+        )
+    }
+}
+
+fn delivered(events: Vec<NvstReceiveEvent>) -> Vec<(u32, bool, bool)> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            NvstReceiveEvent::Frame(frame) => {
+                Some((frame.frame_index, frame.keyframe, frame.contiguous))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn assembled_frames_carry_the_gs_frame_type_and_sender_frame_index() {
+    for (wire, expected) in [
+        (1, NvstFrameType::P),
+        (2, NvstFrameType::I),
+        (3, NvstFrameType::Header),
+        (4, NvstFrameType::IntraRefresh),
+        (5, NvstFrameType::RefPicI),
+        (6, NvstFrameType::NonRefP),
+        (9, NvstFrameType::Unknown(9)),
+    ] {
+        let mut stream = TypedStream::new();
+        let [NvstReceiveEvent::Frame(frame)] =
+            &stream.push(typed_frame(0, 77, wire, 0x41), Duration::ZERO)[..]
+        else {
+            panic!("frame type {wire} was not delivered");
+        };
+        assert_eq!(frame.frame_type, Some(expected));
+        assert_eq!(frame.frame_index, 77);
+    }
+    let mut stream = TypedStream::new();
+    let [NvstReceiveEvent::Frame(frame)] = &stream.push(
+        build_plaintext_rtp(0, FLAG_SOF | FLAG_EOF, 78, &[0, 0, 0, 1, 0x65]),
+        Duration::ZERO,
+    )[..] else {
+        panic!("headerless frame was not delivered");
+    };
+    assert_eq!(frame.frame_type, None);
+}
+
+#[test]
+fn unrecoverable_loss_invalidates_the_lost_range_and_resumes_on_a_clearing_frame() {
+    for (frame_type, nal, keyframe) in [(5, 0x41, false), (4, 0x41, false), (2, 0x65, true)] {
+        let mut stream = TypedStream::new();
+        let events = stream.lose_frame_three();
+        assert!(matches!(
+            events.first(),
+            Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::PacketGap { .. }))
+        ));
+        assert!(delivered(events).is_empty());
+        assert_eq!(stream.feedback.frame_invalidation.take(), Some((3, 3)));
+        assert!(!stream.feedback.keyframe_request_pending());
+        assert!(
+            stream
+                .frames(typed_frame(5, 6, 1, 0x41), Duration::from_millis(60))
+                .is_empty()
+        );
+        assert_eq!(
+            stream.frames(
+                typed_frame(6, 7, frame_type, nal),
+                Duration::from_millis(70)
+            ),
+            [(7, keyframe, true)],
+            "frame type {frame_type}"
+        );
+        assert_eq!(
+            stream.frames(typed_frame(7, 8, 1, 0x41), Duration::from_millis(80)),
+            [(8, false, true)]
+        );
+        assert_eq!(stream.feedback.frame_invalidation.take(), None);
+        assert!(!stream.feedback.keyframe_request_pending());
+        let recovered = match frame_type {
+            5 => "rfiRecoveredI=0 rfiRecoveredIntraRefresh=0 rfiRecoveredRefPicI=1",
+            4 => "rfiRecoveredI=0 rfiRecoveredIntraRefresh=1 rfiRecoveredRefPicI=0",
+            _ => "rfiRecoveredI=1 rfiRecoveredIntraRefresh=0 rfiRecoveredRefPicI=0",
+        };
+        assert_eq!(
+            stream.stats(),
+            format!("rfiSent=0 rfiDropped=3 {recovered} rfiIdrBackstop=0")
+        );
+        assert_eq!(stream.receiver.frames_emitted, 4);
+    }
+}
+
+#[test]
+fn further_loss_during_invalidation_extends_the_pending_range() {
+    let mut stream = TypedStream::new();
+    stream.lose_frame_three();
+    assert_eq!(stream.feedback.frame_invalidation.take(), Some((3, 3)));
+    assert!(stream.push(typed_frame(6, 8, 1, 0x41), Duration::from_millis(60)).is_empty());
+    let events = stream.push(
+        typed_frame(7, 9, 6, 0x01),
+        Duration::from_millis(60) + MJOLNIR_REORDER_DEQUEUE_TIMEOUT + Duration::from_millis(1),
+    );
+    assert!(delivered(events).is_empty());
+    assert_eq!(stream.feedback.frame_invalidation.take(), Some((3, 7)));
+    assert!(stream.stats().contains("rfiDropped=4"));
+    assert!(!stream.feedback.keyframe_request_pending());
+}
+
+#[test]
+fn header_frames_pass_during_invalidation() {
+    let mut stream = TypedStream::new();
+    stream.lose_frame_three();
+    assert_eq!(
+        stream.frames(typed_frame(5, 6, 3, 0x67), Duration::from_millis(60)),
+        [(6, false, true)]
+    );
+    assert!(
+        stream
+            .frames(typed_frame(6, 7, 1, 0x41), Duration::from_millis(61))
+            .is_empty()
+    );
+    assert!(stream.stats().contains("rfiDropped=3"));
+}
+
+#[test]
+fn a_lost_frame_followed_by_a_header_frame_is_still_invalidated() {
+    let mut stream = TypedStream::new();
+    stream.frames(typed_frame(0, 1, 2, 0x65), Duration::ZERO);
+    stream.push(typed_frame(2, 3, 3, 0x67), Duration::ZERO);
+    let events = stream.push(
+        typed_frame(3, 4, 1, 0x41),
+        MJOLNIR_REORDER_DEQUEUE_TIMEOUT + Duration::from_millis(1),
+    );
+    assert_eq!(delivered(events), [(3, false, true)]);
+    assert_eq!(stream.feedback.frame_invalidation.take(), Some((2, 2)));
+    assert!(stream.stats().contains("rfiDropped=1"));
+}
+
+#[test]
+fn invalidation_without_a_clearing_frame_falls_back_to_idr_after_the_cooldown() {
+    let mut stream = TypedStream::new();
+    stream.lose_frame_three();
+    let lost_at = MJOLNIR_REORDER_DEQUEUE_TIMEOUT + Duration::from_millis(1);
+    assert!(
+        stream
+            .frames(
+                typed_frame(5, 6, 1, 0x41),
+                lost_at + KEYFRAME_REQUEST_COOLDOWN - Duration::from_millis(1)
+            )
+            .is_empty()
+    );
+    assert!(!stream.feedback.keyframe_request_pending());
+    assert!(
+        stream
+            .frames(typed_frame(6, 7, 1, 0x41), lost_at + KEYFRAME_REQUEST_COOLDOWN)
+            .is_empty()
+    );
+    assert!(stream.feedback.keyframe_request_pending());
+    assert!(
+        stream
+            .frames(
+                typed_frame(7, 8, 1, 0x41),
+                lost_at + KEYFRAME_REQUEST_COOLDOWN * 2
+            )
+            .is_empty()
+    );
+    assert_eq!(
+        stream.frames(
+            typed_frame(8, 9, 2, 0x65),
+            lost_at + KEYFRAME_REQUEST_COOLDOWN * 3
+        ),
+        [(9, true, true)]
+    );
+    assert!(!stream.feedback.keyframe_request_pending());
+    assert_eq!(
+        stream.stats(),
+        "rfiSent=0 rfiDropped=5 rfiRecoveredI=1 rfiRecoveredIntraRefresh=0 rfiRecoveredRefPicI=0 rfiIdrBackstop=1"
+    );
+}
+
+#[test]
+fn an_incomplete_frame_is_invalidated_once_the_next_frame_assembles() {
+    let mut stream = TypedStream::new();
+    stream.frames(typed_frame(0, 1, 2, 0x65), Duration::ZERO);
+    let mut truncated = typed_frame(1, 2, 1, 0x41);
+    truncated[24] = FLAG_SOF | FLAG_CONTAINS_PIC_DATA;
+    assert!(stream.push(truncated, Duration::ZERO).is_empty());
+    let mut skipped_index = build_plaintext_rtp(2, FLAG_EOF, 2, &[0x55]);
+    skipped_index[16..20].copy_from_slice(&(5_u32 << 8).to_le_bytes());
+    assert_eq!(
+        stream.push(skipped_index, Duration::ZERO),
+        [NvstReceiveEvent::Dropped(NvstDropReason::FrameDiscontinuity)]
+    );
+    assert!(!stream.feedback.keyframe_request_pending());
+    assert!(
+        stream
+            .frames(typed_frame(3, 3, 1, 0x41), Duration::ZERO)
+            .is_empty()
+    );
+    assert_eq!(stream.feedback.frame_invalidation.take(), Some((2, 2)));
+    assert!(!stream.feedback.keyframe_request_pending());
+}
+
+#[test]
+fn loss_without_a_frame_number_gap_requests_an_idr_immediately() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(10, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(11, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), None);
+    assert!(feedback.keyframe_request_pending());
+    invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
+    assert!(feedback.frame_invalidation.stats().ends_with("rfiIdrBackstop=1"));
+    let mut recovery = frame(12, NvstFrameType::RefPicI);
+    assert!(invalidation.admit(&mut recovery, false, &feedback));
+    assert!(recovery.contiguous);
+}
+
+#[test]
+fn frames_without_a_type_end_invalidation_through_the_keyframe_path() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type,
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(!invalidation.lose(Instant::now()));
+    assert!(invalidation.admit(&mut frame(1, Some(NvstFrameType::P)), false, &feedback));
+    assert!(invalidation.lose(Instant::now()));
+    let mut untyped = frame(3, None);
+    assert!(invalidation.admit(&mut untyped, true, &feedback));
+    assert!(!untyped.contiguous);
+    assert!(feedback.keyframe_request_pending());
+    assert_eq!(feedback.frame_invalidation.take(), None);
+    assert!(!invalidation.lose(Instant::now()));
+}
+
+#[test]
+fn nack_recovered_frames_are_never_invalidated() {
+    let mut stream = TypedStream::new();
+    stream.frames(typed_frame(0, 1, 2, 0x65), Duration::ZERO);
+    stream.frames(typed_frame(1, 2, 1, 0x41), Duration::ZERO);
+    assert!(stream.push(typed_frame(3, 4, 1, 0x41), Duration::ZERO).is_empty());
+    assert_eq!(stream.feedback.take_nack(stream.origin, None), Some((2, 2)));
+    assert_eq!(
+        stream.frames(typed_frame(2, 3, 1, 0x41), Duration::from_millis(20)),
+        [(3, false, true), (4, false, true)]
+    );
+    assert_eq!(stream.receiver.recovered_retransmissions, 1);
+    assert_eq!(stream.feedback.frame_invalidation.take(), None);
+    assert!(!stream.feedback.keyframe_request_pending());
+    assert_eq!(
+        stream.stats(),
+        "rfiSent=0 rfiDropped=0 rfiRecoveredI=0 rfiRecoveredIntraRefresh=0 rfiRecoveredRefPicI=0 rfiIdrBackstop=0"
+    );
+}
+
+#[test]
+fn headerless_streams_keep_the_immediate_keyframe_recovery() {
+    let mut stream = TypedStream::new();
+    let headerless = |sequence, frame, nal| {
+        build_plaintext_rtp(
+            sequence,
+            FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+            frame,
+            &[0, 0, 0, 1, nal, 0x88],
+        )
+    };
+    stream.frames(headerless(0, 1, 0x65), Duration::ZERO);
+    stream.push(headerless(2, 3, 0x41), Duration::ZERO);
+    let events = stream.push(
+        headerless(3, 4, 0x41),
+        MJOLNIR_REORDER_DEQUEUE_TIMEOUT + Duration::from_millis(1),
+    );
+    assert_eq!(delivered(events), [(3, false, false), (4, false, true)]);
+    assert!(stream.feedback.keyframe_request_pending());
+    assert_eq!(stream.feedback.frame_invalidation.take(), None);
+}
+
+#[test]
+fn an_unanswered_first_invalidation_returns_the_session_to_keyframe_recovery() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((2, 2)));
+    feedback.frame_invalidation.record_sent();
+    invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
+    assert!(feedback.keyframe_request_pending());
+    assert!(invalidation.admit(&mut frame(5, NvstFrameType::I), true, &feedback));
+    assert!(!invalidation.lose(now + KEYFRAME_REQUEST_COOLDOWN));
+
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(invalidation.admit(&mut frame(3, NvstFrameType::RefPicI), true, &feedback));
+    assert!(invalidation.lose(now));
+    invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
+    assert!(invalidation.admit(&mut frame(9, NvstFrameType::I), true, &feedback));
+    assert!(invalidation.lose(now + KEYFRAME_REQUEST_COOLDOWN));
+}
+
+#[test]
+fn an_invalidation_that_was_never_sent_keeps_rfi_enabled() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((2, 2)));
+    feedback.frame_invalidation.restore((2, 2));
+    invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
+    assert!(feedback.keyframe_request_pending());
+    assert!(feedback.frame_invalidation.stats().ends_with("rfiIdrBackstop=1"));
+    assert!(invalidation.admit(&mut frame(5, NvstFrameType::I), true, &feedback));
+    assert!(invalidation.lose(now + KEYFRAME_REQUEST_COOLDOWN));
+}
+
+#[test]
+fn recovery_discards_an_invalidation_that_was_not_sent_yet() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert!(invalidation.admit(&mut frame(4, NvstFrameType::RefPicI), false, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), None);
+
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(6, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((5, 5)));
+    assert!(invalidation.admit(&mut frame(7, NvstFrameType::IntraRefresh), false, &feedback));
+    feedback.frame_invalidation.restore((5, 5));
+    assert_eq!(feedback.frame_invalidation.take(), None);
+
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(9, NvstFrameType::P), true, &feedback));
+    invalidation.reset(&feedback);
+    assert_eq!(feedback.frame_invalidation.take(), None);
+}

@@ -342,3 +342,33 @@ fn generic_nack_sender_keeps_fixed_retries_even_with_a_live_rtt() {
     }
     assert_eq!(sent_at, [0, 4, 8]);
 }
+
+#[test]
+fn frame_invalidation_uses_the_idr_control_channel_once_and_retries_rejected_sends() {
+    let (mut local, mut remote, channels, _) = connect_bundle_pair();
+    let now = Instant::now() + Duration::from_secs(1);
+    receive_messages(&mut local, &mut remote, now);
+    let feedback = NvstFeedbackState::default();
+    feedback.frame_invalidation.queue((41, 43));
+    send_pending_frame_invalidation(&feedback, &mut local, channels);
+    send_pending_frame_invalidation(&feedback, &mut local, channels);
+    assert_eq!(
+        receive_messages(&mut local, &mut remote, now),
+        vec![(
+            "control_channel_reliable".to_owned(),
+            frame_invalidation_range(41, 43, 0).encoded(),
+        )]
+    );
+    assert!(feedback.frame_invalidation.stats().starts_with("rfiSent=1 "));
+    assert!(!feedback.keyframe_request_pending());
+
+    local
+        .direct_api()
+        .close_data_channel(channels.control_reliable);
+    receive_messages(&mut local, &mut remote, now);
+    feedback.frame_invalidation.queue((44, 50));
+    send_pending_frame_invalidation(&feedback, &mut local, channels);
+    assert!(receive_messages(&mut local, &mut remote, now).is_empty());
+    assert_eq!(feedback.frame_invalidation.take(), Some((44, 50)));
+    assert!(feedback.frame_invalidation.stats().starts_with("rfiSent=1 "));
+}

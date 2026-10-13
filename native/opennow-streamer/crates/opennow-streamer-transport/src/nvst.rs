@@ -44,8 +44,8 @@ use super::frame_stage_timing::FrameStageTimingsAccumulator;
 use super::nvst_bandwidth::{BandwidthEstimator, PacketBandwidthSample};
 use super::nvst_control::{
     DEFAULT_FRAME_TIME_US, FRAME_ACK_PAYLOAD_LEN, FRAME_PACING_INTERVAL, MAX_NACK_PACKET_COUNT,
-    QOS_REPORT_INTERVAL, QosPacketSnapshot, QosReport, frame_ack, frame_pacing_report, idr_request,
-    nack_v2,
+    QOS_REPORT_INTERVAL, QosPacketSnapshot, QosReport, frame_ack, frame_invalidation_range,
+    frame_pacing_report, idr_request, nack_v2,
 };
 use super::nvst_cursor::{CursorCommand, NvstCursorCapture, valid_cursor_channel_message};
 use super::nvst_haptics::NvstHaptics;
@@ -55,6 +55,8 @@ use super::nvst_input::{
     next_control_keepalive, server_cursor_messages, sony_device_change_command,
     sony_report_command,
 };
+pub use super::nvst_invalidation::NvstFrameType;
+use super::nvst_invalidation::{FrameInvalidation, FrameInvalidationFeedback};
 use super::{
     EncodedMediaFrame, MediaConsumer, TransportError, deliver_media_frame, install_crypto,
 };
@@ -623,6 +625,7 @@ pub struct NvstFeedbackState {
     bundle_ping: Mutex<Option<(Instant, Duration)>>,
     /// Remains set through send attempts until assembly receives a fresh keyframe.
     keyframe_needed: AtomicBool,
+    pub(crate) frame_invalidation: FrameInvalidationFeedback,
     pending_nacks: Mutex<VecDeque<PendingNackRange>>,
     last_sender_frame: AtomicU32,
     completed_frame_bytes: AtomicU64,
@@ -648,6 +651,7 @@ impl Default for NvstFeedbackState {
             video_ping: Mutex::new(None),
             bundle_ping: Mutex::new(None),
             keyframe_needed: AtomicBool::new(false),
+            frame_invalidation: FrameInvalidationFeedback::default(),
             pending_nacks: Mutex::new(VecDeque::new()),
             last_sender_frame: AtomicU32::new(0),
             completed_frame_bytes: AtomicU64::new(0),
@@ -2061,6 +2065,8 @@ pub struct EncodedVideoAccessUnit {
     pub timestamp: u32,
     pub frame_index: u32,
     pub first_stream_packet_index: u32,
+    /// GameStream frame-header frame type; `None` when the stream carries no frame header.
+    pub frame_type: Option<NvstFrameType>,
     pub keyframe: bool,
     pub contiguous: bool,
     pub bytes: Vec<u8>,
@@ -2963,6 +2969,26 @@ fn send_pending_nack(
     }
 }
 
+fn send_pending_frame_invalidation(
+    feedback: &NvstFeedbackState,
+    rtc: &mut Rtc,
+    channels: NvstInputChannels,
+) {
+    let Some((first, last)) = feedback.frame_invalidation.take() else {
+        return;
+    };
+    if !channels.send_control(rtc, &frame_invalidation_range(first, last, 0).encoded()) {
+        feedback.frame_invalidation.restore((first, last));
+        return;
+    }
+    feedback.frame_invalidation.record_sent();
+    opennow_streamer_protocol::log::log_async(
+        "INFO",
+        "nvst-rfi",
+        &format!("invalidation sent frames={first}..={last}"),
+    );
+}
+
 fn uses_rtcp_video_feedback(mjolnir: bool, rtcp_channel_open: bool) -> bool {
     !mjolnir && rtcp_channel_open
 }
@@ -3111,7 +3137,7 @@ struct VideoAccessUnitAssembler {
     codec: NvstVideoCodec,
     current_frame: Option<u32>,
     first_stream_packet_index: Option<u32>,
-    keyframe_hint: bool,
+    frame_type: Option<NvstFrameType>,
     last_packet_payload_length: Option<usize>,
     expected_access_unit_length: Option<usize>,
     invalid_av1_length_logged: bool,
@@ -3127,7 +3153,7 @@ impl VideoAccessUnitAssembler {
             codec,
             current_frame: None,
             first_stream_packet_index: None,
-            keyframe_hint: false,
+            frame_type: None,
             last_packet_payload_length: None,
             expected_access_unit_length: None,
             invalid_av1_length_logged: false,
@@ -3141,7 +3167,7 @@ impl VideoAccessUnitAssembler {
     fn reset(&mut self) {
         self.current_frame = None;
         self.first_stream_packet_index = None;
-        self.keyframe_hint = false;
+        self.frame_type = None;
         self.last_packet_payload_length = None;
         self.expected_access_unit_length = None;
         self.bytes.clear();
@@ -3162,10 +3188,13 @@ impl VideoAccessUnitAssembler {
         let mut picture_payload = payload;
         if header.is_start_of_frame() {
             self.reset();
-            self.keyframe_hint = payload.get(3).is_some_and(|value| *value == 2);
             picture_payload = video_picture_payload(self.codec, payload)
                 .ok_or(NvstDropReason::MissingAnnexBStartCode)?;
             frame_header_size = payload.len() - picture_payload.len();
+            self.frame_type = payload
+                .get(3)
+                .filter(|_| frame_header_size > 0)
+                .map(|value| NvstFrameType::from_wire(*value));
             if !self.first_start_payload_logged {
                 self.first_start_payload_logged = true;
                 eprintln!(
@@ -3256,11 +3285,11 @@ impl VideoAccessUnitAssembler {
         if !self.first_access_unit_logged {
             self.first_access_unit_logged = true;
             eprintln!(
-                "NVST first {} access unit: frame={} bytes={} keyframeHint={} raw={}",
+                "NVST first {} access unit: frame={} bytes={} frameType={:?} raw={}",
                 self.codec.label(),
                 header.frame_index,
                 bytes.len(),
-                self.keyframe_hint,
+                self.frame_type,
                 diagnostic_hex(&bytes, 64),
             );
         }
@@ -3274,7 +3303,12 @@ impl VideoAccessUnitAssembler {
             timestamp,
             frame_index: header.frame_index,
             first_stream_packet_index,
-            keyframe: video_access_unit_is_keyframe(self.codec, &bytes, self.keyframe_hint),
+            frame_type: self.frame_type,
+            keyframe: video_access_unit_is_keyframe(
+                self.codec,
+                &bytes,
+                self.frame_type == Some(NvstFrameType::I),
+            ),
             contiguous: true,
             bytes,
         }))
@@ -4249,6 +4283,7 @@ pub struct NvstVideoReceiver {
     last_authenticated_packet: Option<Instant>,
     initial_timeout_pending: bool,
     frame_progress: FrameProgressWatchdog,
+    frame_invalidation: FrameInvalidation,
 }
 
 impl NvstVideoReceiver {
@@ -4284,6 +4319,7 @@ impl NvstVideoReceiver {
             last_authenticated_packet: None,
             initial_timeout_pending: true,
             frame_progress: FrameProgressWatchdog::default(),
+            frame_invalidation: FrameInvalidation::default(),
         }
     }
 
@@ -4482,6 +4518,11 @@ impl NvstVideoReceiver {
         self.last_authenticated_packet = Some(now);
         self.initial_timeout_pending = false;
         self.frame_progress.authenticated(now);
+        self.frame_invalidation.poll_backstop(
+            now,
+            KEYFRAME_REQUEST_COOLDOWN,
+            &self.config.feedback,
+        );
         self.authenticated_packets += 1;
         let sequence = u32::try_from(packet.index & 0xffff_ffff).unwrap_or(u32::MAX);
         let reordered =
@@ -4521,7 +4562,7 @@ impl NvstVideoReceiver {
             if layout.shard_index < layout.data_shards
                 && matches!(result.dropped, Some(NvstDropReason::Unsupported(_)))
             {
-                self.invalidate_picture();
+                self.invalidate_picture(now);
             }
             result
         } else {
@@ -4542,7 +4583,7 @@ impl NvstVideoReceiver {
         }
         if let Some(recovery) = result.recovery {
             self.packet_gap_recoveries += 1;
-            self.invalidate_picture();
+            self.invalidate_picture(now);
             self.config.feedback.clear_nacks();
             events.push(NvstReceiveEvent::RecoveryNeeded(recovery));
         }
@@ -4550,7 +4591,7 @@ impl NvstVideoReceiver {
             let payload = match packet.header.payload(&packet.plaintext) {
                 Ok(payload) => payload,
                 Err(error) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(NvstDropReason::MalformedRtp(
                         error,
                     )));
@@ -4560,7 +4601,7 @@ impl NvstVideoReceiver {
             let (mut nv_packet, media) = match NvVideoPacket::parse(&packet.header, payload) {
                 Ok(value) => value,
                 Err(error) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(NvstDropReason::MalformedRtp(
                         error,
                     )));
@@ -4586,7 +4627,7 @@ impl NvstVideoReceiver {
                 // A new SOF before EOF means the previous reference frame was
                 // incomplete even when RTP sequence numbers were continuous.
                 // Never let the following P-frame look contiguous to the decoder.
-                self.invalidate_picture();
+                self.invalidate_picture(now);
                 self.config.feedback.clear_nacks();
                 events.push(NvstReceiveEvent::Dropped(
                     NvstDropReason::FrameDiscontinuity,
@@ -4599,7 +4640,7 @@ impl NvstVideoReceiver {
                     last.wrapping_add(1) & STREAM_PACKET_INDEX_MASK != nv_packet.stream_packet_index
                 })
             {
-                self.invalidate_picture();
+                self.invalidate_picture(now);
                 events.push(NvstReceiveEvent::Dropped(
                     NvstDropReason::FrameDiscontinuity,
                 ));
@@ -4611,8 +4652,19 @@ impl NvstVideoReceiver {
                 .push(nv_packet, packet.header.timestamp, media)
             {
                 Ok(Some(mut frame)) => {
-                    frame.contiguous = self.next_frame_contiguous;
+                    let loss_before = !self.next_frame_contiguous;
                     self.next_frame_contiguous = true;
+                    if !self.frame_invalidation.admit(
+                        &mut frame,
+                        loss_before,
+                        &self.config.feedback,
+                    ) {
+                        self.config.feedback.publish_completed_frame(&frame);
+                        self.config
+                            .feedback
+                            .retire_undelivered_frame(frame.frame_index);
+                        continue;
+                    }
                     self.frames_emitted += 1;
                     if self
                         .frame_progress
@@ -4628,7 +4680,7 @@ impl NvstVideoReceiver {
                 }
                 Ok(None) => {}
                 Err(reason) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(reason));
                 }
             }
@@ -4636,11 +4688,13 @@ impl NvstVideoReceiver {
         events
     }
 
-    fn invalidate_picture(&mut self) {
+    fn invalidate_picture(&mut self, now: Instant) {
         self.assembler.reset();
         self.last_stream_packet_index = None;
         self.next_frame_contiguous = false;
-        self.config.feedback.request_keyframe();
+        if !self.frame_invalidation.lose(now) {
+            self.config.feedback.request_keyframe();
+        }
     }
 
     /// Returns an SRTCP Receiver Report to send to the video peer, at most once per
@@ -4658,7 +4712,7 @@ impl NvstVideoReceiver {
     /// depend on when buffered log lines happen to flush.
     pub fn stats_line(&self, origin: Instant) -> String {
         format!(
-            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} gaps={} ssrc={:?}",
+            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} gaps={} {} ssrc={:?}",
             origin.elapsed().as_secs_f64(),
             self.authenticated_packets,
             self.fec_packets,
@@ -4668,6 +4722,7 @@ impl NvstVideoReceiver {
             self.stale_packets,
             self.recovered_retransmissions,
             self.packet_gap_recoveries,
+            self.config.feedback.frame_invalidation.stats(),
             self.bound_ssrc,
         )
     }
@@ -4716,6 +4771,7 @@ impl NvstVideoReceiver {
             .clear();
         self.config.feedback().reset_frame_stage_epoch();
         self.frame_progress.reset();
+        self.frame_invalidation.reset(&self.config.feedback);
     }
 }
 
@@ -7107,6 +7163,13 @@ fn run_nvst_webrtc_bundle(
             last_recovery_send = now;
         }
 
+        if upstream_allowed
+            && input_state.control_is_open()
+            && let Some(channels) = input_channels
+        {
+            send_pending_frame_invalidation(&feedback, &mut rtc, channels);
+        }
+
         // Do not gate control IDR on stream_snapshot(): it is needed most when
         // the server has not sent any video yet. Bound failed sends as well as
         // successful ones, and leave the request armed until a keyframe arrives.
@@ -8830,6 +8893,7 @@ mod tests {
             timestamp: 90_000,
             frame_index: 42,
             first_stream_packet_index: 10,
+            frame_type: None,
             keyframe: false,
             contiguous: true,
             bytes: vec![0, 0, 0, 1, 0x41],
@@ -8869,6 +8933,7 @@ mod tests {
                 timestamp: 90_000,
                 frame_index: 2_417,
                 first_stream_packet_index: 90,
+                frame_type: None,
                 keyframe: false,
                 contiguous: true,
                 bytes: vec![0x12, 0],
@@ -8912,6 +8977,7 @@ mod tests {
                         timestamp: frame_index * 3_000,
                         frame_index,
                         first_stream_packet_index: frame_index,
+                        frame_type: None,
                         keyframe: frame_index == 1,
                         contiguous: true,
                         bytes: vec![0, 0, 0, 1, 0x26],
@@ -8944,6 +9010,7 @@ mod tests {
                 timestamp: frame_index * 3_000,
                 frame_index,
                 first_stream_packet_index: frame_index,
+                frame_type: None,
                 keyframe: true,
                 contiguous: true,
                 bytes: vec![0, 0, 0, 1, 0x26],
@@ -13184,6 +13251,7 @@ mod tests {
                 timestamp: frame_index,
                 frame_index,
                 first_stream_packet_index: frame_index,
+                frame_type: None,
                 keyframe: false,
                 contiguous: true,
                 bytes: vec![frame_index as u8],
