@@ -1,0 +1,63 @@
+# GFN Windows native-client research
+
+This directory records a static study of the GeForce NOW Windows client supplied on 2026-10-13, plus the user's own logs from that install. Product metadata reports **2.0.89.141**. `Geronimo.dll` reports `gs_04_92 38967594`. The study mirrors the macOS research in PR #1161 (`docs/gfn-macos-re/`), file for file where the evidence allows.
+
+The research used Ghidra 12.1.4 headless decompilation, `pefile`/`capstone` byte inventory, and parsing of the supplied logs. No GFN executable was run. No NVIDIA or GFN server was contacted. No login was attempted.
+
+The upload does **not** contain `Bifrost2.dll`, which owns CloudMatch, RTSPS, SDP, ICE/DTLS/SRTP, SCTP, Mjolnir, NACK, invalidation and IDR on Windows. So every Windows wire-format statement in these files comes from Bifrost's own log lines in `geronimo.log`, from Geronimo's side of the `nvb*` API, or from the macOS Bifrost study, and each one says which. See [artifacts.md](artifacts.md).
+
+## Read the findings
+
+| Question | Document |
+| --- | --- |
+| Which files, hashes and versions were examined, and what is missing? | [Artifact inventory](artifacts.md) |
+| How were claims established, and how can they be repeated? | [Method and reproduction](method.md) |
+| Which process or DLL owns each stage, and how does a session flow from the app to the streamer? | [Architecture and IPC](architecture.md) |
+| How does session signaling establish the streams? | [Handshake and connection setup](handshake.md) |
+| How do media transport, loss feedback, control and termination work? | [Transport and feedback](transport-feedback.md) |
+| How are codecs, decoders, presentation and pacing selected? | [Video](video.md) |
+| How do color, chroma, bit depth, SDR and HDR interact? | [Color and HDR](color.md) |
+| How do audio playout and the microphone work? | [Audio](audio.md) |
+| How do keyboard, mouse, cursor, gamepad, haptics and clipboard work? | [Input](input.md) |
+| What is known about alliance partners, server types and endpoints? | [Providers](providers.md) |
+| Which recovery and fallback decisions are established? | [Fallbacks and recovery](fallbacks.md) |
+| Which configuration names and switches exist? | [Configuration fields](configuration-fields.md), [NvscClientConfig dump](nvsc-client-config.tsv) |
+| What did the user's real sessions do, step by step? | [Log timeline](logs-timeline.md) |
+| What does the CloudMatch request and response contain? | [CloudMatch fields](cloudmatch-fields.md) |
+| Which RTSP headers and SDP attributes were exchanged? | [SDP attributes](sdp-attributes.md) |
+| How does Windows differ from macOS? | [Windows vs macOS](windows-vs-macos.md) |
+| What does OpenNOW do differently or lack? | [OpenNOW gap list](opennow-gaps.md) |
+| What remains unverified? | [Unknowns](unknowns.md) |
+| Which judgment calls did the study make? | [Decision log](decisions.tsv) |
+
+## Evidence levels
+
+- **S, static:** a string, import, export, RTTI name, GUID or data value is present in a supplied binary. Cited by virtual address (VA).
+- **D, decompiled:** a branch, call, struct write or serializer was read in Ghidra output. Cited by function VA. This proves a code path, not that a session takes it.
+- **L, log-confirmed:** a line in the supplied logs shows it happened in a real session. Cited by file and local time, with identifiers replaced by `<redacted>`.
+- **I, inferred:** an interpretation the evidence does not fully prove.
+- **U, unknown:** the needed artifact or observation is missing.
+
+"macOS Bifrost (PR #1161)" marks facts taken from the macOS study. They are not Windows evidence. VAs use image base `0x140000000` for EXEs and `0x180000000` for DLLs. Log times are local wall-clock (UTC+2), which is the second timestamp on each `geronimo.log` line.
+
+## Main findings
+
+1. **Geronimo runs inside `GeForceNOW.exe`.** The CEF shell delay-loads `Geronimo.dll`, and its `GFNQueryHandler` turns `QUERY_GFN_PREPARE`/`START`/`RESUME` into direct `GridApp` calls, the same boundary the macOS study found. `GeForceNOWStreamer.exe` is a 500 KB relauncher that starts `GeForceNOW.exe` with one forwarded argument. NvContainer plugins carry diagnostics over a named-pipe message bus, never media (**D/L**, [architecture.md](architecture.md)).
+2. **On an NVIDIA seat the media peer comes from the SETUP `Transport` header.** CloudMatch returned only two usage-14 `NVB_PU_RTSPS` entries (ports 322 and 48322) plus the usage-10 session-control resource. It returned no usage 2 or 17. The video socket and the DTLS bundle socket both sent to the server port in `X-GS-ServerPort=5004-5005`. The SDP ports (`serverBundlePort 47999`, `serverEndpoints`) were never peers (**L**, [handshake.md](handshake.md)).
+3. **No unified socket on that seat.** Bifrost logged `Unified socket mode disabled (enableUnifiedSocket=0, using legacy dedicated sockets)`. Video used its own SRTP socket. Audio, microphone and six SCTP data channels used the DTLS bundle, and audio and microphone skipped RTSP SETUP. This matches the macOS "legacy" arrangement and PR #1162's non-alliance path. The alliance branch of #1162 cannot be tested with these logs (**L**).
+4. **Signaling is RTSP over secure WebSocket** (`Using Secure WebSockets for Signaling`, `X-GS-Version: 14.2`, `HTTP/1.0 200 OK` responses). The control channel is `udp_ag` over SCTP. The client appends 163 config attributes to ANNOUNCE and skips the V1 ICE/DTLS fields that OpenNOW still sends (**L**).
+5. **The codec selector is the macOS `chooseMaxSupportedVideoSettings` code.** On Windows it is `FUN_180157f20`. Auto prefers **AV1, then HEVC, then H.264, also when HDR is requested**. Merged PR #1165 tries HEVC before AV1 for HDR, so it contradicts this build (**D**, [video.md](video.md)).
+6. **H.264 is capped at 120 fps and below 4,953,600 pixels** whenever H.264 is the requested codec or the only decodable one. Log probes show `1920x1080@240 H264` becoming `@120` and `3440x1440@120 H264` becoming `2560x1080@120`. PR #1165 caps only Auto+HDR landing on H.264 (**D/L**).
+7. **4:4:4 forces HEVC at runtime.** The user's session requested H.264 10-bit 4:4:4 and streamed HEVC 10-bit 4:4:4 SDR, decoded as Y410 through D3D11VA (`HEVC_VLD_Main10_444`) into a 10-bit flip-model swap chain. This supports PR #1165's 4:4:4 rule (**D/L**).
+8. **Reference-frame invalidation is enabled but never fired.** The config has `refPicInvalidation 1`, recovery mode and intra-refresh in recovery, and the client logs `Client requests display freeze on Invalidated Reference Frames`. NACK repaired every loss, so no 0x301 or 0x302 appears in the logs. PR #1164's policy agrees with this config. Its wire format is untested on Windows (**L**).
+9. **NACK v2 constants match OpenNOW** (52 ms wait, 4 ms backoff, 3 retries, 64 packets, 2048 pending). The one difference is a 1 ms initial send delay (**L**).
+10. **Session end is classified, and the client warns before an idle kick.** The server sends a type 4 timer notification (60 s left) and a type 5 (0 s) before `NVST_DISCONN_SERVER_TERMINATED_CLOSED`. Geronimo derives `Resumable`/`SessionAlive` from the reason and extended code (`0x180142a70`), and the JS app auto-resumes reason 55. OpenNOW has neither the idle warning nor the resumable rule (**D/L**).
+11. **Input send errors are not fatal.** `Sending Input event failed: NVST_R_GENERIC_ERROR` appears 42 times around focus changes while streaming continues. OpenNOW ends the session on any input forward error (**L**, [input.md](input.md)).
+12. **The microphone runs WebRTC echo cancellation with decoded game audio as the reference**, and sends Opus with RFC 2198 RED level 3. OpenNOW sends unprocessed mono with no RED (**D/L**, [audio.md](audio.md)).
+13. **HDR output is HDR10 without DXGI metadata.** The swap chain uses `SetColorSpace1(RGB_FULL_G2084_NONE_P2020)`. No code reaches `IDXGISwapChain4::SetHDRMetaData`. Display HDR detection uses the advanced-color bits from `DisplayConfigGetDeviceInfo`, not only `IDXGIOutput6` (**D**, [color.md](color.md)).
+
+[opennow-gaps.md](opennow-gaps.md) turns these into concrete OpenNOW file pointers.
+
+## Coverage limit
+
+The logs hold seven launches and six streaming sessions on 2026-10-11 and 2026-10-12. All went to the `eu-netherlands-north` zone on NVIDIA (NIMBUS) seats. Geronimo log rotation left a full handshake for only one session (S6). No HDR, alliance-partner, resumed or lossy session is in the logs. Findings are specific to this build and this hardware (an NVIDIA RTX GPU and a 165 Hz SDR display). Proprietary binaries, raw logs, bulk decompiled code and every account, session, network and device identifier are excluded.
