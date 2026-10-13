@@ -782,8 +782,7 @@ impl Engine {
             .is_some_and(|config| config.audio_track().is_some());
         let microphone_requested =
             context.settings["microphoneMode"].as_str() == Some("voice-activity");
-        let microphone_available = microphone_requested
-            && self.media_runtime.is_some()
+        let microphone_available = self.media_runtime.is_some()
             && nvst_config
                 .as_ref()
                 .is_some_and(|config| config.microphone_available());
@@ -879,6 +878,7 @@ impl Engine {
         let mut nvst_events = None;
         let mut nvst_resources = None;
         let mut nvst_upstream_ready = None;
+        let mut nvst_authenticated_ready = None;
         if let Some(config) = nvst_config {
             let Some(media_consumer) = self.media_consumer.clone() else {
                 self.stop_media_resources();
@@ -900,6 +900,7 @@ impl Engine {
                 };
             let mjolnir_udp_port = config.mjolnir_udp_port();
             let feedback = config.feedback();
+            nvst_authenticated_ready = Some(feedback.clone());
             let (upstream_ready, upstream_waiter) = if prepared_nvst.is_some() {
                 let (sender, receiver) = std::sync::mpsc::sync_channel(1);
                 (Some(sender), Some(receiver))
@@ -1061,6 +1062,31 @@ impl Engine {
             }
         }
         if let Some(prepared) = prepared_nvst {
+            let readiness = nvst_rtsp::wait_authenticated_transport(
+                || {
+                    let lifecycle = lock_lifecycle(&self.lifecycle);
+                    if lifecycle.generation != generation || lifecycle.state != State::Connected {
+                        return Err(nvst_rtsp::NvstRtspError {
+                            code: "nvst-start-aborted",
+                            message:
+                                "NVST session stopped while waiting for authenticated transport"
+                                    .to_owned(),
+                        });
+                    }
+                    Ok(nvst_authenticated_ready
+                        .as_ref()
+                        .is_some_and(|feedback| feedback.authenticated_transport_ready()))
+                },
+                Duration::from_secs(20),
+            );
+            if let Err(readiness_error) = readiness {
+                self.stop("NVST authenticated transport readiness failed");
+                return Err(error(
+                    Some(&command.id),
+                    readiness_error.code,
+                    readiness_error.message,
+                ));
+            }
             match prepared.finish() {
                 Ok(active) => {
                     self.nvst_rtsp = Some(active);
@@ -1101,7 +1127,8 @@ impl Engine {
                 self.lifecycle.clone(),
                 generation,
             );
-            let _ = microphone.set_enabled(command.microphone_enabled.unwrap_or(true));
+            let _ =
+                microphone.set_enabled(command.microphone_enabled.unwrap_or(microphone_requested));
             self.microphone = Some(microphone);
         } else {
             let _ = self.events.send(event("microphone-state", json!({
@@ -6377,6 +6404,39 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn muted_start_retains_microphone_capability_without_starting_capture() {
+        let (_host, runtime) = opennow_streamer_platform::create_test_runtime();
+        let local_ip =
+            opennow_streamer_transport::advertised_nvst_ipv4().expect("local IPv4 route");
+        let peer = UdpSocket::bind((local_ip, 0)).unwrap();
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let mut engine = Engine::with_media_runtime(sender, runtime);
+        let mut context = synthetic_context("muted-mic", json!([]));
+        context["settings"]["microphoneMode"] = json!("disabled");
+        context["nvstVideo"] = json!({
+            "clientUdpPort":unused_udp_port(), "videoPeerIp":local_ip.to_string(),
+            "videoPeerPort":peer.local_addr().unwrap().port(),
+            "srtpAesKeyHex":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+            "srtpSaltHex":"00000000000000009ECA935E", "codec":"H264",
+            "microphoneOnBundle":true, "pingVersion":6,
+            "localIceUsernameFragment":"loc1", "localIcePassword":"local-password-value-01",
+            "remoteIceUsernameFragment":"remote01", "remoteIcePassword":"remote-password-value-01",
+            "remoteDtlsFingerprint":format!("sha-256 {}AA", "AA:".repeat(31))
+        });
+        let (responses, _) = engine.handle(command(
+            json!({"id":"start", "type":"start", "context":context}),
+        ));
+        assert_eq!(responses[0]["type"], "ok", "{responses:?}");
+        assert_eq!(responses[0]["capabilities"]["supportsMicrophone"], true);
+        assert!(!engine.microphone.as_ref().unwrap().enabled());
+        let (responses, _) = engine.handle(command(
+            json!({"id":"mic", "type":"microphone-set", "enabled":false}),
+        ));
+        assert_eq!(responses[0]["type"], "ok", "{responses:?}");
+        engine.stop("test complete");
     }
 
     #[test]

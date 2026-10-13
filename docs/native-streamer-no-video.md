@@ -134,9 +134,11 @@ show incoming authenticated video, assembled frames, and visible playback.
 Startup ordering remains a separate lead. Android starts its UDP workers before
 ANNOUNCE. Mac also explicitly starts video punches before PLAY and records a
 [late-punch failure on high-RTT seats](https://github.com/OpenCloudGaming/openNOW-Mac/blob/f95fde8ed79cedd8f7e4333e195ecfd7a701a04b/OPN/Stream/NvstBifrostFreeVideo.swift#L274-L284).
-Rust starts the workers after ANNOUNCE and before PLAY, but does not wait for
-their first send. The supplied logs do not timestamp that first send, so they
-cannot establish whether this race occurred. No timing delay is added by this fix.
+Rust starts the workers after ANNOUNCE and now waits up to 20 seconds for
+authenticated transport readiness before PLAY. DTLS completion publishes that
+readiness; a raw transport can establish it through authenticated media from
+the negotiated peer. The supplied incident logs do not timestamp the first send,
+so they cannot establish whether an earlier startup race occurred.
 
 ## Verification
 

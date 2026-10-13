@@ -856,11 +856,9 @@ QtObject {
     readonly property bool microphoneSessionSupported: microphoneSessionActive
         && Boolean(streamer.capabilities && streamer.capabilities.supportsMicrophone === true)
     readonly property bool microphoneToggleAvailable: microphoneSessionSupported
-        && sessionMicrophoneMode === "voice-activity"
     readonly property bool microphoneCanToggle: microphoneToggleAvailable && microphoneRequestId === ""
     readonly property string microphoneState: !microphoneSessionActive ? "disabled"
-        : String(streamer.microphoneState || (sessionMicrophoneMode === "disabled" ? "disabled"
-            : microphoneSessionSupported ? "muted" : "unavailable"))
+        : String(streamer.microphoneState || (microphoneSessionSupported ? "muted" : "unavailable"))
     readonly property bool microphoneEnabled: microphoneSessionActive
         && microphoneState === "ready" && streamer.microphoneEnabled === true
     readonly property string microphoneLabel: microphoneState === "ready" && microphoneEnabled
@@ -871,7 +869,7 @@ QtObject {
         ? qsTr("Mute microphone") : qsTr("Unmute microphone")
     readonly property string microphoneDescription: microphoneSessionActive && streamer.microphoneMessage
         ? String(streamer.microphoneMessage)
-        : qsTr("Uses the system default microphone. Open microphone sends audio continuously during supported sessions. Changes apply to the next session.")
+        : qsTr("Uses the system default microphone. Open microphone sends audio continuously. You can mute or unmute during supported sessions. The startup preference applies to the next session.")
 
     property Timer devicePollTimer: Timer {
         interval: 5000
@@ -2471,8 +2469,6 @@ QtObject {
             microphoneRecoverySessionId = String(sessionId)
             microphoneRecoveryEnabled = sessionMicrophoneMode === "voice-activity"
         }
-        if (sessionMicrophoneMode !== "voice-activity")
-            microphoneRecoveryEnabled = false
         return microphoneRecoveryEnabled
     }
 
