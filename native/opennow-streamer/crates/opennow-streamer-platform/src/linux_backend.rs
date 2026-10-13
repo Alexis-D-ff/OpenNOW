@@ -139,6 +139,9 @@ pub(crate) fn select_embedded_video_path(
     } else {
         &requested
     };
+    if requested == "mediacodec" {
+        return select_mediacodec(stream);
+    }
     let codec = match stream.codec {
         crate::MediaVideoCodec::H264 => opennow_streamer_platform_linux::VideoCodec::H264,
         crate::MediaVideoCodec::H265 => opennow_streamer_platform_linux::VideoCodec::H265,
@@ -166,6 +169,74 @@ pub(crate) fn select_embedded_video_path(
         stream,
         &crate::embedded_video_backends_with_config(device, None),
     )
+}
+
+fn select_mediacodec(stream: crate::MediaStreamConfig) -> LinuxVideoSelection {
+    if stream.codec == crate::MediaVideoCodec::H264
+        && stream.color_quality == crate::MediaColorQuality::EightBit420
+        && !stream.hdr
+        && stream.width <= 2560
+        && stream.height <= 1440
+    {
+        return LinuxVideoSelection {
+            path: LinuxVideoPath::Hardware(DecoderPreference::MediaCodecOnly),
+            use_vulkan_output: true,
+            fallback_reason: None,
+        };
+    }
+    LinuxVideoSelection {
+        path: LinuxVideoPath::Software,
+        use_vulkan_output: false,
+        fallback_reason: Some(
+            "The opt-in Android MediaCodec bridge supports H.264 8-bit 4:2:0 SDR up to 2560x1440 only; it does not fall back to software.".to_owned(),
+        ),
+    }
+}
+
+pub(crate) fn mediacodec_capability() -> Option<VideoBackendCapability> {
+    let requested = std::env::var(VIDEO_BACKEND_ENV).unwrap_or_default();
+    if requested.trim().eq_ignore_ascii_case("mediacodec") {
+        Some(mediacodec_capability_for(
+            opennow_streamer_platform_linux::probe_mediacodec().is_ok(),
+        ))
+    } else {
+        None
+    }
+}
+
+fn mediacodec_capability_for(available: bool) -> VideoBackendCapability {
+    let reason = (!available).then_some(
+        "The opt-in Android hardware MediaCodec bridge did not answer a valid hardware probe. Check the DroidDeck session and OPENNOW_MEDIACODEC_SOCKET.",
+    );
+    VideoBackendCapability {
+        backend: "mediacodec",
+        platform: "linux",
+        available,
+        reason,
+        zero_copy_modes: Vec::new(),
+        codecs: CODECS
+            .into_iter()
+            .map(|codec| {
+                let supported = codec == "h264";
+                CodecCapability {
+                    codec,
+                    available: available && supported,
+                    hdr_supported: Some(false),
+                    hdr_color_qualities: Some(Vec::new()),
+                    color_qualities: Some(if available && supported {
+                        vec!["8bit_420"]
+                    } else {
+                        Vec::new()
+                    }),
+                    reason: if supported {
+                        reason
+                    } else {
+                        Some("The Android compatibility bridge currently supports H.264 only")
+                    },
+                }
+            })
+            .collect(),
+    }
 }
 
 fn select_embedded_fallback(
@@ -539,6 +610,77 @@ fn static_reason(reason: String) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mediacodec_selection_is_exact_and_rejects_unsupported_profiles() {
+        let stream = crate::MediaStreamConfig::default();
+        let selected = select_mediacodec(stream);
+        assert_eq!(
+            selected.path,
+            LinuxVideoPath::Hardware(DecoderPreference::MediaCodecOnly)
+        );
+        assert!(selected.use_vulkan_output);
+        assert!(selected.fallback_reason.is_none());
+        for unsupported in [
+            crate::MediaStreamConfig {
+                codec: crate::MediaVideoCodec::H265,
+                ..stream
+            },
+            crate::MediaStreamConfig {
+                codec: crate::MediaVideoCodec::Av1,
+                ..stream
+            },
+            crate::MediaStreamConfig {
+                color_quality: crate::MediaColorQuality::TenBit420,
+                ..stream
+            },
+            crate::MediaStreamConfig {
+                color_quality: crate::MediaColorQuality::EightBit444,
+                ..stream
+            },
+            crate::MediaStreamConfig {
+                hdr: true,
+                ..stream
+            },
+            crate::MediaStreamConfig {
+                width: 3840,
+                height: 2160,
+                ..stream
+            },
+        ] {
+            let rejected = select_mediacodec(unsupported);
+            assert_eq!(rejected.path, LinuxVideoPath::Software);
+            assert!(!rejected.use_vulkan_output);
+            assert!(
+                rejected
+                    .fallback_reason
+                    .unwrap()
+                    .contains("does not fall back to software")
+            );
+        }
+    }
+
+    #[test]
+    fn mediacodec_capabilities_require_a_successful_hardware_probe() {
+        let missing = mediacodec_capability_for(false);
+        assert!(!missing.available);
+        assert!(missing.codecs.iter().all(|codec| !codec.available));
+        let available = mediacodec_capability_for(true);
+        assert!(available.available);
+        assert!(available.zero_copy_modes.is_empty());
+        for codec in available.codecs {
+            assert_eq!(codec.available, codec.codec == "h264");
+            assert_eq!(codec.hdr_supported, Some(false));
+            assert_eq!(
+                codec.color_qualities,
+                Some(if codec.codec == "h264" {
+                    vec!["8bit_420"]
+                } else {
+                    Vec::new()
+                })
+            );
+        }
+    }
 
     #[test]
     fn unavailable_v4l2_summary_preserves_the_hevc_failure() {

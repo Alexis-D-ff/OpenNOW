@@ -3767,6 +3767,9 @@ const fn linux_decoder_name(
         opennow_streamer_platform_linux::DecoderBackend::VaApi => "VA-API/Vulkan",
         opennow_streamer_platform_linux::DecoderBackend::V4l2 => "V4L2/Vulkan",
         opennow_streamer_platform_linux::DecoderBackend::Ffmpeg => "FFmpeg software/Vulkan",
+        opennow_streamer_platform_linux::DecoderBackend::MediaCodec => {
+            "Android MediaCodec hardware (CPU NV12 transfer)/Vulkan"
+        }
     }
 }
 
@@ -3775,6 +3778,9 @@ const fn linux_embedded_backend_label(
     preference: opennow_streamer_platform_linux::DecoderPreference,
 ) -> &'static str {
     match preference {
+        opennow_streamer_platform_linux::DecoderPreference::MediaCodecOnly => {
+            linux_decoder_name(opennow_streamer_platform_linux::DecoderBackend::MediaCodec)
+        }
         opennow_streamer_platform_linux::DecoderPreference::SoftwareOnly => {
             linux_decoder_name(opennow_streamer_platform_linux::DecoderBackend::Ffmpeg)
         }
@@ -3831,6 +3837,7 @@ const fn linux_subsystem_name(
         opennow_streamer_platform_linux::Subsystem::V4l2 => "V4L2",
         opennow_streamer_platform_linux::Subsystem::Vulkan => "Vulkan",
         opennow_streamer_platform_linux::Subsystem::Ffmpeg => "FFmpeg",
+        opennow_streamer_platform_linux::Subsystem::MediaCodec => "Android MediaCodec bridge",
         opennow_streamer_platform_linux::Subsystem::Opus => "Opus",
         opennow_streamer_platform_linux::Subsystem::PipeWire => "PipeWire",
         opennow_streamer_platform_linux::Subsystem::Alsa => "ALSA",
