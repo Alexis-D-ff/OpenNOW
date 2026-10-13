@@ -147,6 +147,16 @@ timestamps, color precision, frame-slot ownership, and scene-graph retirement
 remain unchanged. Qt must refresh the target after resize, fullscreen, or display
 scale changes, and must not infer source video geometry from upscaled textures.
 
+Qt publishes the decoded display size after a successful frame recording, using
+the actual recorded size for the Windows pending-frame path and retaining the
+decoded source size when MetalFX changes the texture size. Updates are coalesced
+and tagged with Qt's presentation generation, so a queued resize from a stopped
+or replaced session cannot change the next session's geometry. The existing video
+item uses the requested profile only until decoded dimensions arrive, then uses
+the decoded size for aspect fitting, pointer mapping and confinement. A decoded
+resize does not recreate the item, transport or session. This does not change the
+FFI layout or equate texture-slot generations with presentation generations.
+
 ### HDR texture metadata (introduced in ABI 6)
 
 ABI 6 adds `color_space` to `OpenNowStreamerRecordedFrame` and rejects clients compiled for earlier ABI versions. Rebuild the native runtime and Qt shell together. `texture_format` now accepts `RGBA16F` in addition to `RGBA8` and `RGB10A2`.

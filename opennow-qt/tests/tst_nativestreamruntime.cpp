@@ -255,6 +255,9 @@ private slots:
         };
         NativeStreamRuntime runtime(api);
         QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("metal-size")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
         OpenNowStreamerRecordCommand command{};
         command.version = OPENNOW_STREAMER_RENDER_COMMAND_VERSION;
         command.struct_size = sizeof(command);
@@ -271,6 +274,129 @@ private slots:
         QCOMPARE(info.presentation_time_ns, recorded.presentation_time_ns);
         QCOMPARE(recorded.width, 2560U);
         QCOMPARE(recorded.height, 1440U);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), QSize(1920, 1080));
+    }
+
+    void decodedDisplaySizeCoalescesAndRejectsReplacedGenerations()
+    {
+        static QSize decodedSize;
+        static OpenNowStreamerStatus recordStatus;
+        decodedSize = QSize(1920, 1080);
+        recordStatus = OPENNOW_STREAMER_OK;
+        auto api = fakeApi();
+        api.acquireLatestFrame = &fakeAcquireLatestFrame;
+        api.releaseFrame = &fakeReleaseFrame;
+        api.recordFrame = [](const OpenNowStreamer *, const OpenNowStreamerFrame *,
+                               const OpenNowStreamerRecordCommand *,
+                               OpenNowStreamerRecordedFrame *recorded) {
+            *recorded = {1, 0, OPENNOW_STREAMER_GRAPHICS_API_D3D11,
+                         OPENNOW_STREAMER_TEXTURE_FORMAT_RGBA8, OPENNOW_STREAMER_COLOR_SPACE_SDR709,
+                         std::uint32_t(decodedSize.width()), std::uint32_t(decodedSize.height()),
+                         0, 1, 0};
+            return recordStatus;
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy sizes(&runtime, &NativeStreamRuntime::decodedDisplaySizeChanged);
+        QVERIFY(runtime.start());
+        const auto start = [&](const QString &id) {
+            return runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                 {QStringLiteral("id"), id}});
+        };
+        QVERIFY(start(QStringLiteral("size-a")));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        const auto generation = runtime.presentationGeneration();
+        const auto record = [&] {
+            OpenNowStreamerRecordCommand command{};
+            OpenNowStreamerFrameInfo info{};
+            OpenNowStreamerRecordedFrame recorded{};
+            OpenNowStreamerFrame *frame = nullptr;
+            const auto status = runtime.recordLatestFrame(command, &info, &recorded, &frame);
+            if (frame) runtime.releaseFrame(frame);
+            return status;
+        };
+        std::thread render([&] {
+            for (const QSize size : {QSize(1920, 1080), QSize(2560, 1080), QSize(1600, 1200)}) {
+                decodedSize = size;
+                QCOMPARE(record(), OPENNOW_STREAMER_OK);
+            }
+        });
+        render.join();
+        QCOMPARE(sizes.size(), 0);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), QSize(1600, 1200));
+        QCOMPARE(sizes.size(), 1);
+        QCOMPARE(sizes.last().at(1).toULongLong(), generation);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(sizes.size(), 1);
+
+        decodedSize = QSize(1280, 720);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QVERIFY(start(QStringLiteral("size-b")));
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QTRY_VERIFY(runtime.presentationAllowed());
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 2);
+        QCOMPARE(sizes.last().at(1).toULongLong(), runtime.presentationGeneration());
+
+        decodedSize = QSize(0, 720);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        decodedSize = QSize(3440, 1440);
+        recordStatus = OPENNOW_STREAMER_STALE_FRAME;
+        QCOMPARE(record(), OPENNOW_STREAMER_STALE_FRAME);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        recordStatus = OPENNOW_STREAMER_OK;
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), decodedSize);
+        QCOMPARE(sizes.size(), 3);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 4);
+    }
+
+    void inFlightDecodedSizeCannotEnterAReplacedSession()
+    {
+        NativeStreamRuntime runtime(blockingGraphicsApi());
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("inflight-a")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        QSignalSpy sizes(&runtime, &NativeStreamRuntime::decodedDisplaySizeChanged);
+        OpenNowStreamerRecordCommand command{};
+        OpenNowStreamerFrameInfo info{};
+        OpenNowStreamerRecordedFrame recorded{};
+        OpenNowStreamerFrame *frame = nullptr;
+        OpenNowStreamerStatus status = OPENNOW_STREAMER_CLOSED;
+        std::thread render([&] { status = runtime.recordLatestFrame(command, &info, &recorded, &frame); });
+        const auto finish = qScopeGuard([&] {
+            {
+                const std::lock_guard lock(graphicsCallMutex);
+                allowRecordCallToFinish = true;
+            }
+            graphicsCallChanged.notify_all();
+            if (render.joinable()) render.join();
+        });
+        {
+            std::unique_lock lock(graphicsCallMutex);
+            QVERIFY(graphicsCallChanged.wait_for(lock, std::chrono::seconds(1), [] { return recordCallEntered; }));
+        }
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("inflight-b")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        {
+            const std::lock_guard lock(graphicsCallMutex);
+            allowRecordCallToFinish = true;
+        }
+        graphicsCallChanged.notify_all();
+        render.join();
+        QCOMPARE(status, OPENNOW_STREAMER_OK);
+        QCOMPARE(runtime.releaseFrame(frame), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 0);
     }
 
     void recordedFrameMetadataReplacesProvisionalNotificationMetadata()

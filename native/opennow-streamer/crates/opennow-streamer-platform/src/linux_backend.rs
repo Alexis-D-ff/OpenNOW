@@ -219,6 +219,12 @@ fn mediacodec_capability_for(available: bool) -> VideoBackendCapability {
             .map(|codec| {
                 let supported = codec == "h264";
                 CodecCapability {
+                    max_decode_dimensions: supported.then_some(
+                        opennow_streamer_protocol::DecodeDimensions {
+                            width: opennow_streamer_platform_linux::MEDIACODEC_MAX_WIDTH,
+                            height: opennow_streamer_platform_linux::MEDIACODEC_MAX_HEIGHT,
+                        },
+                    ),
                     codec,
                     available: available && supported,
                     hdr_supported: Some(false),
@@ -521,6 +527,7 @@ fn multi_codec_capability(
                 None
             };
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -569,6 +576,7 @@ fn h264_capability(
         platform: "linux",
         codecs: vec![
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -577,6 +585,7 @@ fn h264_capability(
                 reason: h264_reason,
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -585,6 +594,7 @@ fn h264_capability(
                 reason: Some("native backend currently supports H.264 only"),
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -670,6 +680,13 @@ mod tests {
         assert!(available.zero_copy_modes.is_empty());
         for codec in available.codecs {
             assert_eq!(codec.available, codec.codec == "h264");
+            assert_eq!(
+                codec
+                    .max_decode_dimensions
+                    .as_ref()
+                    .map(|limit| (limit.width, limit.height)),
+                (codec.codec == "h264").then_some((2560, 1440))
+            );
             assert_eq!(codec.hdr_supported, Some(false));
             assert_eq!(
                 codec.color_qualities,
@@ -755,6 +772,7 @@ mod tests {
             backend: "vaapi",
             platform: "linux",
             codecs: vec![CodecCapability {
+                max_decode_dimensions: None,
                 codec: "h265",
                 available: true,
                 hdr_color_qualities: None,
@@ -874,6 +892,7 @@ mod tests {
             backend: "ffmpeg",
             platform: "linux",
             codecs: vec![CodecCapability {
+                max_decode_dimensions: None,
                 codec,
                 available: true,
                 hdr_color_qualities: None,
