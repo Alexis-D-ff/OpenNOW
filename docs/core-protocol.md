@@ -1313,9 +1313,9 @@ required. Legacy persisted
 `transportMode` values still normalize to `nvst`; only the core-owned session's
 transport selects the embedded WebRTC path. An explicit H.265 selection preserves
 the requested resolution and frame rate, subject to the normal allocation and
-decoder checks, and supports 8-bit or 10-bit 4:2:0 SDR. WebRTC requests use
-`requestedStreamingFeatures.bitDepth: 10` for 10-bit, matching the Android native
-client, while NVST retains its existing enum value of `1`. The owned session
+decoder checks, and supports 8-bit or 10-bit 4:2:0 SDR. Both WebRTC and NVST
+CloudMatch requests use `requestedStreamingFeatures.bitDepth: 1` for 10-bit
+and `0` for 8-bit, rather than the literal media bit depth. The owned session
 profile carries the selected codec through polling, restart, and attachment;
 changed preferences cannot reinterpret an existing stream. H.264, Auto, and AV1
 selections retain the H.264 compatibility profile, at most 1920×1080 at 60 FPS
