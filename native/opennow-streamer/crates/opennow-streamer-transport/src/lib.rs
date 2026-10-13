@@ -13,6 +13,7 @@ mod nvst_control;
 mod nvst_cursor;
 mod nvst_haptics;
 mod nvst_input;
+mod nvst_invalidation;
 mod nvst_microphone;
 mod nvst_network;
 pub mod webrtc;
@@ -23,10 +24,10 @@ pub use nvst_haptics::{NvstControllerRumble, NvstHaptics};
 pub use nvst::{
     BoundedFrameQueue, EncodedVideoAccessUnit, NvstBundleIdentity, NvstConfigError, NvstDropReason,
     NvstFrameProgress, NvstFrameProgressEvent, NvstFrameProgressPolicy, NvstFrameProgressStage,
-    NvstReceiveEvent, NvstReceiverState, NvstRecovery, NvstSrtpProfile, NvstStopCause,
-    NvstUdpReceiverControl, NvstUdpReceiverError, NvstUdpReceiverSession, NvstUnsupportedFeature,
-    NvstVideoCodec, NvstVideoConfig, NvstVideoReceiver, ReservedNvstBundle, SharedNvstFeedback,
-    advertised_nvst_ipv4, measured_video_packet_size, nvst_video_packet_size,
+    NvstFrameType, NvstReceiveEvent, NvstReceiverState, NvstRecovery, NvstSrtpProfile,
+    NvstStopCause, NvstUdpReceiverControl, NvstUdpReceiverError, NvstUdpReceiverSession,
+    NvstUnsupportedFeature, NvstVideoCodec, NvstVideoConfig, NvstVideoReceiver, ReservedNvstBundle,
+    SharedNvstFeedback, advertised_nvst_ipv4, measured_video_packet_size, nvst_video_packet_size,
     parse_nvst_video_handoff, reserve_nvst_mjolnir_udp_socket, reserve_nvst_udp_socket,
     spawn_nvst_mjolnir_receiver, spawn_nvst_udp_receiver, spawn_nvst_udp_receiver_with_socket,
 };

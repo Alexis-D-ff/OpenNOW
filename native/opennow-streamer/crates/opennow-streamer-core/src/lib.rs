@@ -2166,19 +2166,15 @@ fn forward_nvst_event<R: NvstSessionResources>(
             first_missing_index,
             last_missing_index,
         }) => {
-            resources.cut_recording(RecordingCutReason::Discontinuity);
-            // Packet loss is expected on the UDP media leg. The reorder buffer
-            // has already skipped the unrecoverable range and reset the frame
-            // assembler, so request a clean decoder reference without spending
-            // the terminal transport-recovery budget. Several gaps can arrive
-            // before the requested keyframe reaches us at high bitrates.
-            resources.request_keyframe();
+            // The receiver owns gap recovery (reference invalidation or keyframe,
+            // plus discontinuity marking); a keyframe request here would turn every
+            // reference-invalidation recovery back into an IDR.
             let _ = output.send(event(
                 "log",
                 json!({
                     "level": "warn",
                     "message": format!(
-                        "Recovering NVST packet gap with a fresh keyframe: {first_missing_index}..={last_missing_index}"
+                        "Recovering NVST packet gap: {first_missing_index}..={last_missing_index}"
                     )
                 }),
             ));
@@ -5608,7 +5604,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_packet_gaps_request_keyframes_without_stopping_the_session() {
+    fn repeated_packet_gaps_leave_recovery_to_the_receiver_without_stopping_the_session() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let sender = EventSender::unbounded(sender);
         let lifecycle = connected_lifecycle();
@@ -5633,11 +5629,8 @@ mod tests {
 
         assert_eq!(recovery_attempts, 0);
         assert_eq!(resources.recoveries.load(Ordering::Relaxed), 0);
-        assert_eq!(resources.keyframe_requests.load(Ordering::Relaxed), 2);
-        assert_eq!(
-            *resources.recording_cuts.lock().unwrap(),
-            vec![RecordingCutReason::Discontinuity; 2]
-        );
+        assert_eq!(resources.keyframe_requests.load(Ordering::Relaxed), 0);
+        assert!(resources.recording_cuts.lock().unwrap().is_empty());
         assert_eq!(resources.stops.load(Ordering::Relaxed), 0);
         assert_eq!(lock_lifecycle(&lifecycle).state, State::Connected);
         assert!(
@@ -5949,6 +5942,7 @@ mod tests {
                 timestamp: 1,
                 frame_index: 1,
                 first_stream_packet_index: 1,
+                frame_type: None,
                 keyframe: true,
                 contiguous: true,
                 bytes: vec![0, 0, 0, 1, 0x65],
