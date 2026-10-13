@@ -4771,7 +4771,7 @@ impl NvstVideoReceiver {
             .clear();
         self.config.feedback().reset_frame_stage_epoch();
         self.frame_progress.reset();
-        self.frame_invalidation.reset();
+        self.frame_invalidation.reset(&self.config.feedback);
     }
 }
 

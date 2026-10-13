@@ -349,7 +349,7 @@ fn frame_invalidation_uses_the_idr_control_channel_once_and_retries_rejected_sen
     let now = Instant::now() + Duration::from_secs(1);
     receive_messages(&mut local, &mut remote, now);
     let feedback = NvstFeedbackState::default();
-    feedback.frame_invalidation.restore((41, 43));
+    feedback.frame_invalidation.queue((41, 43));
     send_pending_frame_invalidation(&feedback, &mut local, channels);
     send_pending_frame_invalidation(&feedback, &mut local, channels);
     assert_eq!(
@@ -366,7 +366,7 @@ fn frame_invalidation_uses_the_idr_control_channel_once_and_retries_rejected_sen
         .direct_api()
         .close_data_channel(channels.control_reliable);
     receive_messages(&mut local, &mut remote, now);
-    feedback.frame_invalidation.restore((44, 50));
+    feedback.frame_invalidation.queue((44, 50));
     send_pending_frame_invalidation(&feedback, &mut local, channels);
     assert!(receive_messages(&mut local, &mut remote, now).is_empty());
     assert_eq!(feedback.frame_invalidation.take(), Some((44, 50)));

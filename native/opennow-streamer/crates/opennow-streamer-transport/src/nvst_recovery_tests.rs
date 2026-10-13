@@ -673,6 +673,9 @@ fn an_unanswered_first_invalidation_returns_the_session_to_keyframe_recovery() {
     };
     assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
     assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((2, 2)));
+    feedback.frame_invalidation.record_sent();
     invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
     assert!(feedback.keyframe_request_pending());
     assert!(invalidation.admit(&mut frame(5, NvstFrameType::I), true, &feedback));
@@ -687,4 +690,65 @@ fn an_unanswered_first_invalidation_returns_the_session_to_keyframe_recovery() {
     invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
     assert!(invalidation.admit(&mut frame(9, NvstFrameType::I), true, &feedback));
     assert!(invalidation.lose(now + KEYFRAME_REQUEST_COOLDOWN));
+}
+
+#[test]
+fn an_invalidation_that_was_never_sent_keeps_rfi_enabled() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((2, 2)));
+    feedback.frame_invalidation.restore((2, 2));
+    invalidation.poll_backstop(now + KEYFRAME_REQUEST_COOLDOWN, KEYFRAME_REQUEST_COOLDOWN, &feedback);
+    assert!(feedback.keyframe_request_pending());
+    assert!(feedback.frame_invalidation.stats().ends_with("rfiIdrBackstop=1"));
+    assert!(invalidation.admit(&mut frame(5, NvstFrameType::I), true, &feedback));
+    assert!(invalidation.lose(now + KEYFRAME_REQUEST_COOLDOWN));
+}
+
+#[test]
+fn recovery_discards_an_invalidation_that_was_not_sent_yet() {
+    let feedback = NvstFeedbackState::default();
+    let mut invalidation = crate::nvst_invalidation::FrameInvalidation::default();
+    let now = Instant::now();
+    let frame = |frame_index, frame_type| EncodedVideoAccessUnit {
+        codec: NvstVideoCodec::H264,
+        timestamp: 0,
+        frame_index,
+        first_stream_packet_index: 0,
+        frame_type: Some(frame_type),
+        keyframe: false,
+        contiguous: true,
+        bytes: Vec::new(),
+    };
+    assert!(invalidation.admit(&mut frame(1, NvstFrameType::P), false, &feedback));
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(3, NvstFrameType::P), true, &feedback));
+    assert!(invalidation.admit(&mut frame(4, NvstFrameType::RefPicI), false, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), None);
+
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(6, NvstFrameType::P), true, &feedback));
+    assert_eq!(feedback.frame_invalidation.take(), Some((5, 5)));
+    assert!(invalidation.admit(&mut frame(7, NvstFrameType::IntraRefresh), false, &feedback));
+    feedback.frame_invalidation.restore((5, 5));
+    assert_eq!(feedback.frame_invalidation.take(), None);
+
+    assert!(invalidation.lose(now));
+    assert!(!invalidation.admit(&mut frame(9, NvstFrameType::P), true, &feedback));
+    invalidation.reset(&feedback);
+    assert_eq!(feedback.frame_invalidation.take(), None);
 }

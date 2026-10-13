@@ -41,8 +41,14 @@ impl NvstFrameType {
 }
 
 #[derive(Debug, Default)]
+struct UnsentInvalidation {
+    range: Option<(u64, u64)>,
+    in_flight: bool,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct FrameInvalidationFeedback {
-    unsent: Mutex<Option<(u64, u64)>>,
+    unsent: Mutex<UnsentInvalidation>,
     sent: AtomicU64,
     dropped_frames: AtomicU64,
     recovered_i: AtomicU64,
@@ -52,30 +58,43 @@ pub(crate) struct FrameInvalidationFeedback {
 }
 
 impl FrameInvalidationFeedback {
-    /// A newer range always covers the unsent one because ranges only grow by merging.
-    fn queue(&self, range: (u64, u64)) {
-        *self
-            .unsent
+    fn unsent(&self) -> std::sync::MutexGuard<'_, UnsentInvalidation> {
+        self.unsent
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(range);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A newer range always covers the unsent one because ranges only grow by merging.
+    pub(crate) fn queue(&self, range: (u64, u64)) {
+        self.unsent().range = Some(range);
     }
 
     pub(crate) fn take(&self) -> Option<(u64, u64)> {
-        self.unsent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+        let mut unsent = self.unsent();
+        let range = unsent.range.take();
+        unsent.in_flight = range.is_some();
+        range
     }
 
+    /// Requeues a rejected send unless recovery discarded the range while it was in flight.
     pub(crate) fn restore(&self, range: (u64, u64)) {
-        self.unsent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert(range);
+        let mut unsent = self.unsent();
+        if std::mem::take(&mut unsent.in_flight) {
+            unsent.range.get_or_insert(range);
+        }
     }
 
     pub(crate) fn record_sent(&self) {
+        self.unsent().in_flight = false;
         self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn sent(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    fn discard(&self) {
+        *self.unsent() = UnsentInvalidation::default();
     }
 
     pub(crate) fn stats(&self) -> String {
@@ -98,13 +117,15 @@ pub(crate) struct FrameInvalidation {
     frame_types_known: bool,
     pending: Option<(u64, u64)>,
     active_since: Option<Instant>,
+    sent_before_episode: Option<u64>,
     backstop_requested: bool,
     recovered_once: bool,
     unsupported: bool,
 }
 
 impl FrameInvalidation {
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self, feedback: &NvstFeedbackState) {
+        feedback.frame_invalidation.discard();
         *self = Self::default();
     }
 
@@ -128,7 +149,10 @@ impl FrameInvalidation {
             .active_since
             .is_some_and(|since| now.saturating_duration_since(since) >= cooldown)
         {
-            if !self.backstop_requested && !self.recovered_once {
+            let invalidation_sent = self
+                .sent_before_episode
+                .is_some_and(|before| feedback.frame_invalidation.sent() > before);
+            if invalidation_sent && !self.backstop_requested && !self.recovered_once {
                 self.unsupported = true;
                 opennow_streamer_protocol::log::log_async(
                     "WARN",
@@ -155,7 +179,7 @@ impl FrameInvalidation {
             if invalidating {
                 feedback.request_keyframe();
             }
-            self.clear();
+            self.clear(feedback);
             frame.contiguous = !loss_before && !invalidating;
             return true;
         };
@@ -180,7 +204,7 @@ impl FrameInvalidation {
                         frame.frame_index, frame.keyframe, self.pending
                     ),
                 );
-                self.clear();
+                self.clear(feedback);
             }
             frame.contiguous = invalidating || !loss_before;
             return true;
@@ -219,6 +243,8 @@ impl FrameInvalidation {
             (pending.0.min(lost.0), pending.1.max(lost.1))
         });
         self.pending = Some(range);
+        self.sent_before_episode
+            .get_or_insert_with(|| feedback.frame_invalidation.sent());
         feedback.frame_invalidation.queue(range);
     }
 
@@ -234,9 +260,11 @@ impl FrameInvalidation {
         feedback.request_keyframe();
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, feedback: &NvstFeedbackState) {
+        feedback.frame_invalidation.discard();
         self.pending = None;
         self.active_since = None;
+        self.sent_before_episode = None;
         self.backstop_requested = false;
     }
 }
