@@ -9,6 +9,9 @@ PLAY must return 200; 455 is a failed startup. The existing reverse-direction
 PLAY gate still prevents upstream application data before PLAY succeeds.
 If the session terminates during the readiness wait, startup returns the failure
 without sending PLAY.
+On the DTLS bundle path, the shared video startup clock remains parked during
+authentication and starts when PLAY succeeds. Both unified video and the
+dedicated Mjolnir receiver share that clock.
 
 These changes follow the macOS reverse-engineering report `handshake.md`,
 H2 `0x11ea20` and H1 `0x1bcda0` for readiness, and H3 `0x121310` for PLAY.

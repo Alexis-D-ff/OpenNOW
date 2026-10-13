@@ -89,8 +89,9 @@ const NACK_RETRY_INTERVAL: Duration = Duration::from_millis(4);
 const DEFAULT_NACK_RTT: Duration = Duration::from_millis(30);
 const NACK_TRACKING_TIMEOUT: Duration = Duration::from_millis(52);
 const MAX_NACK_ATTEMPTS: u8 = 3;
-const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
-const MAX_PENDING_NACK_RANGES: usize = 16;
+const RFI_BACKSTOP_TIMEOUT: Duration = Duration::from_millis(250);
+const IDR_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PENDING_NACK_PACKETS: usize = 2048;
 const MAX_PENDING_FRAME_ACKS: usize = 512;
 pub const MAX_CONTROL_REPORT_BYTES: usize = 1_071;
 pub const MIN_CONTROL_REPORT_BYTES: usize = 4 + FRAME_ACK_PAYLOAD_LEN;
@@ -539,12 +540,18 @@ impl ControlReportBatch {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PendingNackRange {
-    first: u64,
-    last: u64,
+struct PendingNack {
     requested_at: Instant,
     last_sent_at: Option<Instant>,
     attempts: u8,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum VideoStartup {
+    #[default]
+    Immediate,
+    WaitingForPlay,
+    PlayComplete(Instant),
 }
 
 const RECENT_NETWORK_MAX_SAMPLE_GAP: Duration = Duration::from_secs(3);
@@ -627,12 +634,14 @@ pub struct NvstFeedbackState {
     /// Remains set through send attempts until assembly receives a fresh keyframe.
     keyframe_needed: AtomicBool,
     pub(crate) frame_invalidation: FrameInvalidationFeedback,
-    pending_nacks: Mutex<VecDeque<PendingNackRange>>,
+    pending_nacks: Mutex<BTreeMap<u64, PendingNack>>,
+    nack_overflows: AtomicU64,
     last_sender_frame: AtomicU32,
     completed_frame_bytes: AtomicU64,
     pending_frame_acks: Mutex<VecDeque<CompletedFrameFeedback>>,
     frame_packet_timings: Mutex<VecDeque<FramePacketTiming>>,
     frame_stage_timings: Mutex<FrameStageTimingsAccumulator>,
+    video_startup: Mutex<VideoStartup>,
 }
 
 impl Default for NvstFeedbackState {
@@ -654,12 +663,14 @@ impl Default for NvstFeedbackState {
             bundle_ping: Mutex::new(None),
             keyframe_needed: AtomicBool::new(false),
             frame_invalidation: FrameInvalidationFeedback::default(),
-            pending_nacks: Mutex::new(VecDeque::new()),
+            pending_nacks: Mutex::new(BTreeMap::new()),
+            nack_overflows: AtomicU64::new(0),
             last_sender_frame: AtomicU32::new(0),
             completed_frame_bytes: AtomicU64::new(0),
             pending_frame_acks: Mutex::new(VecDeque::new()),
             frame_packet_timings: Mutex::new(VecDeque::new()),
             frame_stage_timings: Mutex::new(FrameStageTimingsAccumulator::default()),
+            video_startup: Mutex::new(VideoStartup::Immediate),
         }
     }
 }
@@ -668,6 +679,35 @@ impl NvstFeedbackState {
     pub fn authenticated_transport_ready(&self) -> bool {
         self.authenticated_transport_ready.load(Ordering::Acquire)
             || self.socket_receive_bytes() > 0
+    }
+
+    fn wait_for_play(&self) {
+        *self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = VideoStartup::WaitingForPlay;
+    }
+
+    fn complete_play(&self, now: Instant) {
+        let mut startup = self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*startup, VideoStartup::WaitingForPlay) {
+            *startup = VideoStartup::PlayComplete(now);
+        }
+    }
+
+    fn video_timeout_origin(&self, default: Instant) -> Option<Instant> {
+        match *self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            VideoStartup::Immediate => Some(default),
+            VideoStartup::WaitingForPlay => None,
+            VideoStartup::PlayComplete(at) => Some(at.max(default)),
+        }
     }
 
     fn record_socket_receive(
@@ -857,31 +897,27 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(queued) = pending.iter_mut().find(|queued| {
-            first_missing_index <= queued.last.saturating_add(1)
-                && last_missing_index.saturating_add(1) >= queued.first
-        }) {
-            let first = queued.first.min(first_missing_index);
-            let last = queued.last.max(last_missing_index);
-            if first != queued.first || last != queued.last {
-                queued.first = first;
-                queued.last = last;
-                queued.requested_at = now;
-                queued.last_sent_at = None;
-                queued.attempts = 0;
-            }
-            return;
-        }
-        if pending.len() == MAX_PENDING_NACK_RANGES {
-            pending.pop_front();
-        }
-        pending.push_back(PendingNackRange {
-            first: first_missing_index,
-            last: last_missing_index,
-            requested_at: now,
-            last_sent_at: None,
-            attempts: 0,
+        pending.retain(|_, packet| {
+            now.saturating_duration_since(packet.requested_at) < NACK_TRACKING_TIMEOUT
         });
+        for index in first_missing_index..=last_missing_index {
+            if pending.contains_key(&index) {
+                continue;
+            }
+            if pending.len() == MAX_PENDING_NACK_PACKETS {
+                self.nack_overflows.fetch_add(1, Ordering::Relaxed);
+                self.request_keyframe();
+                break;
+            }
+            pending.insert(
+                index,
+                PendingNack {
+                    requested_at: now,
+                    last_sent_at: None,
+                    attempts: 0,
+                },
+            );
+        }
     }
 
     fn resolve_nack(&self, received_index: u64) -> bool {
@@ -889,32 +925,9 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut updated = VecDeque::with_capacity(pending.len().saturating_add(1));
-        let mut resolved = false;
-        while let Some(range) = pending.pop_front() {
-            if received_index < range.first || received_index > range.last {
-                updated.push_back(range);
-                continue;
-            }
-            // A naturally reordered packet can fill the gap before feedback
-            // leaves the client. Remove it either way, but count it as a NACK
-            // recovery only after at least one request was actually sent.
-            resolved |= range.last_sent_at.is_some();
-            if range.first < received_index {
-                updated.push_back(PendingNackRange {
-                    last: received_index - 1,
-                    ..range
-                });
-            }
-            if received_index < range.last {
-                updated.push_back(PendingNackRange {
-                    first: received_index + 1,
-                    ..range
-                });
-            }
-        }
-        *pending = updated;
-        resolved
+        pending
+            .remove(&received_index)
+            .is_some_and(|packet| packet.last_sent_at.is_some())
     }
 
     fn publish_completed_frame(&self, frame: &EncodedVideoAccessUnit) {
@@ -1210,7 +1223,7 @@ impl NvstFeedbackState {
         control_open: bool,
     ) -> (bool, bool) {
         if !self.keyframe_request_pending()
-            || now.saturating_duration_since(last_attempt) < KEYFRAME_REQUEST_COOLDOWN
+            || now.saturating_duration_since(last_attempt) < IDR_RETRY_INTERVAL
         {
             return (false, false);
         }
@@ -1232,39 +1245,26 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pending.retain(|range| {
-            now.saturating_duration_since(range.requested_at) < NACK_TRACKING_TIMEOUT
+        pending.retain(|_, packet| {
+            now.saturating_duration_since(packet.requested_at) < NACK_TRACKING_TIMEOUT
         });
-        let index = pending.iter().position(|range| {
-            range.attempts < max_attempts
-                && range.last_sent_at.is_none_or(|last_sent| {
+        let eligible = |packet: &PendingNack| {
+            packet.attempts < max_attempts
+                && packet.last_sent_at.is_none_or(|last_sent| {
                     now.saturating_duration_since(last_sent) >= retry_interval
                 })
-        })?;
-        let mut range = pending.remove(index)?;
-        let send_last = range.last.min(
-            range
-                .first
-                .saturating_add((MAX_NACK_PACKET_COUNT.saturating_sub(1)) as u64),
-        );
-        if send_last < range.last {
-            pending.insert(
-                index,
-                PendingNackRange {
-                    first: send_last + 1,
-                    last: range.last,
-                    requested_at: range.requested_at,
-                    last_sent_at: None,
-                    attempts: 0,
-                },
-            );
-            range.last = send_last;
+        };
+        let first = *pending.iter().find(|(_, packet)| eligible(packet))?.0;
+        let mut last = first;
+        for (&index, packet) in pending.range_mut(first..).take(MAX_NACK_PACKET_COUNT) {
+            if index > last.saturating_add(1) || !eligible(packet) {
+                break;
+            }
+            packet.last_sent_at = Some(now);
+            packet.attempts = packet.attempts.saturating_add(1);
+            last = index;
         }
-        range.last_sent_at = Some(now);
-        range.attempts = range.attempts.saturating_add(1);
-        let result = (range.first, range.last);
-        pending.insert(index, range);
-        Some(result)
+        Some((first, last))
     }
 
     fn mark_nack_send_failed(&self, first: u64, last: u64) {
@@ -1272,12 +1272,9 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(range) = pending
-            .iter_mut()
-            .find(|range| range.first == first && range.last == last)
-        {
-            range.last_sent_at = None;
-            range.attempts = range.attempts.saturating_sub(1);
+        for (_, packet) in pending.range_mut(first..=last) {
+            packet.last_sent_at = None;
+            packet.attempts = packet.attempts.saturating_sub(1);
         }
     }
 
@@ -3010,6 +3007,7 @@ fn send_pending_nack(
 
 fn send_pending_frame_invalidation(
     feedback: &NvstFeedbackState,
+    now: Instant,
     rtc: &mut Rtc,
     channels: NvstInputChannels,
 ) {
@@ -3020,7 +3018,7 @@ fn send_pending_frame_invalidation(
         feedback.frame_invalidation.restore((first, last));
         return;
     }
-    feedback.frame_invalidation.record_sent();
+    feedback.frame_invalidation.record_sent(now);
     opennow_streamer_protocol::log::log_async(
         "INFO",
         "nvst-rfi",
@@ -3186,6 +3184,24 @@ struct VideoAccessUnitAssembler {
     max_access_unit_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GsFrameHeader {
+    frame_type: NvstFrameType,
+}
+
+impl GsFrameHeader {
+    fn parse(payload: &[u8], header_size: usize) -> Option<Self> {
+        let frame_type = match payload {
+            [0x47, 0x53, _, value, ..] if header_size >= 4 => {
+                NvstFrameType::from_wire(value & 0x0f)
+            }
+            [0x01 | 0x81, _, _, value, ..] if header_size > 0 => NvstFrameType::from_wire(*value),
+            _ => return None,
+        };
+        Some(Self { frame_type })
+    }
+}
+
 impl VideoAccessUnitAssembler {
     fn new(codec: NvstVideoCodec, max_access_unit_bytes: usize) -> Self {
         Self {
@@ -3230,10 +3246,8 @@ impl VideoAccessUnitAssembler {
             picture_payload = video_picture_payload(self.codec, payload)
                 .ok_or(NvstDropReason::MissingAnnexBStartCode)?;
             frame_header_size = payload.len() - picture_payload.len();
-            self.frame_type = payload
-                .get(3)
-                .filter(|_| frame_header_size > 0)
-                .map(|value| NvstFrameType::from_wire(*value));
+            self.frame_type =
+                GsFrameHeader::parse(payload, frame_header_size).map(|header| header.frame_type);
             if !self.first_start_payload_logged {
                 self.first_start_payload_logged = true;
                 eprintln!(
@@ -3497,6 +3511,14 @@ impl RtpReorderBuffer {
             self.gap_wait = None;
         }
         self.packets.insert(index, packet);
+        self.drain(now, recovery)
+    }
+
+    fn poll_deadline(&mut self, now: Instant) -> ReorderResult {
+        self.drain(now, None)
+    }
+
+    fn drain(&mut self, now: Instant, mut recovery: Option<NvstRecovery>) -> ReorderResult {
         let mut ready = Vec::new();
         let mut nack = None;
         loop {
@@ -4071,6 +4093,10 @@ impl FecReorderBuffer {
             };
         }
 
+        self.poll_deadline(now)
+    }
+
+    fn poll_deadline(&mut self, now: Instant) -> ReorderResult {
         let mut result = ReorderResult {
             ready: Vec::new(),
             nack: None,
@@ -4157,7 +4183,7 @@ impl FecReorderBuffer {
             // A later block proves that the head block has stopped arriving normally. Ask for
             // only the first contiguous missing run and retain all subsequent blocks while the
             // retransmission is in flight.
-            if self.blocks.len() == 1 {
+            if self.blocks.len() == 1 && self.gap_wait.is_none() {
                 break;
             }
             let (first_missing, last_missing) = head
@@ -4414,9 +4440,10 @@ impl NvstVideoReceiver {
         if self.state != NvstReceiverState::Running {
             return None;
         }
-        let last_packet = self
-            .last_authenticated_packet
-            .unwrap_or(self.timeout_origin);
+        let last_packet = self.config.feedback.video_timeout_origin(
+            self.last_authenticated_packet
+                .unwrap_or(self.timeout_origin),
+        )?;
         let idle_for = now.saturating_duration_since(last_packet);
         let timeout = if self.initial_timeout_pending {
             self.config.startup_timeout
@@ -4450,7 +4477,7 @@ impl NvstVideoReceiver {
         now: Instant,
         policy: NvstFrameProgressPolicy,
     ) -> Option<NvstFrameProgressEvent> {
-        if self.state != NvstReceiverState::Running {
+        if self.state != NvstReceiverState::Running || self.initial_timeout_pending {
             return None;
         }
         let assembled_at = self.config.feedback().last_assembled_frame_at();
@@ -4464,6 +4491,7 @@ impl NvstVideoReceiver {
                 (None, epoch) => epoch?,
             }
         };
+        let base = self.config.feedback.video_timeout_origin(base)?;
         let idle_for = now.saturating_duration_since(base);
         match self.frame_progress.stage {
             NvstFrameProgressStage::Tracking => {
@@ -4555,13 +4583,13 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(packet.header.ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
-        self.frame_progress.authenticated(now);
-        self.frame_invalidation.poll_backstop(
-            now,
-            KEYFRAME_REQUEST_COOLDOWN,
-            &self.config.feedback,
-        );
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+            self.frame_progress.authenticated(now);
+        }
+        self.frame_invalidation
+            .poll_backstop(now, RFI_BACKSTOP_TIMEOUT, &self.config.feedback);
         self.authenticated_packets += 1;
         let sequence = u32::try_from(packet.index & 0xffff_ffff).unwrap_or(u32::MAX);
         let reordered =
@@ -4607,6 +4635,27 @@ impl NvstVideoReceiver {
         } else {
             self.reorder.push(packet, now)
         };
+        self.consume_reorder_result(result, now)
+    }
+
+    pub fn poll_recovery(&mut self, now: Instant) -> Vec<NvstReceiveEvent> {
+        if self.state != NvstReceiverState::Running {
+            return Vec::new();
+        }
+        self.frame_invalidation
+            .poll_backstop(now, RFI_BACKSTOP_TIMEOUT, &self.config.feedback);
+        let reordered = self.reorder.poll_deadline(now);
+        let mut events = self.consume_reorder_result(reordered, now);
+        let fec = self.fec_reorder.poll_deadline(now);
+        events.extend(self.consume_reorder_result(fec, now));
+        events
+    }
+
+    fn consume_reorder_result(
+        &mut self,
+        result: ReorderResult,
+        now: Instant,
+    ) -> Vec<NvstReceiveEvent> {
         self.fec_repaired_packets += result.fec_repaired as u64;
         let mut events = Vec::new();
         if let Some((first_missing_index, last_missing_index)) = result.nack {
@@ -4696,6 +4745,7 @@ impl NvstVideoReceiver {
                     if !self.frame_invalidation.admit(
                         &mut frame,
                         loss_before,
+                        now,
                         &self.config.feedback,
                     ) {
                         self.config.feedback.publish_completed_frame(&frame);
@@ -4751,7 +4801,7 @@ impl NvstVideoReceiver {
     /// depend on when buffered log lines happen to flush.
     pub fn stats_line(&self, origin: Instant) -> String {
         format!(
-            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} gaps={} {} ssrc={:?}",
+            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} nackPending={} nackOverflow={} gaps={} {} ssrc={:?}",
             origin.elapsed().as_secs_f64(),
             self.authenticated_packets,
             self.fec_packets,
@@ -4760,6 +4810,13 @@ impl NvstVideoReceiver {
             self.replay_rejections,
             self.stale_packets,
             self.recovered_retransmissions,
+            self.config
+                .feedback
+                .pending_nacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            self.config.feedback.nack_overflows.load(Ordering::Relaxed),
             self.packet_gap_recoveries,
             self.config.feedback.frame_invalidation.stats(),
             self.bound_ssrc,
@@ -4787,7 +4844,10 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+        }
         // The bundle path cannot assemble video: the Mjolnir frame metadata lives
         // in the `0x4753` RTP extension, which str0m does not surface. The official
         // cloud path delivers video exclusively on the raw Mjolnir socket, so bundle
@@ -6034,6 +6094,9 @@ fn spawn_receiver_thread(
     event_sender: Sender<NvstReceiveEvent>,
     setup: NvstWorkerSetup,
 ) -> Result<NvstUdpReceiverSession, NvstUdpReceiverError> {
+    if setup.rtc.is_some() && setup.upstream_ready.is_some() {
+        config.feedback.wait_for_play();
+    }
     socket
         .set_read_timeout(Some(UDP_RECEIVE_POLL_INTERVAL))
         .map_err(NvstUdpReceiverError::Configure)?;
@@ -6701,7 +6764,7 @@ fn run_nvst_webrtc_bundle(
     let rtcp_sender_ssrc = RTCP_SENDER_SSRC;
     let mut last_rtcp_send = Instant::now() - SRTCP_RR_INTERVAL;
     let mut last_recovery_send = Instant::now();
-    let mut last_keyframe_attempt = Instant::now() - KEYFRAME_REQUEST_COOLDOWN;
+    let mut last_keyframe_attempt = Instant::now() - IDR_RETRY_INTERVAL;
     let mut keyframe_attempts = 0_u64;
     let mut last_keyframe_attempt_log: Option<Instant> = None;
     let mut rtcp_reports_sent = 0_u64;
@@ -6736,6 +6799,7 @@ fn run_nvst_webrtc_bundle(
         if let Some(ready) = upstream_ready.as_ref() {
             match ready.try_recv() {
                 Ok(()) => {
+                    feedback.complete_play(now);
                     upstream_allowed = true;
                     upstream_ready = None;
                     control_keepalive_at = now;
@@ -7207,7 +7271,7 @@ fn run_nvst_webrtc_bundle(
             && input_state.control_is_open()
             && let Some(channels) = input_channels
         {
-            send_pending_frame_invalidation(&feedback, &mut rtc, channels);
+            send_pending_frame_invalidation(&feedback, now, &mut rtc, channels);
         }
 
         // Do not gate control IDR on stream_snapshot(): it is needed most when
@@ -7745,8 +7809,29 @@ fn run_nvst_webrtc_bundle(
             }
         }
 
+        let now = Instant::now();
+        if unified_socket {
+            for event in receiver.poll_recovery(now) {
+                if !forward_receive_event(
+                    &media_consumer,
+                    &event_sender,
+                    &feedback,
+                    transport_origin,
+                    now,
+                    &mut video_delivery_gap,
+                    event,
+                ) {
+                    rtc.disconnect();
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::MediaConsumerClosed),
+                    );
+                    break 'bundle;
+                }
+            }
+        }
         let timeout = if owns_media_timeout {
-            receiver.poll_timeout(Instant::now())
+            receiver.poll_timeout(now)
         } else {
             None
         };
@@ -7755,7 +7840,11 @@ fn run_nvst_webrtc_bundle(
                 "NVST WebRTC timeout counters: inbound={inbound_datagrams}, dtlsReady={dtls_ready}"
             );
         }
+        let packets_stalled = timeout.is_some();
         forward_optional(&event_sender, timeout);
+        if unified_socket && !packets_stalled {
+            forward_frame_progress(&mut receiver, &event_sender, now);
+        }
     }
     if let Some(hid_runtime) = hid_runtime.as_ref() {
         if let (Some(hid_session), Some(channels)) = (hid_session.as_mut(), input_channels) {
@@ -8087,6 +8176,23 @@ fn run_nvst_video_receiver(
                 receiver.stats_line(stats_origin),
             );
         }
+        for event in receiver.poll_recovery(now) {
+            if !forward_receive_event(
+                &media_consumer,
+                &event_sender,
+                &feedback,
+                transport_origin,
+                now,
+                &mut video_delivery_gap,
+                event,
+            ) {
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::MediaConsumerClosed),
+                );
+                return;
+            }
+        }
         let timeout = receiver.poll_timeout(now);
         if timeout.is_some() {
             let pings_sent = keepalive.pings_sent;
@@ -8113,50 +8219,55 @@ fn run_nvst_video_receiver(
         }
         let packets_stalled = timeout.is_some();
         forward_optional(&event_sender, timeout);
-        if !packets_stalled
-            && let Some(event) = receiver.poll_frame_progress(
-                now,
-                NvstFrameProgressPolicy {
-                    stall: receiver.config.timeout,
-                    keyframe_grace: receiver.config.timeout,
-                },
-            )
-        {
-            match event {
-                NvstFrameProgressEvent::KeyframeRequested {
+        if !packets_stalled {
+            forward_frame_progress(&mut receiver, &event_sender, now);
+        }
+    }
+}
+
+fn forward_frame_progress(
+    receiver: &mut NvstVideoReceiver,
+    event_sender: &Sender<NvstReceiveEvent>,
+    now: Instant,
+) {
+    if let Some(event) = receiver.poll_frame_progress(
+        now,
+        NvstFrameProgressPolicy {
+            stall: receiver.config.timeout,
+            keyframe_grace: receiver.config.timeout,
+        },
+    ) {
+        match event {
+            NvstFrameProgressEvent::KeyframeRequested {
+                idle_for,
+                last_assembled_frame_index,
+            } => {
+                opennow_streamer_protocol::log::log_async(
+                    "WARN",
+                    "nvst-video",
+                    &format!("produced-frame stall idle_for={idle_for:?}; requested a keyframe"),
+                );
+                let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
                     idle_for,
                     last_assembled_frame_index,
-                } => {
-                    opennow_streamer_protocol::log::log_async(
-                        "WARN",
-                        "nvst-video",
-                        &format!(
-                            "produced-frame stall idle_for={idle_for:?}; requested a keyframe local_port={local_port} {}",
-                            receiver.stats_line(stats_origin)
-                        ),
-                    );
-                    let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
-                        idle_for,
-                        last_assembled_frame_index,
-                        recovery_required: false,
-                    });
-                }
-                NvstFrameProgressEvent::RecoveryNeeded {
+                    recovery_required: false,
+                });
+            }
+            NvstFrameProgressEvent::RecoveryNeeded {
+                idle_for,
+                last_assembled_frame_index,
+            } => {
+                let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
                     idle_for,
                     last_assembled_frame_index,
-                } => {
-                    let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
+                    recovery_required: true,
+                });
+                let _ = event_sender.send(NvstReceiveEvent::RecoveryNeeded(
+                    NvstRecovery::FrameProgress {
                         idle_for,
                         last_assembled_frame_index,
-                        recovery_required: true,
-                    });
-                    let _ = event_sender.send(NvstReceiveEvent::RecoveryNeeded(
-                        NvstRecovery::FrameProgress {
-                            idle_for,
-                            last_assembled_frame_index,
-                        },
-                    ));
-                }
+                    },
+                ));
             }
         }
     }
@@ -8624,7 +8735,7 @@ mod tests {
     fn startup_keyframe_control_request_does_not_wait_for_video_ssrc() {
         let feedback = NvstFeedbackState::default();
         let now = Instant::now();
-        let previous = now - KEYFRAME_REQUEST_COOLDOWN;
+        let previous = now - IDR_RETRY_INTERVAL;
         feedback.request_keyframe();
         assert_eq!(feedback.stream_snapshot(), None);
         assert_eq!(
@@ -8661,7 +8772,7 @@ mod tests {
         let now = Instant::now();
         assert!(!feedback.keyframe_request_pending());
         assert_eq!(
-            feedback.keyframe_request_routes(now, now - KEYFRAME_REQUEST_COOLDOWN, true, true,),
+            feedback.keyframe_request_routes(now, now - IDR_RETRY_INTERVAL, true, true,),
             (false, false)
         );
     }
@@ -8672,7 +8783,7 @@ mod tests {
         let now = Instant::now();
         feedback.publish_stream(7, 10, 90_000, now);
         feedback.request_keyframe();
-        let previous = now - KEYFRAME_REQUEST_COOLDOWN;
+        let previous = now - IDR_RETRY_INTERVAL;
         assert_eq!(
             feedback.keyframe_request_routes(
                 now,
@@ -8930,7 +9041,7 @@ mod tests {
         feedback.request_keyframe();
         feedback.publish_stream(7, 10, 90_000, now);
         assert_eq!(
-            feedback.keyframe_request_routes(now, now - KEYFRAME_REQUEST_COOLDOWN, true, true),
+            feedback.keyframe_request_routes(now, now - IDR_RETRY_INTERVAL, true, true),
             (true, true)
         );
         // Queue success is not completion. The same cooldown applies if the
@@ -8942,14 +9053,14 @@ mod tests {
         );
         assert_eq!(
             feedback.keyframe_request_routes(
-                now + KEYFRAME_REQUEST_COOLDOWN - Duration::from_millis(1),
+                now + IDR_RETRY_INTERVAL - Duration::from_millis(1),
                 now,
                 true,
                 true
             ),
             (false, false)
         );
-        let retry_at = now + KEYFRAME_REQUEST_COOLDOWN;
+        let retry_at = now + IDR_RETRY_INTERVAL;
         assert_eq!(
             feedback.keyframe_request_routes(retry_at, now, true, true),
             (true, true)
@@ -10090,23 +10201,26 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut sequence = 1;
         let mut frames = 0;
+        let mut awaiting_frame = false;
         loop {
             assert!(
                 Instant::now() < deadline,
                 "persistent failures must terminate"
             );
-            let packet = protect_for_test(
-                &srtp,
-                build_plaintext_rtp(
-                    sequence,
-                    FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
-                    u32::from(sequence),
-                    &[0, 0, 1, 0x65],
-                ),
-                0,
-            );
-            server.send_to(&packet, client_address).unwrap();
-            sequence += 1;
+            if !awaiting_frame {
+                let packet = protect_for_test(
+                    &srtp,
+                    build_plaintext_rtp(
+                        sequence,
+                        FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                        u32::from(sequence),
+                        &[0, 0, 1, 0x65],
+                    ),
+                    0,
+                );
+                server.send_to(&packet, client_address).unwrap();
+                awaiting_frame = true;
+            }
             if let Ok(event) = event_receiver.recv_timeout(PING_INTERVAL_BEFORE_CONNECTION) {
                 assert!(
                     matches!(
@@ -10123,7 +10237,12 @@ mod tests {
                 );
                 break;
             }
-            frames += media_receiver.try_iter().count();
+            for frame in media_receiver.try_iter() {
+                assert_eq!(frame.frame_index, Some(u32::from(sequence)));
+                frames += 1;
+                sequence += 1;
+                awaiting_frame = false;
+            }
         }
         session.stop();
         let attempts = attempts.lock().unwrap();
@@ -13192,6 +13311,10 @@ mod tests {
             feedback.authenticated_transport_ready(),
             "DTLS readiness must precede PLAY"
         );
+        assert!(
+            feedback.video_timeout_origin(Instant::now()).is_none(),
+            "DTLS readiness must not start the video watchdog before PLAY"
+        );
         let until = Instant::now() + Duration::from_millis(300);
         while Instant::now() < until {
             let now = Instant::now();
@@ -13264,6 +13387,10 @@ mod tests {
                 }
             }
             assert!(input_ready, "accepted PLAY must publish input readiness");
+            assert!(
+                feedback.video_timeout_origin(Instant::now()).is_some(),
+                "accepted PLAY must start the shared video watchdog clock"
+            );
             assert!(
                 !app_messages.is_empty(),
                 "accepted PLAY must send activation"

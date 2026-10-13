@@ -68,6 +68,29 @@ impl SharedVulkanDevice {
                 .is_some_and(|index| self.profiles[index].is_some())
     }
 
+    pub fn max_decode_dimensions(&self, codec: VideoCodec) -> Option<[u32; 2]> {
+        if self.failed.load(Ordering::Acquire) {
+            return None;
+        }
+        [
+            PixelFormat::Nv12,
+            PixelFormat::P010,
+            PixelFormat::Nv24,
+            PixelFormat::P410,
+        ]
+        .into_iter()
+        .filter(|format| match codec {
+            VideoCodec::H264 => *format == PixelFormat::Nv12,
+            VideoCodec::Av1 => !format.is_444(),
+            VideoCodec::H265 => true,
+        })
+        .filter_map(|format| {
+            format_profile_index(codec, format).and_then(|index| self.profiles[index])
+        })
+        .map(|limits| limits.maximum)
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1])])
+    }
+
     pub fn supports(&self, codec: VideoCodec, ten_bit: bool, width: u32, height: u32) -> bool {
         self.supports_format(
             codec,
@@ -1069,7 +1092,13 @@ mod tests {
         assert!(owner.supports_format(VideoCodec::H265, PixelFormat::Nv24, 1919, 1079));
         assert!(!owner.supports_format(VideoCodec::H265, PixelFormat::Nv24, 1921, 1080));
         assert!(!owner.supports_format(VideoCodec::H265, PixelFormat::Nv24, 64, 64));
+        assert_eq!(
+            owner.max_decode_dimensions(VideoCodec::H265),
+            Some([1920, 1080])
+        );
+        assert_eq!(owner.max_decode_dimensions(VideoCodec::H264), None);
         owner.failed.store(true, Ordering::Release);
+        assert_eq!(owner.max_decode_dimensions(VideoCodec::H265), None);
         assert!(!owner.codec_format_support(VideoCodec::H265, PixelFormat::Nv24));
         assert!(!owner.supports_format(VideoCodec::H265, PixelFormat::Nv24, 1920, 1080));
         assert!(!owner.codec_support(VideoCodec::H265, true));

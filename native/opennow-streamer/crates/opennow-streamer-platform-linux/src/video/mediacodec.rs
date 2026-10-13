@@ -31,6 +31,8 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(2);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const RESIDENCE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING: usize = 32;
+pub const MEDIACODEC_MAX_WIDTH: u32 = 2560;
+pub const MEDIACODEC_MAX_HEIGHT: u32 = 1440;
 
 fn protocol(reason: impl Into<String>) -> Error {
     Error::backend(
@@ -369,8 +371,8 @@ impl MediaCodecDecoder {
     ) -> Result<Self> {
         format.validate()?;
         if codec != VideoCodec::H264
-            || format.width > 2560
-            || format.height > 1440
+            || format.width > MEDIACODEC_MAX_WIDTH
+            || format.height > MEDIACODEC_MAX_HEIGHT
             || format.pixel_format != PixelFormat::Nv12
             || format.color_matrix != ColorMatrix::Bt709
             || format.color_primaries != ColorPrimaries::Bt709

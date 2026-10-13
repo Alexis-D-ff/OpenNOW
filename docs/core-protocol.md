@@ -837,11 +837,13 @@ the request to the unconditional 240 FPS ceiling, so the saved preference cannot
 conditional tier without affirmative evidence. This is a necessary condition, not a throughput
 qualification: the client does not measure decoder throughput, and CloudMatch remains the
 authority on the finalized profile.
+Rates snap to 30, 60, 90, 120, 144, 165, 240, or 360 FPS before allocation.
+Embedded codec limits below can reduce the request further.
 
 For the embedded Qt client, `session.create` and `streamer.prepare` accept an optional
 `runtimeCapabilities` object copied from the in-process streamer's protocol-7 `hello` response.
 The core filters its available `videoBackends` by the persisted `nativeVideoBackend` preference
-and resolves codec `auto` to AV1, HEVC, then H.264 (subject to requested color mode) before
+and resolves codec `auto` to AV1, HEVC, then H.264 for both SDR and HDR (subject to requested color mode) before
 CloudMatch allocation. This resolution is session-local: the saved preference stays `auto`.
 Each codec entry may include `colorQualities`, an authoritative array of supported settings
 values such as `8bit_420` and `10bit_420`. An empty array means no supported color modes.
@@ -1000,9 +1002,9 @@ changes SDR capability filtering. HDR constrains the session-local color quality
 bits while preserving the selected chroma format and saved SDR color preference. HEVC
 supports `10bit_420` and `10bit_444`; AV1 remains limited to `10bit_420`.
 
-Unsupported color and HDR requests degrade before a seat is allocated instead of failing,
-matching the official macOS client's video-settings selection. The core resolves them in
-this order and returns the effective `codec`, `colorQuality`, `enableHdr`, and `fps` that
+Unsupported color and HDR requests degrade before a seat is allocated instead of failing.
+The core resolves them in this order and returns the effective `codec`, `colorQuality`,
+`enableHdr`, `resolution`, and `fps` that
 CloudMatch and the streamer use:
 
 1. Missing HDR output (`nativeHdrSupported` not `true`) clears HDR.
@@ -1011,10 +1013,23 @@ CloudMatch and the streamer use:
    backend decodes HEVC at that 4:4:4 profile (or HEVC HDR 10-bit 4:4:4 with HDR).
    Otherwise the chroma becomes 4:2:0 and the bit depth is kept.
 4. HDR that the selected codec cannot decode is cleared. Explicit H.264 is SDR-only.
-   Auto prefers HEVC then AV1 for HDR; when neither decodes it, Auto continues as SDR,
-   and an Auto selection that lands on H.264 caps the frame rate at 120 FPS.
+   Auto prefers AV1, then HEVC, then H.264 for both SDR and HDR, independent of bitrate
+   and platform. When neither AV1 nor HEVC decodes HDR, Auto continues as SDR.
 5. Ten-bit SDR that the selected codec, or every Auto candidate, cannot decode falls back
    to 8-bit 4:2:0 BT.709.
+6. H.264 caps the frame rate at 120 FPS and the image area below 4,953,600 pixels,
+   including explicit requests and Auto with only H.264 decode. Resolution reduction
+   selects the closest aspect ratio among supported settings modes that fit the limits,
+   then the largest image at that ratio. For example, 3440x1440 becomes 2560x1080.
+7. AV1 remains eligible for Auto at up to 120 FPS and 5120x2880 pixels. No runtime probe
+   currently confirms higher AV1 frame rates, so explicit AV1 above 120 FPS also caps at 120.
+8. Each codec may report `maxDecodeDimensions:{width,height}` in `runtimeCapabilities`.
+   Both values are positive uint32 dimensions. Windows reports the decoder's enforced
+   4096x2304 envelope; the attached Linux Vulkan device reports the conservative intersection
+   of its advertised color-profile limits; the opt-in MediaCodec bridge reports 2560x1440.
+   Other producers omit unknown limits rather than estimating them. Core reduces oversized
+   modes before allocation using the same closest-aspect rule. It rejects malformed limits
+   or a request with no supported mode within the limits.
 
 `session.create` records each applied fallback as a `streamer`/`stream_profile_fallback`
 diagnostics event. An explicitly selected codec that the selected backend cannot decode at
@@ -1024,6 +1039,9 @@ never substitutes another codec for an unavailable explicit codec except for the
 rule above. `streamer.prepare` repeats the same resolution against the accepted session; when
 the accepted codec, color quality, or HDR mode differs from what the current decoder can
 present, it fails with `streamer_color_unavailable` instead of attaching a mismatched decoder.
+Accepted native resolution and FPS override current saved preferences on attachment.
+An accepted mode requiring resolution or FPS normalization fails with
+`streamer_mode_unavailable`; preflight never changes an already allocated stream's mode.
 Without HDR, the saved color preference is used, subject to exact hardware profiles and the
 GFN codec restrictions below. Callers without embedded runtime
 capabilities cannot request HDR through the external-streamer probe path.

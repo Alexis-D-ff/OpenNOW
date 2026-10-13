@@ -180,6 +180,7 @@ private:
     void resetRemoteCursor();
     void setRemoteCursorShape(const QCursor &cursor);
     void updateLocalCursor();
+    void refreshVideoSize();
     void syncCaptureState();
     void connectFrameSwaps();
     void releaseInput();
@@ -200,6 +201,8 @@ private:
     static QPointer<NativeStreamRuntime> s_nativeRuntime;
 
     QSize m_videoSize;
+    QSize m_requestedVideoSize;
+    QSize m_decodedVideoSize;
     QVariantMap m_shortcutBindings;
     std::shared_ptr<StreamVideoRenderCallback> m_renderCallback;
     QHash<quint32, PressedKey> m_pressedKeys;

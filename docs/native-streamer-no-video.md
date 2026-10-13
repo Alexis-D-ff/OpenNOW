@@ -83,6 +83,15 @@ to `timeoutMs`. It must be at least the idle timeout and no more than 90 seconds
 The native session negotiator supplies 60 seconds on Windows and eight seconds
 elsewhere. This changes neither the external core protocol nor the C ABI.
 
+For prepared sessions, that first-video allowance starts when PLAY completes,
+not when the receive workers start. The bundle shares its PLAY-completion clock
+with dedicated Mjolnir. Waiting for PLAY does not consume the video allowance;
+the bounded PLAY gate still ends startup if PLAY fails. Sessions without a PLAY
+gate retain the worker-start clock.
+An authenticated video packet before PLAY does not end the startup allowance.
+The first authenticated video packet after PLAY starts the regular idle timeout
+and frame-progress watchdog.
+
 To verify on Windows, use a new executable path with no existing firewall rule,
 start a session, and leave the Windows permission prompt open for more than
 16 seconds but less than 60 seconds before allowing access. Video should start

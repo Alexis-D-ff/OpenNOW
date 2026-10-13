@@ -2,6 +2,17 @@ use serde_json::{Value, json};
 
 pub const SUPPORTED_FRAME_RATES: [i64; 8] = [30, 60, 90, 120, 144, 165, 240, 360];
 
+pub fn snap_frame_rate(requested: i64) -> i64 {
+    if requested == 59 {
+        return 60;
+    }
+    SUPPORTED_FRAME_RATES
+        .into_iter()
+        .rev()
+        .find(|rate| *rate <= requested)
+        .unwrap_or(30)
+}
+
 pub fn resolution_ceiling(width: i64, height: i64) -> i64 {
     if width == 1920 && matches!(height, 1080 | 1200) {
         360
@@ -77,7 +88,7 @@ pub fn request_frame_rate(settings: &Value, params: &Value, width: i64, height: 
             rate = cap;
         }
     }
-    rate
+    snap_frame_rate(rate)
 }
 
 pub fn frame_rate_choices(settings: &Value, capabilities: &Value) -> Value {
@@ -138,6 +149,34 @@ mod tests {
     fn supported_frame_rates_end_at_the_documented_top_tier() {
         assert_eq!(SUPPORTED_FRAME_RATES, [30, 60, 90, 120, 144, 165, 240, 360]);
         assert_eq!(SUPPORTED_FRAME_RATES.last(), Some(&360));
+    }
+
+    #[test]
+    fn frame_rates_snap_to_supported_modes_before_requesting_allocation() {
+        for (requested, expected) in [
+            (0, 30),
+            (58, 30),
+            (59, 60),
+            (89, 60),
+            (90, 90),
+            (119, 90),
+            (120, 120),
+            (143, 120),
+            (144, 144),
+            (164, 144),
+            (165, 165),
+            (239, 165),
+            (240, 240),
+            (359, 240),
+            (360, 360),
+            (999, 360),
+        ] {
+            assert_eq!(snap_frame_rate(requested), expected);
+        }
+        assert_eq!(
+            request_frame_rate(&json!({"fps":164,"codec":"h265"}), &json!({}), 1920, 1080),
+            144
+        );
     }
 
     #[test]

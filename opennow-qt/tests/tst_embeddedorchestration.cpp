@@ -1975,6 +1975,21 @@ private slots:
         QVERIFY(!graphics.contains(QStringLiteral("new QQuickWindow")));
     }
 
+    void decodedDisplaySizeKeepsTheExistingPresentationOwner()
+    {
+        const auto runtime = source(QStringLiteral("src/streaming/NativeStreamRuntime.cpp"));
+        const auto item = source(QStringLiteral("src/streaming/StreamVideoItem.cpp"));
+        const auto rendering = source(QStringLiteral("src/streaming/rendering/StreamVideoItemRendering.cpp"));
+        const auto input = source(QStringLiteral("src/streaming/StreamVideoItemInput.cpp"));
+        QVERIFY(runtime.contains(QStringLiteral("generation != presentationGeneration()")));
+        QVERIFY(runtime.contains(QStringLiteral("publishDecodedDisplaySize(QSize(int(info->width), int(info->height)), generation)")));
+        QVERIFY(item.contains(QStringLiteral("&NativeStreamRuntime::decodedDisplaySizeChanged")));
+        QVERIFY(item.contains(QStringLiteral("m_decodedVideoSize.isEmpty() ? m_requestedVideoSize : m_decodedVideoSize")));
+        QVERIFY(rendering.contains(QStringLiteral("aspectFitRect(item->videoSize(),")));
+        QVERIFY(input.contains(QStringLiteral("position, m_videoSize, QSizeF(width(), height())")));
+        QVERIFY(input.contains(QStringLiteral("const auto viewport = aspectFitRect(m_videoSize,")));
+    }
+
     void liveScreensRenderThroughStreamVideoItem()
     {
         const QStringList screens{
