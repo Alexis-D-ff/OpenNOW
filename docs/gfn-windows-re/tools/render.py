@@ -4,6 +4,7 @@
 Run after extract.py and compare_opennow.py. Reads only already-redacted extracted files.
 """
 import collections
+import argparse
 import csv
 import os
 import re
@@ -82,7 +83,7 @@ FIELD_USE = {
     "appLevelProtocol": "5 = CloudMatch HTTPS session control, 6 = RTSPS",
     "ip": "host; sessionControlInfo.ip is the per-zone CloudMatch host, connectionInfo.ip is null",
     "resourcePath": "session-control path, or rtsps:// URL once the seat is assigned (null before)",
-    "usage": "port usage: 10 = session control, 14 = NVB_PU_RTSPS",
+    "usage": "JSON port usage: 10 = session control, 14 = SIGNALING; native RTSPS is 10",
     "port": "TCP port",
     "rigId": "rig id (null)",
     "requestedStreamingFeatures": "echoed as null in response",
@@ -202,5 +203,10 @@ def fill(path):
 
 
 if __name__ == "__main__":
-    for p in sys.argv[1:] or ["cloudmatch-fields.md", "sdp-attributes.md"]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--extracted", default=EXT)
+    parser.add_argument("documents", nargs="*", default=["cloudmatch-fields.md", "sdp-attributes.md"])
+    args = parser.parse_args()
+    EXT = args.extracted
+    for p in args.documents:
         fill(os.path.join(HERE, "..", p))

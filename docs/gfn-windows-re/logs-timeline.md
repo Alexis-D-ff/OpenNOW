@@ -6,7 +6,7 @@ Conventions:
 
 - All times are local wall clock, UTC+2 (CEST). `geronimo.log*` lines carry a UTC bracket timestamp plus the local time between `=...=`. For example, `[2026-10-12 17:45:11,637]=19:45:11=` is 19:45:11 local. Other logs use local time.
 - Evidence tags: **L** log-confirmed (file, local time, short redacted quote), **I** inferred, **U** unknown, **S** static. "macOS Bifrost (PR #1161)" marks facts from the macOS research. Those facts are not Windows evidence.
-- Bifrost2.dll was not supplied. Every `[NVST:*]` / `[BifrostClient: *]` line below is Bifrost's own log output, printed into geronimo.log. No Windows Bifrost addresses are claimed.
+- The original log study preceded the separate Bifrost upload. Every `[NVST:*]` / `[BifrostClient: *]` line here is runtime output printed into `geronimo.log`. Static Windows findings are now recorded in the linked protocol documents; they do not turn this timeline into a packet capture.
 - IPs, session/sub-session/request IDs, the device hash, HMAC/keys, ICE/DTLS material, the Windows user name, and the user's age are redacted.
 
 ## 1. What the logs cover
@@ -98,7 +98,7 @@ Only S6 has the negotiation. S5 values come from its teardown lines.
 |---|---|---|
 | codec | HEVC (`Selected HEVC codec from client preferences`; codecPref 0 = auto; JS `codec: H265`) | **L** 19:45:30.643 |
 | resolution / fps | 2560x1440 @ 120 (`Nvst selected stream settings: Stream[0] 2560x1440 @ 120 fps, 0 kbps`) | **L** 19:45:29.424 |
-| bit depth / chroma | 10-bit 4:4:4. Wire `bitDepth 1`, `chromaFormat 1`. Decoder `chroma format changed to: 3`, `DX11FrameFilterHandler initialized for format 0x65 ... is10Bit=1` (0x65 = DXGI_FORMAT_Y410) | **L** 19:45:31.542-.551 |
+| bit depth / chroma | 10-bit 4:4:4. CloudMatch JSON flags 1/1; Bifrost config depth/chroma 10/1. ANNOUNCE body not logged. Decoder chroma 3 and Y410 output (`format 0x65`, `is10Bit=1`) | **L** 19:45:31.260,.542-.551 |
 | HDR / color | SDR. `hdrMode = 0`. `colorSpaceMode 0x2, hdrColorSpaceMode 0x4, dynamicRangeMode 0`. Decoded colorspace 2, limited range | **L** |
 | decoder | DXVA D3D11 HEVC (`Video decoder is already initialized with type H265`, debug.log 19:45:11.633). `maxH264Level = 42` setting | **L** |
 | swapchain | DX11, 2560x1440, vsync 0, PQ 0, bit depth 10 while streaming. Back to 8-bit and vsync 1 at the 1232x761 window after exit | **L** 19:45:31.551, 22:39:39 |
@@ -107,7 +107,7 @@ Only S6 has the negotiation. S5 values come from its teardown lines.
 | audio/mic transport | On the WebRTC bundle socket (`Bypassing 'Mjolnir' SETUP ... Deferring to WebRtcTransport`; server SDP `rtcAudioOnNativeBundle:1`, `rtcMicOnNativeBundle:1`, `nativeRtcOnBundlePort:1`) | **L** |
 | video transport | Legacy dedicated socket: client UDP 49005 -> server `<ip>:5004`. Encrypted with SRTP (`runtime.videoSrtp 1`; `percPacketsDroppedByAuthFail 0`) | **L** |
 | unified socket | **Disabled**: `enableUnifiedSocket=0, using legacy dedicated sockets`. `rtcVideoOnNativeBundle 0` | **L** 19:45:31.364 |
-| server media port | Both client sockets (video 49005 and bundle 49006) send to the **same server port 5004**, taken from `X-GS-ServerPort=5004-5005`. Telemetry: `Media Endpoint Details ... Selected endpoint: <ip>:5004 | Configured endpoint: none | Protocol: udp`. The SDP/config ports (`serverBundlePort 47999`, `bundle 48001`, video 47998) were **not** used as peers | **L** 19:45:31.267-.535 |
+| server media port | Both client sockets (video 49005 and bundle 49006) send to the **same server port 5004**, taken from `X-GS-ServerPort=5004-5005`. Telemetry: `Media Endpoint Details ... Selected endpoint: <redacted-ip>:5004 \| Configured endpoint: none \| Protocol: udp`. The SDP/config ports (`serverBundlePort 47999`, `bundle 48001`, video 47998) were **not** used as peers | **L** 19:45:31.267-.535 |
 | NAT hole punch | `pingVersion 6` (SETUP header `x-nv-ping: 6`), ping string `PING`, STUN RFC 5389 on both client sockets. ICE `MaxStunResponseRetryCount: 255`. `No need to capture candidates for cloud server` | **L** |
 | DTLS / SRTP | DTLS on the bundle (14 ms handshake, one `Retrying DTLS handshake after timeout, retry count 1` logged right after done). libsrtp2 2.7.0. `SRTP encrypt failures: total=0`. `runtime.audioSrtp 0`, `micSrtp 0` but server `audio encryption support = true` | **L** |
 | data channels (SCTP over DTLS) | id 0 `control_channel_reliable`, 2 `custom_message_on_sctp_private_reliable`, 4 `custom_message_on_sctp_private_partially_reliable`, 6 `control_channel_partially_reliable`, 8 `control_channel_unreliable`, 10 `input_channel_partially_reliable` | **L** 19:45:31.360-.362 |

@@ -10,20 +10,20 @@ Tags: **S** static, **D** disassembled (GeForceNOW.exe base 0x140000000, Geronim
 - Login provider: console.log `providerCode` is "NVIDIA" in every occurrence (16×, **L**). `idpId` appears 126× (values redacted; some are the literal string "undefined" before login, **L**).
 - No partner payload: console.log `streamingService No partnerData and partnerSecureData present` (5×, e.g. 2026-10-12 20:31:56.948, **L**). The CloudMatch request has `partnerCustomData` null and `accountLinked` false (geronimo.log.bak 19:45:11, **L**).
 - Zone selection is in the JS layer: `defaultZone` (prod.cloudmatchbeta.nvidiagrid.net), `zoneName`, `zoneOverride`, `remoteZoneOverride`, `overrideZone`, `regionIds`, `isAffiliateRegion`, `supportedProviders`, `AuthenticationProvider`, `registrationProvider` are key names in console.log (**L**; values not copied). The session ran in zone eu-netherlands-north, VPC NP-AMS-08.
-- CloudMatch shape for this NVIDIA seat: `sessionControlInfo` usage 10 on 443, `connectionInfo` usage 14 (`NVB_PU_RTSPS`, `appLevelProtocol` 6) on 322 and 48322, no usage 2/16/17 (handshake.md §3, **L**).
+- CloudMatch shape for this NVIDIA seat: JSON `sessionControlInfo` usage 10 on 443, JSON `connectionInfo` usage 14 (SIGNALING, `appLevelProtocol` 6) on 322 and 48322, no usage 2/16/17 (handshake.md §3, **L**). Native RTSPS is a different enum value, 10.
 
 ## 2. Partner hooks in the binaries
 
 | Hook | Where | Evidence |
 |---|---|---|
 | `partnerCustomData` read from the JS prepare/start query | GeForceNOW.exe literal 0x1402a1a18, used by query handler 0x1401a69c0 (same function reads `address`, `serverType`, `deviceId`, `token`, `tokenType`, `clientHeaders{headerName,headerValue}`, `appId`, `clientAppVersion`) | **S/D** |
-| `partner.nvgs.nvidia.com` | GeForceNOW.exe literal 0x140290570, referenced from the startup function containing 0x140082d0d; the JS config also has the pattern `https://(accounts|partner).nvgs.nvidia.com` | **S**, **L** (console.log). Use as an allowed web origin is **I**. |
+| `partner.nvgs.nvidia.com` | GeForceNOW.exe literal 0x140290570, referenced from the startup function containing 0x140082d0d; the JS config also has the pattern `https://(accounts\|partner).nvgs.nvidia.com` | **S**, **L** (console.log). Use as an allowed web origin is **I**. |
 | `NVB_SERVER_PASSTHRU` | GeForceNOW.exe 0x1401a2c00: JS `serverType` 1001 → Bifrost 0x33 | **D** |
 | `updateUserInfo: userId=%s, externalUserId=%s, idpId=%s` | Geronimo.dll string | **S** |
 | Proxy switches `nv-proxy-server`, `nv-proxy-bypass-list`, `nv-proxy-pac-url` (and CEF `proxy-*`) | GeForceNOW.exe strings | **S**; same set as macOS |
 | `QUERY_GFN_START`, `QUERY_GFN_RESUME`, `QUERY_GFN_PREPARE` | GeForceNOW.exe query list from 0x14028d820 | **S** |
 
-No `GFNPartnerJWT`, `NVB_AUTH_JWT*` or `partnerSecureData` literal exists in GeForceNOW.exe or Geronimo.dll (**S**, negative search). macOS Bifrost (PR #1161) has the JWT auth names in Bifrost itself, so on Windows they would sit in the missing Bifrost2.dll (**I**). The JWT strings that do exist in Geronimo belong to gRPC's Google service-account credentials (**S**).
+The matching Windows Bifrost now supplies native auth and endpoint conversion evidence in [cloudmatch-native.md](cloudmatch-native.md). Negative searches in the shell and Geronimo did not establish the absence of native partner support. The supplied logs still contain no partner session, so static support must not be treated as an exercised partner flow.
 
 ## 3. Server types (Windows fills a macOS gap)
 
@@ -60,7 +60,7 @@ Counts over console.log(+.bak), CxNative, debug.log(+.bak) and geronimo.log(+.ba
 
 ## 5. Comparison with macOS and OpenNOW
 
-- macOS providers.md: provider identity (`providerId`, `idpId`) is separate from endpoint selection, and no partner login route was recovered. Windows agrees: the only partner-specific session input that reaches native code is `partnerCustomData` in the prepare query (**S/D**), and the endpoint comes from the JS `address` plus `serverType`.
+- Provider identity is separate from endpoint selection. The shell passes `partnerCustomData`, address and server type. The native conversion now has independent Windows evidence; no partner-session log establishes which combination an alliance seat uses.
 - OpenNOW `native/opennow-core/src/cloudmatch.rs` always sends `"partnerCustomData": null` (~1717), like this Windows session. It routes alliance seats by `allianceWebrtcCompatibility` (~37, ~372, ~1725) and by `connectionInfo` usage 14/16 entries with `wss://`/`https://` resource paths (~1775–1800). Windows NVIDIA seats return usage 14 with `rtsps://` and `appLevelProtocol` 6 instead, which OpenNOW's media selection deliberately skips. Neither the alliance WebRTC path nor partner usage 16/17 can be checked against Windows evidence.
 - OpenNOW keeps the provider's `idpId` per identity (`main.rs` ~473, ~1343). Windows Geronimo only logs it (`updateUserInfo`); no Windows code path was found that changes transport by provider (**I**, negative).
 - OpenNOW has no equivalent of the server-type field; it does not need one for NIMBUS seats. If partner seats turn out to use PASSTHRU (1001→0x33), this map is where to look (**U**).

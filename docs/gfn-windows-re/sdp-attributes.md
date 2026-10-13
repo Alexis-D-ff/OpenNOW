@@ -207,11 +207,11 @@ Keys that matter for an OpenNOW implementation, with their S6 values:
 
 ## Comparison with OpenNOW's ANNOUNCE builder
 
-OpenNOW: `native/opennow-streamer/crates/opennow-streamer-core/src/nvst_rtsp.rs`, `build_announce` (~1383-1500), dev @ 7ce3cd54 (after #1162, #1164, #1165 merged). `compare_opennow.py` collects OpenNOW's literal `a=x-nv-*` keys and joins them with the Windows server lines and the Windows final config.
+OpenNOW: frozen `7ce3cd54` after #1162, #1164 and #1165. `compare_opennow.py --ref 7ce3cd54` inventories production `a=x-nv-*` literals, excluding inline and separate tests, and joins them with the printed Windows server lines and final config. These are candidate literals, not proof that every key is emitted for S6's offer or stream settings.
 
-Summary counts: 62 server keys, 94 OpenNOW literal keys, 49 server keys never sent by OpenNOW, and 81 OpenNOW keys not printed by the server.
+Summary counts: 62 printed server keys, 91 OpenNOW production literal keys, 51 server keys without a matching production literal, and 80 OpenNOW keys not printed in that server section. The earlier 94-key count mistakenly included negative test assertions.
 
-**Keys OpenNOW sends whose value differs from the Windows final config** (Windows value -> OpenNOW literal):
+**OpenNOW raw builder defaults that differ from Windows final config** (Windows value -> OpenNOW default, not actual transmitted value):
 
 - `mic.micSsrcConfig.senderSsrc`: 5 -> 1
 - `packetPacing.minNumPacketsPerGroup`: 0 -> 15
@@ -219,13 +219,13 @@ Summary counts: 62 server keys, 94 OpenNOW literal keys, 49 server keys never se
 - `vqos[0].fec.repairMaxPercent`: 40 -> 35
 - `vqos[0].fec.repairMinPercent`: 5 -> 20
 
-The Windows column is the merged config, not the wire value (**U**: what Windows put in ANNOUNCE for these keys).
+Neither column is the captured body. OpenNOW's `omit_server_announce_attributes` at `nvst_rtsp.rs:1378-1459` filters the FEC/pacing defaults when DESCRIBE supplies them. Windows also compares against DESCRIBE ([announce-builder.md](announce-builder.md)). The mic SSRC default and actual RTP sender remain a separate comparison.
 
-**Keys OpenNOW sends that the Windows final config does not dump:** `clientSupportHevc`, `general.clientPorts.localAddress`, `general.dtlsFingerprintV2`, `general.icePasswordV2`, `general.iceUserNameFragmentV2`, `runtime.encryptionKey`. Windows Bifrost explicitly skips the v1 ICE/DTLS SDP fields. **U**: whether it sends the V2 forms. They would be secret, and the log does not print them.
+**OpenNOW candidate literals absent from the Windows final config dump:** `general.clientPorts.localAddress`, `general.dtlsFingerprintV2`, `general.icePasswordV2`, `general.iceUserNameFragmentV2`, `runtime.encryptionKey`. Windows supports V2 forms and skips nullable V1 fields in its serializer. Their exact S6 body values are not logged and must remain private. `clientSupportHevc`, split-encode strip count and `grc.enable` are not production literals in the frozen builder. `dynamicRangeMode:1` is conditional on HDR, not sent as zero for SDR.
 
-**Server-only keys (in DESCRIBE, never written by OpenNOW).** These are all server-to-client tuning. A client does not need to echo them. They are listed so a reviewer can confirm OpenNOW ignores them safely: `aqos.*` (audio/mic RED levels), `audio.enableDynamicAudioConfig`, `audio.enableTimestampAudioBuffer`, `general.customMessageOnCC`, `general.enableUDSWifi*`, `general.enetControlChannel.mtuSize`, `general.maxQosMessagesSize`, `general.transitSelectionSettings.*`, `general.wifiInfoInterval`, `ri.hidDeviceMask`, `runtime.maxVerboseEtlSizeMb`, `video[0].adaptiveQuantization.*`, `video[0].enableAv1RcPrecisionFactor`, `video[0].framePacing.pid.minTargetFrameTimeUs`, `video[0].vbvMultiplier`, `vqos[0].encoderUtilizationBooster.*`, `vqos[0].qec.*`, `vqos[0].qpDelta.*`, `vqos[0].relaxMaxBitrate.*`, `vqos[0].sendEndOfSessionQosTelemetry`, `vqos[0].statsProcessorThread.flags`.
+**Printed server keys without a matching OpenNOW production literal.** Lack of an ANNOUNCE echo does not establish whether a client consumes a setting or whether ignoring it is safe. These include `aqos.*`, audio buffer policy, custom-message/transport controls, HID permissions, encoder tuning and statistics settings. The table retains each key for owner-specific follow-up rather than treating all of them as server-only tuning.
 
-Several of these change client behavior and OpenNOW should honor them: `aqos.redundancyLevel 2` / `redundancyLevelForMic 3` (RFC 2198 RED depth), `ri.hidDeviceMask 4` (DS4 only), and `general.enetControlChannel.mtuSize 1191`.
+Several affect client behavior, including RED levels, HID permissions and transport MTU. OpenNOW already decodes downstream RED and implements DS4 synthesis; absence from this literal inventory is not evidence of absent feature handling.
 
 Full join table (generated):
 
@@ -239,7 +239,6 @@ Full join table (generated):
 | `audio.enableDynamicAudioConfig` | 1 | 1 |  |  |
 | `audio.enableTimestampAudioBuffer` | 1 | 1 |  |  |
 | `bwe.useOwdCongestionControl` |  | 1 | 1 | nvst_rtsp.rs:1547 |
-| `clientSupportHevc` |  | (not dumped) | {fmt} | nvst_rtsp.rs:2720 |
 | `general.clientBundlePort` |  | 49006 | {fmt} | nvst_rtsp.rs:1567 |
 | `general.clientPorts.audio` |  | 0 | 0 | nvst_rtsp.rs:1559 |
 | `general.clientPorts.bundle` |  | 0 | 0 | nvst_rtsp.rs:1562 |
@@ -304,11 +303,11 @@ Full join table (generated):
 | `video[0].adaptiveQuantization.spatialAQSetting` | 7 | 7 |  |  |
 | `video[0].adaptiveQuantization.spatialAQStrength` | 12 | 12 |  |  |
 | `video[0].adaptiveQuantization.temporalAQSetting` | 0 | 0 |  |  |
-| `video[0].bitDepth` |  | 10 | 10 | nvst_rtsp.rs:2713 |
-| `video[0].chromaFormat` |  | 1 | 1 | nvst_rtsp.rs:2714 |
+| `video[0].bitDepth` |  | 10 | {fmt} | nvst_rtsp_color.rs:18 |
+| `video[0].chromaFormat` |  | 1 | {fmt} | nvst_rtsp_color.rs:22 |
 | `video[0].clientViewportHt` |  | 1440 | {fmt} | nvst_rtsp.rs:1483 |
 | `video[0].clientViewportWd` |  | 2560 | {fmt} | nvst_rtsp.rs:1482 |
-| `video[0].dynamicRangeMode` |  | 0 | 0 | nvst_rtsp.rs:2893 |
+| `video[0].dynamicRangeMode` |  | 0 | 1 | nvst_rtsp_color.rs:27 |
 | `video[0].enableAv1RcPrecisionFactor` | 1 | 1 |  |  |
 | `video[0].enableRtpNack` |  | 1 | 1 | nvst_rtsp.rs:1490 |
 | `video[0].encoderCscMode` |  | 2 | 2 | nvst_rtsp.rs:1507 |
@@ -335,7 +334,7 @@ Full join table (generated):
 | `video[0].rtpNackQueueMaxPackets` |  | 1024 | 1024 | nvst_rtsp.rs:1492 |
 | `video[0].updateSplitEncodeStateDynamically` |  | 1 | 1 | nvst_rtsp.rs:1488 |
 | `video[0].vbvMultiplier` | 109 | 109 |  |  |
-| `video[0].videoSplitEncodeStripsPerFrame` | 64 | 64 | {fmt} | nvst_rtsp.rs:2718 |
+| `video[0].videoSplitEncodeStripsPerFrame` | 64 | 64 |  |  |
 | `vqos[0].bitStreamFormat` |  | 1 | {fmt} | nvst_rtsp.rs:1513 |
 | `vqos[0].bllFec.enable` |  | 1 | 0 | nvst_rtsp.rs:1520 |
 | `vqos[0].bw.maximumBitrateKbps` |  | 48543 | {fmt} | nvst_rtsp.rs:1524 |
@@ -356,7 +355,7 @@ Full join table (generated):
 | `vqos[0].fec.repairMaxPercent` |  | 40 | 35 | nvst_rtsp.rs:1519 |
 | `vqos[0].fec.repairMinPercent` |  | 5 | 20 | nvst_rtsp.rs:1518 |
 | `vqos[0].fec.repairPercent` |  | 20 | 20 | nvst_rtsp.rs:1517 |
-| `vqos[0].grc.enable` | 0 | 0 | {fmt} | nvst_rtsp.rs:2719 |
+| `vqos[0].grc.enable` | 0 | 0 |  |  |
 | `vqos[0].qec.featureSetting` | 3 | 0 |  |  |
 | `vqos[0].qec.packetLossConcealmentSetting` | 2 | 2 |  |  |
 | `vqos[0].qpDelta.qpDeltaIirFactor` | 60 | 60 |  |  |

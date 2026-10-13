@@ -2,7 +2,7 @@
 
 The Windows client has many unrelated fallback mechanisms. A codec choice made before the session is not a decoder retry. Retrying an RTSP endpoint is not provider switching. Withholding frames after loss is not the same as an IDR request. This table separates the decisions that were traced (**D**) or seen in a real session (**L**) from those that are only configured or inferred.
 
-Evidence levels are defined in the [README](README.md). Function addresses are in `Geronimo.dll` (base `0x180000000`) unless the row says otherwise. Bifrost behavior comes from log lines because `Bifrost2.dll` was not supplied.
+Evidence levels are defined in the [README](README.md). Unless a row says Bifrost, addresses are in Geronimo. The separately supplied Bifrost DLL now confirms network setup and recovery; observed runtime paths remain separately marked **L**.
 
 ## Established decisions
 
@@ -22,7 +22,7 @@ Evidence levels are defined in the [README](README.md). Function addresses are i
 | NACK on and off | Bifrost turns NACK off and on again by frame number during a high-RTD stretch (`Deactivating Rtp Nack frameNumber:...`, `Activating ...`). `useRtdForRtpNackToggle 1` is configured. | **L** S5 19:27:21 and 19:28:55; RTD-driven policy **I** |
 | Frame filters | NvScaler, NvSharp and DeepISP fall back to Lanczos when they fail. DeepISP needs NV12 8-bit input, CUDA 11.2+ and `NvPixels.dll`. | **S** `0x180226a3f`; **D** `0x18015d170` |
 | Swap chain mode | Flip-sequential on Windows 8+; bitblt `SEQUENTIAL` when vsync is off and tearing is unsupported. A failed fullscreen-exclusive switch logs `Disabling FSE!!`. | **D** `0x18026cc80` |
-| WASAPI rate adjust | `IAudioClient::Initialize` with `EVENTCALLBACK | RATEADJUST`; on failure it retries with `EVENTCALLBACK` only. | **D** [audio.md](audio.md) §1 |
+| WASAPI rate adjust | `IAudioClient::Initialize` with `EVENTCALLBACK \| RATEADJUST`; on failure it retries with `EVENTCALLBACK` only. | **D** [audio.md](audio.md) §1 |
 | Audio device change | Default-device or format changes rebuild the renderer and the mic capturer. | **D** `0x1802597e0`, `0x1802c2c60` |
 | Mic AEC | Hardware AEC skips the software APM; otherwise WebRTC AEC runs with decoded game audio as the reverse stream. | **D** `GsAudioWebRTC.dll` `0x180001230`, `0x1802c2710` |
 | Input send failure | `Sending Input event failed: NVST_R_GENERIC_ERROR (0x800b0000)` is logged and the session continues. | **L** 42 lines around focus and window-state changes |

@@ -4,7 +4,7 @@ Scope: GeForce NOW Windows 2.0.89.141, `Geronimo.dll` ("gs_04_92"), image base `
 
 Evidence tags: **S** static, **D** decompiled, **L** log, **I** inferred, **U** unknown. Facts marked "macOS Bifrost (PR #1161)" or "macOS Geronimo" come from the macOS research branch, not from Windows.
 
-`Bifrost2.dll` is not supplied. NVST, RTSP, depacketization and NACK internals are out of reach. This file covers only the Geronimo side of the `nvb*` boundary.
+`Bifrost2.dll` was supplied separately and its network side is covered in [handshake.md](handshake.md), [ANNOUNCE builder](announce-builder.md) and [packet layouts](packet-layouts.md). This file keeps the Geronimo decode and presentation boundary separate.
 
 ## Summary
 
@@ -104,7 +104,7 @@ Decision table, in execution order:
 | 13 | H.264 only in mask **or** codec == H.264 | Cap the pixel budget below 0x4b9600 (4,953,600) and **fps at 120** | D, L (bak 19:35:30: "1920x1080@240, codec = H264" → "1920x1080@120"; "3440x1440@120, codec = H264" (exactly 4,953,600 px) → "No matching aspect ratio found. Select closest" → "2560x1080@120") |
 | 14 | mode selection | Pick the largest decodable mode with the same aspect ratio; otherwise "No matching aspect ratio found. Select closest" | D, L |
 | 15 | Auto | AV1 if the mask has 4 and the AV1 gate passes; else HEVC if the mask has 2 and the HEVC gate passes; else H.264. In the HDR or ≥240 fps branch, H.264 also clears HDR and caps at 120 ("Select H264 codec and ignore %s %s request"). Gates: with `isConfigValidatorEnabled`, `isConfigurationEnabled(vendor, codec, "SDR"/"HDR", w, h, fps)`; otherwise `FUN_18015ad40(w,h,fps)` (AV1 resolution gate) and `FUN_18015afa0` (AV1 HDR) | D |
-| 16 | explicit codec, validator on | If the codec is disabled for w/h/fps/(S|H)DR: "Requested codec %s is disabled for the resolution ..." → cap at 120 fps and retry once; a second rejection returns the codec's error | D |
+| 16 | explicit codec, validator on | If the codec is disabled for w/h/fps/SDR or HDR: "Requested codec %s is disabled for the resolution ..." → cap at 120 fps and retry once; a second rejection returns the codec's error | D |
 | 17 | explicit AV1, validator off, fps > 120 | Cap at 120; `FUN_18015ad40` must pass, else `0xc0f11050` | D |
 | 18 | GRC | DXVA context with GRC requested: if transcode to 2560x1600 fails (AMD/Intel/Qualcomm, area ≥ 4,953,600) or 3840x2160 fails (area > 0xa8bfff), and the stream is SDR/8-bit/<240 fps/<4.95 MP, log "Disabling GRC because this platform doesn't support re-encoding to H264"; otherwise "Allowing GRC without transcoding" | D |
 | 19 | TrueHDR without HDR | Clear TrueHDR. Debug `isTrueHDREnabled` forces HDR and TrueHDR on, with saturation/contrast/middle-grey defaults 200/200/100 | D |
@@ -115,7 +115,7 @@ Decision table, in execution order:
 
 Agreement with macOS: rows 7, 10, 12, 15, 16, 17 and 20 match the macOS decision list point for point (macOS Geronimo `0xb1de0`). Differences come from the probe back end: DXVA/MFT/LAVC on Windows, VideoToolbox masks on macOS. macOS also has its own `hevc120` and `IsAV1Broken` gates (**I** from code identity).
 
-What goes upstream: `Initializing streamer connection with values: HDR:: enableHDR: 0, sdrColorSpace: 2, hdrColorSpace: 4, bitDepth: 10, Prefilter:: mode: 0 ...` (geronimo.log.bak 19:45:29). The NVST config then dumps `video[0].chromaFormat: 1` and `video[0].surfaceFormat: 0`. Here NVST `chromaFormat 1` means 4:4:4 for a stream Geronimo labels chroma 3. The two layers use different enums (**L**, mapping **I**). The `nvbStartSession` argument layout lives in Bifrost2.dll (not supplied) (**U**).
+What goes upstream: Geronimo reports depth 10 and chroma 3 for S6, while Bifrost's config has depth 10 and chroma 1. ANNOUNCE field sites `0x1804ef015` and `0x1804ef513` serialize those bytes unchanged when they differ from DESCRIBE (**D/L**). OpenNOW's depth 10 agrees, but its chroma 3 differs. CloudMatch JSON's flags 1/1 are another domain. See [announce-builder.md](announce-builder.md).
 
 ## 4. D3D11 decode instance
 

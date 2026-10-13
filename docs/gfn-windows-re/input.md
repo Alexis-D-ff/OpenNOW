@@ -1,6 +1,6 @@
 # GFN Windows client: keyboard, mouse, gamepad, haptics, cursor, clipboard
 
-Evidence tags as in architecture.md: **S** static, **D** decompiled (Geronimo image base `0x180000000`, `GeForceNOW.exe` `0x140000000`), **L** log-confirmed (local time), **I** inferred, **U** unknown. All input leaves Geronimo through one call, `BifrostSDKExecutor::sendNvstInputEvent` (`0x1800d2eb0`), which calls `nvbSendInputEvent`. `Bifrost2.dll` was not supplied, so the **wire** encoding of every input event is unknown for Windows. Where a wire format is mentioned below it is either macOS-derived ("macOS Bifrost, PR #1161") or OpenNOW's own implementation.
+Evidence tags as in architecture.md: **S** static, **D** decompiled, **L** log-confirmed, **I** inferred, **U** unknown. Geronimo sends input through `BifrostSDKExecutor::sendNvstInputEvent` (`0x1800d2eb0`). Bifrost is now supplied; its control framing and channel policies are traced in [handshake.md](handshake.md). The event-specific conversion below is not yet fully traced.
 
 ## Summary
 
@@ -30,7 +30,7 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (Geronimo im
 - It maps the SDL scancode (< 0x200) through a table built once by `FUN_1800ee070`. On a miss: `GERONIMO_ERROR 0xc0020001 GERONIMO_IOINTERFACE_UNSUPPORTED_KEY` and `Unsupported key. Scancode: %d`.
 - The table is a GFN-specific code space, not Windows VKs. Letters A-Z (scancodes 4-29) map to ASCII `0x41`-`0x5a`, and digits 1-0 (30-39) to `0x31`-`0x30`. Space maps to `0x20`, `-` to `0x2d`. Return maps to `0x104`, Escape to `0x100`, Backspace to `0x103`, Tab to `0x101`. F1-F12 (scancodes 58-69) map to `0x400`-`0x40b`.
 - NVST modifier bits: Shift `0x01`, Ctrl `0x02`, Alt `0x04`, Meta `0x08`. Separate right-side bits: RShift `0x10`, RCtrl `0x20`, RAlt `0x40`, RGui `0x80`. Action is 2 for down and 1 for up.
-- **U** Whether Bifrost converts these codes to Windows VKs before the wire is unknown (Bifrost not supplied). OpenNOW sends Windows VKs on the wire (`crates/opennow-streamer-core/src/lib.rs:2762-2774`) and works, so **I** Bifrost (or the server) translates. Compare with the macOS Bifrost input encoder before changing anything.
+- **U** The complete Bifrost key-code conversion before serialization is not traced. Geronimo uses its own key-code domain, while OpenNOW forwards Windows virtual keys. This is an unresolved boundary, not proof that one representation is accepted universally.
 
 ### 1.3 Keyboard layout
 
@@ -125,13 +125,13 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (Geronimo im
 
 - **S** The string is not in `Geronimo.dll`. A string search in the Ghidra project found no reference. It comes from Bifrost (`[BifrostClient: Streamer]` tag).
 - **L** 42 occurrences (15 in `geronimo.log`, 27 in `.bak`), all `Nvsc Error: NVST_R_GENERIC_ERROR (0x800b0000)` on the main thread `00007488`. Every instance sits next to `nvbSendClientInfo` + `[NVST:ClientSession] Window State Change: 16/17/19 requested`, or right after `Sending SDL mouse settings` + `nvbFeatureControl` + `Update feature type: 10`, or after `initMouse`/`Async Thread End`. Example: 19:59:33.213 mouse settings → 19:59:33.248 `Sending Input event failed` → `Window State Change: 16`.
-- **I** The failing event is the one the client sends on focus/foreground transitions (the lock-key or neutral-state event that the raw-input thread restart emits). Bifrost rejects it with a generic error while the window state is changing. The session continues: no termination follows any instance. OpenNOW instead ends the session on any captured-input send failure (`crates/opennow-streamer-core/src/lib.rs:1906-1917`).
+- **I** The failures may involve focus-transition events because they occur beside focus/window changes. The affected event type and rejection cause are **U**; co-occurrence does not prove either. No termination follows the 42 observed errors. OpenNOW's captured enqueue errors are terminal (`lib.rs:1907-1918`), but its asynchronous motion-write failures are nonterminal while discrete-write failures are terminal (`nvst.rs:6412-6456`). These observations do not justify dropping all input errors.
 
 ## 8. Touch and pen
 
 - **S** `SDLWindow::touchEvent(SDL_TouchFingerEvent)`, `TOUCH_INPUT`, `touchSupport`, `Pen Pressure: %.1f` (ImGui demo), and `SDL_GameControllerGetTouchpadFinger` (DS4/DS5 touchpad) exist. **U** No touch events were logged. Whether Windows touchscreens are forwarded was not traced.
 
-## 9. Comparison with OpenNOW (dev `b49ba395`; line numbers approximate after #1162/#1164/#1165 landed in `7ce3cd54`)
+## 9. Comparison with OpenNOW (frozen dev `7ce3cd54`)
 
 | Area | GFN Windows | OpenNOW |
 | --- | --- | --- |
@@ -146,4 +146,4 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (Geronimo im
 | Gamepad HID | DS4/DS5 synthesis with DS4↔DS5 cross-synth flags; GSHID raw passthrough for wheels/HOTAS | DS4 synthesis only (DS5→DS4); no generic HID passthrough |
 | Rumble | SDL rumble, 33 ms throttle for BT Xbox pads | Newest-per-controller coalescing; vibration-intensity scaling |
 | Clipboard | Custom-message PASTE protocol (server-driven) | Ctrl+V types text as type-23 Unicode; custom-message channels never written |
-| Input send failure | Logged; session continues | Ends the session |
+| Input send failure | 42 generic errors while streaming continues; affected event types and failure semantics are unknown | Captured enqueue and asynchronous discrete-write errors are terminal; asynchronous motion-write errors are not. Synchronous errors return to the caller (`nvst.rs:6412-6456`, `lib.rs:1907-1918`) |

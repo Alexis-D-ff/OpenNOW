@@ -1,6 +1,6 @@
 # GFN Windows client: audio playback and microphone
 
-Evidence tags as in architecture.md: **S** static, **D** decompiled (image base `0x180000000`), **L** log-confirmed (`geronimo.log`/`.bak`, local time), **I** inferred, **U** unknown. `Bifrost2.dll` was not supplied. Opus, RTP, RED, and the audio jitter buffer live there, so those facts come from Bifrost's own log lines.
+Evidence tags as in architecture.md: **S** static, **D** decompiled, **L** log-confirmed, **I** inferred, **U** unknown. `Bifrost2.dll` is now available. The Opus/RED and jitter observations below remain log-confirmed unless an individual Windows function is cited; they are not upgraded just because the DLL arrived.
 
 ## Summary
 
@@ -8,7 +8,7 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (image base 
 - `WASAPIAudioRenderer` uses shared mode, is event-driven, asks for `AUDCLNT_STREAMFLAGS_RATEADJUST`, coerces the mix format to 16-bit PCM, disables ducking, and has its own channel mixer and resampler. It rebuilds on default-device or format change. **D/L**
 - The client supports 2, 6, and 8 channels end to end (bitrate tables, AEC reverse-stream guard, channel mixer). This session negotiated stereo because the default device was stereo. **D/L**
 - The microphone path uses WebRTC's Windows Core Audio device module and APM inside `GsAudioWebRTC.dll`. Capture is 48 kHz stereo 16-bit in 10 ms chunks with the echo canceller on and NS/AGC/HPF off. The AEC reference is the actual decoded game audio. Bifrost encodes the mic as Opus (20 ms, 2 ch, 16 kbps) with RED level 3 and sends it on the WebRTC bundle. **D/L**
-- OpenNOW differs on almost every axis: SDL2 playback with no jitter buffer, stereo-only decode, mono mic with no AEC and no RED. See the comparison at the end and [opennow-gaps.md](opennow-gaps.md).
+- OpenNOW's Qt embedded path has bounded SDL2 playback and backlog catch-up resampling, but not this timestamp-adaptive depth. It decodes mono or stereo to stereo output and captures mono mic without AEC or upstream RED. Downstream RED decoding already exists. See [opennow-gaps.md](opennow-gaps.md).
 
 ## 1. Playback
 
@@ -55,7 +55,7 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (image base 
 | Video is **not** on the native bundle in this session, but audio, mic, and data channel are | **L** `general.rtcVideoOnNativeBundle: 0`, `rtcAudioOnNativeBundle: 1`, `rtcMicOnNativeBundle: 1`, `rtcDataChannelOnNativeBundle: 1` |
 | Downstream frame duration is 5 ms | **L** `[NVST:RtpAudioPlayer] Setting audio frame duration: 5` |
 | Downstream RED is RFC 2198, level 2 | **L** `a=x-nv-aqos.enableRedundancy:1`, `a=x-nv-aqos.redundancyLevel:2`; `[NVST:ClientSession] Audio redundancy enabled using RFC2198 (RED)`; `Audio redundancy enabled using RFC2198 (RED), redundancy level is 2`; `[NVST:WebRtcAudioRtpReceiver] Audio RED decode fail count: 0` |
-| Codec is Opus, not in "Opus mapping mode" | **L** `m_bInOpusMappingMode FALSE`. **U** Whether Windows uses a multistream decoder for 6/8 channels is unknown (no Bifrost). |
+| Codec is Opus, not in "Opus mapping mode" | **L** `m_bInOpusMappingMode FALSE`. **U** The 6/8-channel Opus decoder topology has not been traced or exercised by these stereo sessions. |
 | SRTP for audio is off | **L** `a=x-nv-runtime.audioSrtp:0` |
 | 48 kHz, stereo negotiated this session; surround disabled | **L** `audio.samplesPerSecond: 48000`, `audio.surround.enable: 0`, `audio.surround.numChannels: 2`, `audio.surround.channelMask: 3`, `audio.surround.version: 2` |
 | Surround bitrates (kbps) | **L** `audioBitrate.remote2chMin/Max 96/128`, `remote6chMin/Max 256/512`, `remote8chMin/Max 450/768`, `local2ch 96/510`, `local6ch 256/1284`, `local8ch 450/1794`; adaptive bitrate off |
@@ -65,7 +65,7 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (image base 
 | Audio stats cadence | **L** `aqos.enableAudioStats: 1`, `aqos.audioStatsUpdateIntervalMs: 70` |
 | Session request | **L** `debug.log` 19:45:11.637 `AudioMode used for Start stream session: 2`; device capability JSON includes `"audioChannelCount" : 2` (`[ModeSelectionUtil] Device Capability is = {...}`) |
 
-**I** The "jitter buffer" is in milliseconds of audio. It starts at 80 ms, adapts between a dynamic floor (lowered to 45 here) and 200 ms, and prunes when it runs above target. That is a significantly richer design than OpenNOW's fixed 10-frame queue and 120 ms playout buffer.
+**I** The "jitter buffer" is in milliseconds of audio. It starts at 80 ms, adapts between a dynamic floor (lowered to 45 here) and 200 ms, and prunes when it runs above target. OpenNOW's 120 ms value is maximum PCM capacity, not a fixed delay. Its embedded output consumes immediately and applies up to 2% catch-up when backlog exceeds 60 ms for 200 ms, stopping at 40 ms (`audio_playout.rs:63-98`, frozen `7ce3cd54`). That backlog policy is not a timestamp-adaptive jitter target.
 
 ## 2. Microphone
 
@@ -124,17 +124,17 @@ Evidence tags as in architecture.md: **S** static, **D** decompiled (image base 
 - macOS asked how `processReverseStream` slices frames. On Windows: 5 ms render frames are paired into 10 ms reverse frames, and 2/6/8 channels are allowed.
 - macOS has `AudioUnitsAudioRenderer` with an `AudioRingBuffer`. Windows uses WASAPI event mode with rate adjust and no separate Geronimo ring buffer for playback (Bifrost's TimestampAudioBuffer does the buffering).
 
-## 4. Comparison with OpenNOW (dev `b49ba395`; line numbers approximate after #1162/#1164/#1165 landed in `7ce3cd54`)
+## 4. Comparison with OpenNOW (frozen dev `7ce3cd54`)
 
 | Area | GFN Windows | OpenNOW |
 | --- | --- | --- |
 | Playback API (Qt path) | WASAPI shared, event-driven, `RATEADJUST` + `IAudioClockAdjustment`, ducking off | SDL2 audio callback, f32, 10 ms buffer (`crates/opennow-streamer-platform/src/output.rs:38-41,1529-1537`). The custom WASAPI renderer is standalone-only, polled, with no event handle (`opennow-streamer-platform-windows/src/windows/audio.rs:110-148`) |
-| Jitter buffer | Bifrost TimestampAudioBuffer, 80 ms initial, adaptive 45-200 ms, pruning | None. A 10-frame encoded queue plus a 120 ms playout buffer with ≤2 % catch-up resample (`audio_playout.rs:1-98`, `media.rs:32`) |
+| Jitter buffer | Bifrost TimestampAudioBuffer, 80 ms initial, adaptive 45-200 ms, pruning | Bounded encoded and PCM queues, 120 ms maximum PCM capacity, immediate consumption and ≤2% backlog catch-up. No timestamp-adaptive depth on the embedded path (`audio_playout.rs:1-98`, `media.rs:32`) |
 | Frame size | 5 ms downstream | Assumes up to 960 samples/ch (20 ms) for PLC bounds (`media.rs:2966-2978`) |
 | RED | Level 2 down, level 3 up | Parses RED down (`nvst.rs:6253-6287`); no mic RED |
-| Channels | 2/6/8 supported, negotiated from device | Stereo only; single-stream Opus decoder (`media.rs:2935-2953`); hard-coded `channels:2` (`nvst_rtsp.rs:1174`) |
-| Device change | IMMNotificationClient-style handlers rebuild renderer and capturer | SDL path: none. WASAPI path: polls the default endpoint every 250 ms |
+| Channels | 2/6/8 supported, negotiated from device | Mono/stereo decode to stereo output; no multichannel playback (`media.rs:3073-3081,3115-3135`); `channels:2` (`nvst_rtsp.rs:1262`) |
+| Device change | IMMNotificationClient-style handlers rebuild renderer and capturer | No application-controlled migration in the embedded SDL owner; SDL backend behavior unverified. Separate WASAPI owner polls the default endpoint every 250 ms |
 | Mic capture | WebRTC ADM (Core Audio), 48 kHz stereo, 10 ms | SDL2, 48 kHz mono, 10 ms (`microphone.rs:303-353`) |
 | Mic processing | WebRTC APM AEC with the game audio as reference | None |
-| Mic encode | Opus 20 ms, 2 ch, 16 kbps, RED 3 | Opus VoIP 10 ms, mono, 32 kbps, plain PT 111 (`microphone.rs:251-262`, `nvst.rs:7155-7166`) |
+| Mic encode | Opus 20 ms, 2 ch, 16 kbps, RED 3 | Opus VoIP 10 ms, mono, 32 kbps, plain PT 111 (`microphone.rs:251-273`, `nvst.rs:7235-7251`) |
 | Mic state to UI | Mic state events (2/3) plus permission gating | Local `microphone-state` events only |

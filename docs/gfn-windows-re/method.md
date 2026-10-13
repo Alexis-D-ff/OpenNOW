@@ -2,8 +2,8 @@
 
 ## Scope and constraints
 
-- **Inputs.** One Windows install subset and its logs, uploaded as `GFN.zip` (SHA-256 `73d96b78930a8b88eb18580c11bd1fbcbd5ab323b0ec56b35002ad861a10dc95`). [artifacts.md](artifacts.md) lists every file and hash.
-- **No execution.** No GFN binary was run. Linux cannot run them, and running them was out of scope.
+- **Inputs.** One Windows install subset and its logs in `GFN.zip` (SHA-256 `73d96b78930a8b88eb18580c11bd1fbcbd5ab323b0ec56b35002ad861a10dc95`), plus the separately supplied matching Bifrost DLL. [artifacts.md](artifacts.md) lists every file and hash.
+- **No execution.** No GFN binary was run. Execution was out of scope.
 - **No network contact.** No NVIDIA or GFN server was contacted and no login was attempted. Every runtime fact comes from logs the user produced on their own machine.
 - **No secrets.** Quoted log lines are short and have IPs, session and request IDs, device hashes, keys, ICE and DTLS material, account data, the Windows user name and the user's age replaced with `<redacted>`. Seat hostnames that embed an IP are written `<redacted-ip>.cloudmatchbeta.nvidiagrid.net`. Zone names such as `eu-netherlands-north` and `np-ams-08` are kept because they identify a public region, not a person.
 
@@ -11,7 +11,7 @@
 
 | Tool | Use |
 | --- | --- |
-| Ghidra 12.1.4 headless (`analyzeHeadless`) | Full auto-analysis of `Geronimo.dll` (about 11 minutes, 10 GB heap). Smaller binaries (`GeForceNOW.exe`, `GeForceNOWStreamer.exe`, `GsAudioWebRTC.dll`, `NvPixels.dll`, the NvContainer plugins) were analyzed in separate projects. Decompilation used small Java GhidraScripts that select functions by string reference or address and write pseudocode to scratch files. |
+| Ghidra 12.1.4 headless (`analyzeHeadless`) | Full auto-analysis of Geronimo and matching Bifrost (about 11 minutes each, 10 GB heap). Smaller PEs were analyzed separately. Scripts export selected functions to scratch files. The giant ANNOUNCE schema walk is examined through field-site disassembly; bounded exports skip functions larger than 50 KB. Analysis warnings require per-function checks, not an assumption that every output is valid. |
 | `pefile`, `capstone` (Python, via `uv`) | Version resources, imports, exports, PDB paths, string-to-code cross-references (RIP-relative `lea`), jump tables and vtable slots. |
 | `strings`, `objdump` | Quick string and section census. |
 | `tools/*.py` in this folder | Log extraction, redaction, catalogs and the OpenNOW key comparison. See below. |
@@ -20,10 +20,10 @@ No REA MCP was available for this study, unlike the macOS study. Evidence theref
 
 ## How claims were established
 
-1. **Inventory.** Hash every file, read its version resource, imports and exports. This established that `Bifrost2.dll` is missing and that Geronimo calls it through 31 `nvb*` imports.
+1. **Inventory.** Hash every file and read version resources, imports and exports. The original archive omitted Bifrost; its separate upload matches Geronimo, `gs_04_92 38967594`, and is listed in [artifacts.md](artifacts.md).
 2. **Static anchors.** For each topic, find the log or format strings in the binary, follow references to the functions that use them, and decompile those functions. Function names come from exports, RTTI and log strings. Unnamed functions keep Ghidra's `FUN_<VA>` name.
-3. **Log confirmation.** Parse the logs into sessions and events, then check each static path against what a real session did. Bifrost's own log lines in `geronimo.log` (`[NVST:*]`, `[BifrostClient: *]`) stand in for the missing DLL.
-4. **macOS cross-check.** Compare each finding with `docs/gfn-macos-re/` from PR #1161. Facts that exist only on macOS are labelled "macOS Bifrost (PR #1161)".
+3. **Log confirmation.** Parse the logs into sessions and compare each static path with what those sessions did. Bifrost's log lines remain runtime evidence, distinct from its newly available Windows code.
+4. **macOS cross-check.** Compare independently recovered Windows functions with the macOS research in PR #1161. A corresponding macOS function is a comparison, not the evidence source for a Windows byte layout.
 5. **OpenNOW comparison.** Read the corresponding OpenNOW code on `dev` at `7ce3cd54` and record differences in [opennow-gaps.md](opennow-gaps.md).
 
 The work ran as four parallel investigations (logs; video and color; architecture, audio and input; protocol, providers and configuration), each with its own decision log. One reviewer reconciled them. Reconciliation re-decompiled the codec selector to confirm both PR #1165 contradictions, corrected the SCTP channel labels against the log, normalized all times to local time, and rechecked the OpenNOW file pointers after #1162, #1164 and #1165 merged. [decisions.tsv](decisions.tsv) records each judgment call (`REC-*` rows for reconciliation).
@@ -35,12 +35,12 @@ The scripts in [tools/](tools/) need Python 3 and, for `config_catalog.py`, `pef
 ```sh
 cd docs/gfn-windows-re/tools
 python3 extract.py --src /path/to/unzipped/GFN      # writes redacted intermediates to tools/extracted/ (do not commit)
-python3 compare_opennow.py --opennow /path/to/opennow
+python3 compare_opennow.py --opennow /path/to/opennow --ref 7ce3cd54
 python3 render.py                                    # fills the generated tables in ../cloudmatch-fields.md and ../sdp-attributes.md
 GFN_DIR=/path/to/unzipped/GFN python3 config_catalog.py   # rewrites ../configuration-fields.md and ../nvsc-client-config.tsv
 ```
 
-On this upload the four generated files come out identical to the committed versions. The OpenNOW line numbers in `sdp-attributes.md` follow the checkout passed to `compare_opennow.py`.
+The comparison reads production sources from frozen Git revision `7ce3cd54`, not the moving checkout. Inline and separate test assertions are excluded. The generated literal inventory is not a runtime body: branch conditions and DESCRIBE-aware omission still apply. Generated blocks can be rebuilt without replacing the curated explanations. `render.py --extracted /path/to/redacted-output sdp-attributes.md` supports inputs outside the repository.
 
 `tools/extracted/` holds redacted log excerpts. It is excluded from the repository because the study commits no raw logs.
 

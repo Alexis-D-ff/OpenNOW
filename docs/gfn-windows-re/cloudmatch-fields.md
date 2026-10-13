@@ -1,4 +1,4 @@
-# CloudMatch (GridServer) session request and response, as logged by the Windows client
+# Windows CloudMatch logged exchange and native model
 
 Source: Bifrost's `[BifrostClient: GridServer]` lines in `geronimo.log.bak`. These are the only CloudMatch JSON bodies in the upload, and they all belong to session S6 (2026-10-12 19:45 local). Bifrost logs the full request (`Serialized session request. Size: 1957, Data: '{...}'`) and every response (`Client Request: 11, server response: '{...}'`). Redacted copies are in `extracted/cloudmatch_request.json`, `cloudmatch_response_first.json` and `cloudmatch_response_ready.json`. The flattened catalog is `extracted/cloudmatch_fields.tsv`. Evidence tags follow COMMON.md. All rows below are **L** unless they say otherwise.
 
@@ -6,12 +6,12 @@ Source: Bifrost's `[BifrostClient: GridServer]` lines in `geronimo.log.bak`. The
 
 | step | method + URL | body | timing |
 |---|---|---|---|
-| create | POST (**I**) `https://eu-netherlands-north.cloudmatchbeta.nvidiagrid.net:443/v2/session?keyboardLayout=en-US&languageCode=en_US` | `{"sessionRequestData":{...}}` (1957 bytes) | T0 = 19:45:11.639 |
+| create | POST (**D**, Bifrost `0x1807d00d0`) `https://eu-netherlands-north.cloudmatchbeta.nvidiagrid.net:443/v2/session?keyboardLayout=en-US&languageCode=en_US` | `{"sessionRequestData":{...}}` (1957 bytes) | T0 = 19:45:11.639 |
 | create response | none | `{"session":{...},"requestStatus":{...},"otherUserSessions":[...]}` | +420 ms |
-| poll x18 | GET (**I**) `https://np-ams-08.cloudmatchbeta.nvidiagrid.net:443/v2/session/<sessionId>` | same response shape, without `otherUserSessions` content | about every 1.02 s |
+| poll x18 | GET (**D**, Bifrost `0x1807cc4f0`) `https://np-ams-08.cloudmatchbeta.nvidiagrid.net:443/v2/session/<sessionId>` | same response shape, without `otherUserSessions` content | about every 1.02 s |
 | ready | none | `session.status 2` | +17.78 s |
 
-Two details matter here. First, the poll host is the per-zone server from `sessionControlInfo.ip` (`np-ams-08...`), not the zone alias. Second, the poll path is `sessionControlInfo.resourcePath`. Bifrost logs `Polling session. The request url is https://np-ams-08.cloudmatchbeta.nvidiagrid.net:443/v2/session/<id>` and `Polling for session <id>, request id: 11, QueuePosition: 0, ETA: 30000(msec)`. HTTP header names for CloudMatch are not logged (**U**). Methods are inferred from the REST shape. The log does not print them.
+The poll host/port comes from `sessionControlInfo`, but the native poller reconstructs `/v2/session/<redacted>` from its fixed template and cached session ID; it does not consume `sessionControlInfo.resourcePath` for this path (**D**, `0x1807d00d0`, `0x1807cc4f0`). The method is statically POST for creation and GET for polling. The HTTP helper adds `Content-Type: text/plain` and the nonempty authorization header (`0x1807eed10`, `0x1807ee9a0`). No credential values are included. See [cloudmatch-native.md](cloudmatch-native.md) for typed field registrations, ownership and usage conversions.
 
 State progression across the 19 responses: `status 1, seatSetupStep 0, ETA 30000` (first two), then `status 1, seatSetupStep 3, ETA 20000` (16), then `status 2` (ready). `errorCode` is 1 and `requestStatus.statusCode` is 1 (`SUCCESS_STATUS`) throughout. `queuePosition` stayed 0, so there was no queue on this priority account. `gpuType` is `""` until the ready response, which carries `"5080h / B40"`.
 
@@ -125,13 +125,13 @@ Generated from `extracted/cloudmatch_fields.tsv` by `render.py`. Secrets are rep
 | response | `session.sessionControlInfo.appLevelProtocol` | int | 5 | 5 = CloudMatch HTTPS session control, 6 = RTSPS |
 | response | `session.sessionControlInfo.ip` | string | np-ams-08.cloudmatchbeta.nvidiagrid.net | host; sessionControlInfo.ip is the per-zone CloudMatch host, connectionInfo.ip is null |
 | response | `session.sessionControlInfo.resourcePath` | string | /v2/session/<redacted-uuid> | session-control path, or rtsps:// URL once the seat is assigned (null before) |
-| response | `session.sessionControlInfo.usage` | int | 10 | port usage: 10 = session control, 14 = NVB_PU_RTSPS |
+| response | `session.sessionControlInfo.usage` | int | 10 | JSON port usage: 10 = session control, 14 = SIGNALING; native RTSPS is 10 |
 | response | `session.sessionControlInfo.port` | int | 443 | TCP port |
 | response | `session.connectionInfo[].protocol` | int | 1 | transport protocol enum (0 for control HTTPS, 1 for RTSPS) |
 | response | `session.connectionInfo[].appLevelProtocol` | int | 6 | 5 = CloudMatch HTTPS session control, 6 = RTSPS |
 | response | `session.connectionInfo[].ip` | null | null | host; sessionControlInfo.ip is the per-zone CloudMatch host, connectionInfo.ip is null |
 | response | `session.connectionInfo[].resourcePath` | null,string | null \| "rtsps://<redacted-ip>.cloudmatchbeta.nvidiagrid.net:322" \| "rtsps://<redacted-ip>. | session-control path, or rtsps:// URL once the seat is assigned (null before) |
-| response | `session.connectionInfo[].usage` | int | 14 | port usage: 10 = session control, 14 = NVB_PU_RTSPS |
+| response | `session.connectionInfo[].usage` | int | 14 | JSON port usage: 10 = session control, 14 = SIGNALING; native RTSPS is 10 |
 | response | `session.connectionInfo[].port` | int | 322 \| 48322 | TCP port |
 | response | `session.sessionRequestData.audioMode` | int | 0 | 2 = stereo per Geronimo 'AudioMode used for Start stream session: 2' |
 | response | `session.sessionRequestData.clientDisplayHdrCapabilities` | null | null | HDR caps of the display (null for SDR) |
@@ -224,7 +224,7 @@ Generated from `extracted/cloudmatch_fields.tsv` by `render.py`. Secrets are rep
 `otherUserSessions[]` repeats the `session` object shape (71 paths, same values as the pending session); it is omitted above.
 <!-- /GEN:cloudmatch_fields -->
 
-## Comparison with OpenNOW (`native/opennow-core/src/cloudmatch.rs`, branch dev @ b49ba395; line numbers approximate after #1165 landed in `7ce3cd54`)
+## Comparison with OpenNOW (`native/opennow-core/src/cloudmatch.rs`, frozen dev `7ce3cd54`)
 
 What matches: `clientIdentification "GFN-PC"`, `clientVersion "30.0"`, `sdkVersion "2.0"`, `streamerVersion "14"`, `useOps true`, `audioMode 2`, `secureRTSPSupported true`, `metaData` `wssignaling=1` and `surroundAudioInfo=2`, `requestedStreamingFeatures` core keys, `transport null` (`build_create_body`, cloudmatch.rs:1686-1724). The codec is also absent from the request on both sides.
 
@@ -238,5 +238,5 @@ What differs. These are **L** for the Windows side and read from code for the Op
 | `remoteControllersBitmap` | 1 | 0 (1 only in alliance WebRTC mode, cloudmatch.rs:1712/1731) | **U** |
 | `clientRequestMonitorSettings[].dpi` | 100 | 96 (144 on macOS) | **U** |
 | `userAge` | real account value (redacted) | constant 25 (cloudmatch.rs:1721) | **U** |
-| usage handling | consumes usage 14 RTSPS only; media port from SETUP Transport | prefers usage 2/17 for media (cloudmatch.rs:1806, 2010), falls back to usage-14 rtsps -> wss (cloudmatch.rs:1990-2006) | consistent for NVIDIA seats with no usage 2/17 |
-| polling host | `sessionControlInfo.ip` + `resourcePath` | `session_server_ip` prefers `sessionControlInfo.ip` (cloudmatch.rs:2425-2440) | matches |
+| usage handling | supplied sessions return JSON usage 14 SIGNALING only; media peer from SETUP. Static conversion supports more usages | prefers usage 2/17 for media (cloudmatch.rs:1806, 2010), falls back to usage-14 rtsps -> wss (cloudmatch.rs:1990-2006) | consistent for the observed NVIDIA shape; not proof of all-provider parity |
+| polling host/path | returned `sessionControlInfo.ip` and port; fixed `/v2/session/<id>`, not copied `resourcePath` | `session_server_ip` prefers `sessionControlInfo.ip` (cloudmatch.rs:2425-2440) | controlling-host policy agrees; native construction in `cloudmatch-native.md` |
