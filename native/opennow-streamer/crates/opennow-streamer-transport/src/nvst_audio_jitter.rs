@@ -112,7 +112,7 @@ impl AudioJitterBuffer {
         }
         self.late_burst = late;
         if self.deadline(timestamp).saturating_duration_since(now)
-            > Duration::from_millis(MAX_TARGET_MS)
+            > Duration::from_millis(self.target_ms + MAX_TARGET_MS)
         {
             self.stats.overflow += self.packets.len() as u64;
             self.packets.clear();
@@ -277,6 +277,79 @@ mod tests {
         assert_eq!(delivered, 201);
         assert_eq!(buffer.stats.underflows, 0);
         assert_eq!(buffer.len(), 0);
+    }
+
+    #[test]
+    fn full_timestamp_span_bursts_preserve_the_anchor_at_floor_and_ceiling() {
+        let origin = Instant::now();
+        for target_ms in [45, 200] {
+            let mut buffer = AudioJitterBuffer::new(48_000);
+            buffer.push(packet(0, 0), origin);
+            buffer.target_ms = target_ms;
+            for sequence in (1..=40).rev() {
+                buffer.push(packet(sequence, u32::from(sequence) * 240), origin);
+            }
+            assert_eq!(buffer.anchor, Some((42, 0, origin)));
+            assert_eq!(buffer.len(), 41);
+            assert_eq!(buffer.stats.overflow, 0);
+            assert_eq!(buffer.stats.underflows, 0);
+            for sequence in 0..=40 {
+                let deadline = origin + Duration::from_millis(target_ms + u64::from(sequence) * 5);
+                assert!(buffer.pop(deadline - Duration::from_micros(1)).is_none());
+                let frame = buffer.pop(deadline).unwrap();
+                assert_eq!(frame.header.sequence_number, sequence);
+                assert_eq!(frame.header.timestamp, u32::from(sequence) * 240);
+            }
+        }
+    }
+
+    #[test]
+    fn ceiling_target_preserves_queued_audio_on_a_one_millisecond_early_arrival() {
+        let origin = Instant::now();
+        let mut buffer = AudioJitterBuffer::new(48_000);
+        buffer.push(packet(0, 0), origin);
+        buffer.target_ms = 200;
+        for tick in 1..=998_u64 {
+            let now = origin + Duration::from_millis(tick);
+            if tick % 5 == 0 {
+                buffer.push(packet((tick / 5) as u16, tick as u32 * 48), now);
+            }
+            while buffer.pop(now).is_some() {}
+        }
+        assert_eq!(buffer.len(), 40);
+        buffer.push(packet(200, 48_000), origin + Duration::from_millis(999));
+        assert_eq!(buffer.anchor, Some((42, 0, origin)));
+        assert_eq!(buffer.len(), 41);
+        assert_eq!(buffer.stats.overflow, 0);
+        assert_eq!(buffer.stats.underflows, 0);
+        assert_eq!(
+            buffer
+                .pop(origin + Duration::from_millis(1000))
+                .unwrap()
+                .header
+                .sequence_number,
+            160
+        );
+    }
+
+    #[test]
+    fn media_time_jumps_beyond_the_span_limit_still_reanchor() {
+        let origin = Instant::now();
+        for target_ms in [45, 200] {
+            let mut buffer = AudioJitterBuffer::new(48_000);
+            buffer.push(packet(0, 0), origin);
+            buffer.target_ms = target_ms;
+            buffer.push(packet(1, 2400), origin);
+            buffer.push(packet(2, 201 * 48), origin);
+            assert_eq!(buffer.anchor, Some((42, 201 * 48, origin)));
+            assert_eq!(buffer.len(), 1);
+            assert_eq!(buffer.stats.overflow, 2);
+            let deadline = origin + Duration::from_millis(target_ms);
+            assert!(buffer.pop(deadline - Duration::from_micros(1)).is_none());
+            let frame = buffer.pop(deadline).unwrap();
+            assert_eq!(frame.header.sequence_number, 2);
+            assert_eq!(frame.header.timestamp, 201 * 48);
+        }
     }
 
     #[test]
