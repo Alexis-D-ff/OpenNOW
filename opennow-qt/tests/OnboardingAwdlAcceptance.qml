@@ -41,10 +41,13 @@ QtObject {
         acceptance.run(parent)
         const screen = acceptance.find(parent, "desktopOnboardingScreen")
         acceptance.check(screen, "AWDL fixture needs an onboarding screen")
-        screen.goToStep(3)
+        acceptance.check(screen.steps.indexOf("network") < 0, "unsupported AWDL showed the network check")
+        ShellStore.onboardingAwdlController = controller
+        acceptance.check(String(screen.steps) === "mode,picture,network,boost,ready",
+            "supported AWDL did not add the network check between Picture and Boost")
+        screen.goToStep(screen.steps.indexOf("network"))
         card = acceptance.find(screen, "onboardingMacNetwork")
         acceptance.check(card, "AWDL guidance card is missing")
-        ShellStore.onboardingAwdlController = controller
         if (Qt.application.arguments.indexOf("--onboarding-awdl-fullscreen") >= 0)
             parent.Window.window.showFullScreen()
         return true
@@ -96,21 +99,27 @@ QtObject {
         acceptance.check(controller.refreshRequests === reads + 1, "refresh did not recheck AWDL")
         controller.state = MacAwdlController.Unavailable
         acceptance.check(!change.enabled, "missing AWDL interface allowed a change")
+        const screen = acceptance.find(contentRoot, "desktopOnboardingScreen")
+        const network = screen.steps.indexOf("network")
         controller.state = MacAwdlController.Unsupported
-        acceptance.check(!card.visible, "AWDL guidance is visible on an unsupported platform")
+        acceptance.check(screen.steps.indexOf("network") < 0 && !acceptance.find(screen, "onboardingMacNetwork"),
+            "AWDL guidance is visible on an unsupported platform")
         controller.error = ""
         controller.state = MacAwdlController.Enabled
-        const screen = acceptance.find(contentRoot, "desktopOnboardingScreen")
+        screen.goToStep(network)
+        card = acceptance.find(contentRoot, "onboardingMacNetwork")
+        acceptance.check(card && card.visible, "AWDL guidance did not return with a supported controller")
+        const restored = acceptance.find(card, "onboardingAwdlChange")
         const scroll = acceptance.find(screen, "onboardingScroll")
-        change.forceActiveFocus(Qt.TabFocusReason)
+        restored.forceActiveFocus(Qt.TabFocusReason)
         screen.revealFocusedControl()
-        const point = change.mapToItem(scroll, 0, 0)
-        acceptance.check(point.y >= -1 && point.y + change.height <= scroll.height + 1,
+        const point = restored.mapToItem(scroll, 0, 0)
+        acceptance.check(point.y >= -1 && point.y + restored.height <= scroll.height + 1,
             "AWDL action is outside the focused viewport")
-        acceptance.check(point.x >= -1 && point.x + change.width <= scroll.width + 1,
+        acceptance.check(point.x >= -1 && point.x + restored.width <= scroll.width + 1,
             "AWDL action is horizontally clipped")
         if (Qt.application.arguments.indexOf("--onboarding-awdl-confirmation") >= 0)
-            change.clicked()
+            restored.clicked()
         return true
     }
 
@@ -118,21 +127,23 @@ QtObject {
         const screen = acceptance.find(contentRoot, "desktopOnboardingScreen")
         const owner = ShellStore.onboardingOwnerState
         const initialRequests = acceptance.client.requests.length
+        const network = screen.steps.indexOf("network")
+        const ready = screen.steps.indexOf("ready")
         for (const status of [MacAwdlController.Enabled, MacAwdlController.Unknown, MacAwdlController.Disabled]) {
             controller.state = status
             controller.busy = status === MacAwdlController.Disabled
             screen.goToStep(0)
             screen.skip()
-            acceptance.check(screen.stepIndex === 3 && !owner.saving && owner.needed,
+            acceptance.check(screen.stepIndex === network && !owner.saving && owner.needed,
                 "Skip bypassed the AWDL requirement in state " + status)
-            screen.goToStep(5)
+            screen.goToStep(ready)
             screen.next()
-            acceptance.check(screen.stepIndex === 3 && !owner.saving && owner.needed,
+            acceptance.check(screen.stepIndex === network && !owner.saving && owner.needed,
                 "Finish bypassed the AWDL requirement in state " + status)
             const next = acceptance.find(screen, "onboardingNext")
-            acceptance.check(!next.enabled, "Boost allowed Continue before the requirement was met")
+            acceptance.check(!next.enabled, "Network check allowed Continue before the requirement was met")
             screen.next()
-            acceptance.check(screen.stepIndex === 3, "keyboard Continue bypassed the AWDL requirement")
+            acceptance.check(screen.stepIndex === network, "keyboard Continue bypassed the AWDL requirement")
         }
         acceptance.check(acceptance.client.requests.length === initialRequests,
             "blocked completion wrote settings")
@@ -149,12 +160,12 @@ QtObject {
             "Skip trusted stale down status instead of refreshing")
         controller.state = MacAwdlController.Disabled
         owner.setSetting("fps", 120)
-        screen.goToStep(5)
+        screen.goToStep(ready)
         screen.next()
         acceptance.check(owner.saving, "down AWDL did not allow settings persistence")
         controller.nextState = MacAwdlController.Enabled
         acceptance.acknowledge()
-        acceptance.check(!owner.saving && owner.needed && screen.stepIndex === 3,
+        acceptance.check(!owner.saving && owner.needed && screen.stepIndex === network,
             "AWDL re-enabled during saving did not block completion")
         acceptance.check(acceptance.client.requests.length === initialRequests + 1,
             "re-enabled AWDL allowed the completion-marker write")

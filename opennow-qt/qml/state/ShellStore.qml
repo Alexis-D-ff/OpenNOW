@@ -146,8 +146,8 @@ QtObject {
         if (onboardingAwdlController.busy)
             return qsTr("Wait for macOS authorization to finish before continuing setup.")
         if (onboardingAwdlController.state === MacAwdlController.Unknown)
-            return qsTr("AWDL status could not be verified. Refresh its status in Boost before continuing setup.")
-        return qsTr("Disable AWDL in Boost before continuing setup on this Mac.")
+            return qsTr("AWDL status could not be verified. Refresh its status in the network check before continuing setup.")
+        return qsTr("Disable AWDL in the network check before continuing setup on this Mac.")
     }
 
     function verifyOnboardingRequirements() {
@@ -159,6 +159,10 @@ QtObject {
         if (key === "resolution" || key === "fps")
             onboardingOwner.setSetting("fps", settingsOwner.resolveEntitledFps(
                 onboardingSettings.resolution, onboardingSettings.fps))
+    }
+
+    function resetOnboardingSettings(keys) {
+        onboardingOwner.resetSettings(keys)
     }
 
     function finishOnboarding() {

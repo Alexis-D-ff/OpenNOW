@@ -1,8 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
-import QtQuick.Shapes
 import OpenNOW
 
 Column {
@@ -11,8 +9,6 @@ Column {
     readonly property var settings: store.onboardingSettings
     readonly property bool upscalingEnabled: settings.upscaling === (mac ? "metalfx" : "fsr1")
     readonly property bool mac: Qt.platform.os === "osx"
-    readonly property bool wide: width >= DesktopTokens.px(1000)
-    readonly property color mint: Theme.accentColor("green")
     readonly property color blue: Theme.accentColor("blue")
     readonly property color panelColor: Theme.lightMode ? Theme.glass : "#C70B0F1A"
     spacing: DesktopTokens.px(24)
@@ -31,25 +27,6 @@ Column {
         font.pixelSize: DesktopTokens.px(10)
         font.weight: Font.Bold
         font.letterSpacing: DesktopTokens.px(1)
-    }
-    component DashedOutline: Shape {
-        id: outline
-        property color ink: Theme.seam
-        property real cornerRadius: DesktopTokens.px(6)
-        ShapePath {
-            strokeColor: outline.ink; strokeWidth: 1; strokeStyle: ShapePath.DashLine
-            dashPattern: [2, 2]; fillColor: "transparent"
-            PathSvg {
-                path: {
-                    const w = outline.width - 1
-                    const h = outline.height - 1
-                    const r = outline.cornerRadius
-                    return "M " + r + " 1 H " + (w-r) + " Q " + w + " 1 " + w + " " + r
-                        + " V " + (h-r) + " Q " + w + " " + h + " " + (w-r) + " " + h
-                        + " H " + r + " Q 1 " + h + " 1 " + (h-r) + " V " + r + " Q 1 1 " + r + " 1 Z"
-                }
-            }
-        }
     }
     component Badge: Rectangle {
         property alias text: label.text
@@ -92,28 +69,6 @@ Column {
             }
         }
     }
-    component Checker: Rectangle {
-        id: checker
-        property bool enhanced: false
-        width: DesktopTokens.px(56); height: width
-        radius: DesktopTokens.px(8)
-        color: DesktopTokens.raised
-        border.color: Theme.seam
-        Grid {
-            anchors.fill: parent; anchors.margins: DesktopTokens.px(2)
-            columns: checker.enhanced ? 6 : 4
-            Repeater {
-                model: checker.enhanced ? 36 : 16
-                Rectangle {
-                    required property int index
-                    readonly property int count: checker.enhanced ? 6 : 4
-                    width: (checker.width - DesktopTokens.px(4)) / count; height: width
-                    color: checker.enhanced ? root.blue : Theme.label
-                    opacity: (Math.floor(index / count) + index) % 2 === 0 ? 0.18 : 0.06
-                }
-            }
-        }
-    }
     component TuningSlider: Row {
         id: control
         property alias from: slider.from
@@ -150,221 +105,118 @@ Column {
         }
     }
 
-    DesktopOnboardingNetwork { width: parent.width; controller: root.store.onboardingAwdlController }
-
-    GridLayout {
-        width: parent.width
-        columns: root.wide ? 2 : 1
-        columnSpacing: DesktopTokens.px(24); rowSpacing: DesktopTokens.px(24)
-
+    component BoostRow: Item {
+        id: boostRow
+        property string title
+        property string description
+        property string glyph
+        property string badge
+        property color badgeInk: Theme.textMuted
+        property bool divider: true
+        default property alias control: controlSlot.data
+        readonly property bool stacked: width < DesktopTokens.px(600)
+        implicitHeight: Math.max(DesktopTokens.px(68), labels.implicitHeight + DesktopTokens.px(28))
+            + (stacked ? controlSlot.implicitHeight + DesktopTokens.px(12) : 0)
         Rectangle {
-            id: generationCard
-            Layout.fillWidth: true; Layout.preferredWidth: DesktopTokens.px(546); Layout.minimumWidth: 0
-            Layout.alignment: Qt.AlignTop
-            implicitHeight: generationContents.implicitHeight + DesktopTokens.px(4)
-            color: root.panelColor; radius: DesktopTokens.px(16)
-            border.width: root.settings.frameGeneration === "2x" ? DesktopTokens.px(2) : 1
-            border.color: root.settings.frameGeneration === "2x" ? root.mint : Theme.seam
-            Column {
-                id: generationContents
-                x: DesktopTokens.px(2); y: DesktopTokens.px(2); width: parent.width - DesktopTokens.px(4)
-                Item {
-                    width: parent.width; height: DesktopTokens.px(113)
-                    RowLayout {
-                        x: DesktopTokens.px(20); y: DesktopTokens.px(20); width: parent.width - DesktopTokens.px(40)
-                        Eyebrow { text: qsTr("2× FRAME PATTERN"); Layout.fillWidth: true }
-                        Row {
-                            spacing: DesktopTokens.px(6)
-                            Rectangle { width: DesktopTokens.px(10); height: width; color: DesktopTokens.raisedStrong }
-                            Text { text: qsTr("stream"); color: Theme.textMuted; font.family: Theme.monoFont; font.pixelSize: DesktopTokens.px(10) }
-                            Rectangle { width: DesktopTokens.px(10); height: width; color: "transparent"; border.color: root.mint }
-                            Text { text: qsTr("generated"); color: Theme.textMuted; font.family: Theme.monoFont; font.pixelSize: DesktopTokens.px(10) }
-                        }
-                    }
-                    Row {
-                        x: DesktopTokens.px(20); y: DesktopTokens.px(42); width: parent.width - DesktopTokens.px(40)
-                        spacing: DesktopTokens.px(5)
-                        Repeater {
-                            model: 12
-                            Rectangle {
-                                required property int index
-                                width: (parent.width - DesktopTokens.px(5) * 11) / 12
-                                height: DesktopTokens.px(56); radius: DesktopTokens.px(6)
-                                color: index % 2 === 0 ? DesktopTokens.raisedStrong : Qt.rgba(root.mint.r, root.mint.g, root.mint.b, 0.08)
-                                DashedOutline { anchors.fill: parent; visible: parent.index % 2 !== 0; ink: Qt.rgba(root.mint.r, root.mint.g, root.mint.b, 0.7) }
-                            }
-                        }
-                    }
-                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: DesktopTokens.seamSoft }
-                }
-                Column {
-                    id: generationBody
-                    x: DesktopTokens.px(20); width: parent.width - DesktopTokens.px(40)
-                    topPadding: DesktopTokens.px(18); bottomPadding: DesktopTokens.px(20)
-                    spacing: DesktopTokens.px(14)
-                    GridLayout {
-                        width: parent.width; columns: width < DesktopTokens.px(450) ? 1 : 2
-                        columnSpacing: DesktopTokens.px(16); rowSpacing: DesktopTokens.px(10)
-                        Column {
-                            Layout.fillWidth: true; Layout.minimumWidth: 0
-                            spacing: DesktopTokens.px(4)
-                            Flow {
-                                width: parent.width; spacing: DesktopTokens.px(8)
-                                Copy { text: qsTr("Frame generation"); color: Theme.label; font.pixelSize: DesktopTokens.px(20); font.weight: Font.Black }
-                                Badge { text: qsTr("EXPERIMENTAL"); ink: Theme.accentColor("amber") }
-                            }
-                            Copy {
-                                width: parent.width
-                                text: qsTr("Generate intermediate frames on your device. Needs a fast GPU and a high-refresh display. May add latency and visual artifacts.")
-                            }
-                        }
-                        Segments {
-                            objectName: "onboardingFrameGeneration"
-                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            implicitHeight: DesktopTokens.px(36)
-                            options: [{label:qsTr("Off"),value:"off"},{label:qsTr("2×"),value:"2x"}]
-                            selectedIndex: root.settings.frameGeneration === "2x" ? 1 : 0
-                            optionWidth: 56
-                            onSelected: (index, item) => root.store.setOnboardingSetting("frameGeneration", item.value)
-                        }
-                    }
-                    Row {
-                        width: parent.width; spacing: DesktopTokens.px(10)
-                        Repeater {
-                            model: [
-                                {title:qsTr("2×"),caption:qsTr("illustrated pattern"),ink:root.mint},
-                                {title:qsTr("Latency"),caption:qsTr("may increase"),ink:Theme.accentColor("amber")},
-                                {title:qsTr("GPU"),caption:qsTr("post-decode, on device"),ink:Theme.label}
-                            ]
-                            Rectangle {
-                                id: tradeoff
-                                required property var modelData
-                                width: (parent.width - DesktopTokens.px(20)) / 3
-                                height: DesktopTokens.px(54); radius: DesktopTokens.px(10)
-                                color: DesktopTokens.seamSoft
-                                Column {
-                                    x: DesktopTokens.px(12); y: DesktopTokens.px(8); width: parent.width - DesktopTokens.px(24)
-                                    spacing: DesktopTokens.px(2)
-                                    Text { width: parent.width; text: tradeoff.modelData.title; color: tradeoff.modelData.ink; font.family: Theme.monoFont; font.pixelSize: DesktopTokens.px(14); font.weight: Font.Bold; elide: Text.ElideRight }
-                                    Copy { width: parent.width; text: tradeoff.modelData.caption; font.pixelSize: DesktopTokens.px(11); lineHeight: DesktopTokens.px(14); elide: Text.ElideRight; maximumLineCount: 1 }
-                                }
-                            }
-                        }
-                    }
-                }
-                Item {
-                    width: parent.width; height: Math.max(DesktopTokens.px(59), generationNote.implicitHeight + DesktopTokens.px(26))
-                    Rectangle { width: parent.width; height: 1; color: DesktopTokens.seamSoft }
-                    DesktopSettingsIcon { x: DesktopTokens.px(20); anchors.verticalCenter: parent.verticalCenter; width: DesktopTokens.px(16); height: width; glyph: "info"; ink: Theme.textMuted }
-                    Copy {
-                        id: generationNote
-                        x: DesktopTokens.px(48); anchors.verticalCenter: parent.verticalCenter; width: parent.width - x - DesktopTokens.px(20)
-                        font.pixelSize: DesktopTokens.px(12)
-                        text: qsTr("Off by default. The diagram illustrates 2× generation, not measured performance. You can try this later in Stream settings.")
-                    }
-                }
-            }
+            x: DesktopTokens.px(18)
+            y: boostRow.stacked ? DesktopTokens.px(16) : (parent.height - height) / 2
+            width: DesktopTokens.px(36); height: width
+            radius: DesktopTokens.px(10); color: DesktopTokens.raised
+            opacity: boostRow.enabled ? 1 : 0.45
+            DesktopSettingsIcon { anchors.centerIn: parent; width: DesktopTokens.px(16); height: width; glyph: boostRow.glyph; ink: Theme.label }
         }
-
-        Rectangle {
-            id: upscalingCard
-            Layout.fillWidth: true; Layout.preferredWidth: DesktopTokens.px(546); Layout.minimumWidth: 0
-            Layout.alignment: Qt.AlignTop
-            implicitHeight: Math.max(DesktopTokens.px(366), upscaleContents.implicitHeight + DesktopTokens.px(2))
-            Layout.minimumHeight: root.wide ? generationCard.implicitHeight : 0
-            radius: DesktopTokens.px(16); border.color: Theme.seam; border.width: 1
-            color: root.panelColor
-            Column {
-                id: upscaleContents
-                x: 1; y: 1; width: parent.width - 2
-                Item {
-                    width: parent.width; height: DesktopTokens.px(126)
-                    RowLayout {
-                        x: DesktopTokens.px(20); y: DesktopTokens.px(20); width: parent.width - DesktopTokens.px(40)
-                        Eyebrow { text: qsTr("SPATIAL UPSCALING"); Layout.fillWidth: true }
-                        Badge { text: root.mac ? qsTr("macOS ONLY") : qsTr("SDR ONLY"); ink: root.blue }
-                    }
-                    Row {
-                        x: DesktopTokens.px(20); y: DesktopTokens.px(54); spacing: DesktopTokens.px(10)
-                        Checker {}
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: qsTr("bilinear"); color: Theme.textMuted; font.family: Theme.monoFont; font.pixelSize: DesktopTokens.px(10) }
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: "⟶"; color: Theme.textMuted; font.pixelSize: DesktopTokens.px(30) }
-                        Checker { enhanced: true }
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.mac ? qsTr("MetalFX spatial") : "FSR 1"; color: root.blue; font.family: Theme.monoFont; font.pixelSize: DesktopTokens.px(10) }
-                    }
-                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: DesktopTokens.seamSoft }
-                }
-                Item {
-                    width: parent.width; implicitHeight: upscaleBody.implicitHeight + DesktopTokens.px(36)
-                    GridLayout {
-                        id: upscaleBody
-                        x: DesktopTokens.px(20); y: DesktopTokens.px(18); width: parent.width - DesktopTokens.px(40)
-                        columns: width < DesktopTokens.px(450) ? 1 : 2
-                        columnSpacing: DesktopTokens.px(16); rowSpacing: DesktopTokens.px(10)
-                        Column {
-                            Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: DesktopTokens.px(4)
-                            Copy { text: qsTr("Upscaling"); color: Theme.label; font.pixelSize: DesktopTokens.px(20); font.weight: Font.Black }
-                            Copy { width: parent.width; text: root.mac
-                                ? qsTr("Spatial upscaling for enlarged video. Uses extra GPU time and falls back to normal scaling when MetalFX is unavailable.")
-                                : qsTr("FSR 1 upscales enlarged SDR video on the GPU. Uses extra GPU time; HDR and unavailable effects use normal scaling.") }
-                        }
-                        Segments {
-                            objectName: "onboardingUpscaling"
-                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            implicitHeight: DesktopTokens.px(36)
-                            options: [{label:qsTr("Off"),value:"off"},{label:root.mac ? "MetalFX" : "FSR 1",value:root.mac ? "metalfx" : "fsr1"}]
-                            optionWidth: 70
-                            selectedIndex: root.upscalingEnabled ? 1 : 0
-                            onSelected: (index, item) => root.store.setOnboardingSetting("upscaling", item.value)
-                        }
-                    }
-                }
-                Repeater {
-                    model: [{key:"upscalingSharpness",label:qsTr("Clarity"),description:root.mac ? qsTr("Sharpen details before upscaling. 0 disables.") : qsTr("Sharpen details after FSR 1 upscaling. Set to 0 to disable."),maximum:15,fallback:10},
-                        ...(root.mac ? [{key:"upscalingDenoise",label:qsTr("Noise reduction"),description:qsTr("Smooth noise before upscaling. 0 disables."),maximum:20,fallback:0}] : [])]
-                    delegate: Item {
-                        id: tuningControl
-                        required property var modelData
-                        width: parent.width
-                        implicitHeight: Math.max(DesktopTokens.px(60), tuningRow.implicitHeight + DesktopTokens.px(24))
-                        Rectangle { width: parent.width; height: 1; color: DesktopTokens.seamSoft }
-                        RowLayout {
-                            id: tuningRow
-                            x: DesktopTokens.px(20); anchors.verticalCenter: parent.verticalCenter; width: parent.width - DesktopTokens.px(40)
-                            spacing: DesktopTokens.px(16)
-                            enabled: root.upscalingEnabled; opacity: enabled ? 1 : 0.45
-                            Column {
-                                Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: DesktopTokens.px(3)
-                                Copy { width: parent.width; text: tuningControl.modelData.label; color: Theme.label; font.weight: Font.ExtraBold }
-                                Copy { width: parent.width; text: tuningControl.modelData.description; font.pixelSize: DesktopTokens.px(12) }
-                            }
-                            TuningSlider {
-                                objectName: "onboarding-" + tuningControl.modelData.key
-                                accessibleName: tuningControl.modelData.label
-                                trackWidth: Math.max(DesktopTokens.px(70), Math.min(DesktopTokens.px(150), tuningControl.width - DesktopTokens.px(400)))
-                                from: 0; to: tuningControl.modelData.maximum; stepSize: 1; suffix: ""
-                                value: Number(root.settings[tuningControl.modelData.key] ?? tuningControl.modelData.fallback)
-                                onMoved: value => root.store.setOnboardingSetting(tuningControl.modelData.key, Math.round(value))
-                            }
-                        }
-                    }
-                }
+        Column {
+            id: labels
+            x: DesktopTokens.px(68)
+            y: boostRow.stacked ? DesktopTokens.px(14) : (parent.height - height) / 2
+            width: parent.width - x - DesktopTokens.px(18) - (boostRow.stacked ? 0 : controlSlot.width + DesktopTokens.px(14))
+            spacing: DesktopTokens.px(3)
+            opacity: boostRow.enabled ? 1 : 0.45
+            Flow {
+                width: parent.width
+                spacing: DesktopTokens.px(8)
+                Copy { text: boostRow.title; color: Theme.label; font.pixelSize: DesktopTokens.px(14); font.weight: Font.ExtraBold; height: DesktopTokens.px(22); verticalAlignment: Text.AlignVCenter }
+                Badge { visible: boostRow.badge !== ""; text: boostRow.badge; ink: boostRow.badgeInk; implicitHeight: DesktopTokens.px(22) }
             }
+            Copy { width: parent.width; text: boostRow.description; font.pixelSize: DesktopTokens.px(12) }
         }
+        Row {
+            id: controlSlot
+            anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(18)
+            y: boostRow.stacked ? labels.y + labels.height + DesktopTokens.px(12) : (parent.height - height) / 2
+            spacing: DesktopTokens.px(8)
+        }
+        Rectangle { visible: boostRow.divider; anchors.bottom: parent.bottom; width: parent.width; height: 1; color: DesktopTokens.seamSoft }
     }
 
     Rectangle {
-        width: parent.width
-        implicitHeight: Math.max(DesktopTokens.px(48), hints.implicitHeight + DesktopTokens.px(24))
-        radius: DesktopTokens.px(14); color: Theme.lightMode ? Theme.glass : "#B80B0F1A"; border.color: DesktopTokens.seamSoft
-        Flow {
-            id: hints
-            x: DesktopTokens.px(18); y: DesktopTokens.px(12); width: parent.width - DesktopTokens.px(36)
-            spacing: DesktopTokens.px(12)
-            Badge { text: String(root.settings.shortcutToggleStats ?? "Ctrl+N"); visible: text !== "" }
-            Copy { height: Math.max(DesktopTokens.px(24), implicitHeight); verticalAlignment: Text.AlignVCenter; text: qsTr("Check stream statistics mid-game to compare received and displayed FPS."); font.pixelSize: DesktopTokens.px(12); width: Math.min(implicitWidth, hints.width) }
-            Badge { text: "Ctrl G" }
-            Copy { height: Math.max(DesktopTokens.px(24), implicitHeight); verticalAlignment: Text.AlignVCenter; text: qsTr("Open the stream menu without leaving your game."); font.pixelSize: DesktopTokens.px(12); width: Math.min(implicitWidth, hints.width) }
+        objectName: "onboardingBoostPanel"
+        width: Math.min(parent.width, DesktopTokens.px(860))
+        anchors.horizontalCenter: parent.horizontalCenter
+        implicitHeight: rows.implicitHeight
+        radius: DesktopTokens.px(16); color: root.panelColor; border.color: Theme.seam
+        Column {
+            id: rows
+            width: parent.width
+            BoostRow {
+                width: parent.width; glyph: "bolt"
+                title: qsTr("Frame generation"); badge: qsTr("EXPERIMENTAL"); badgeInk: Theme.accentColor("amber")
+                description: qsTr("Generates in-between frames. Needs a fast GPU and a high-refresh display; may add latency and visual artifacts.")
+                Segments {
+                    objectName: "onboardingFrameGeneration"
+                    options: [{label:qsTr("Off"),value:"off"},{label:qsTr("2×"),value:"2x"}]
+                    selectedIndex: root.settings.frameGeneration === "2x" ? 1 : 0
+                    optionWidth: 56
+                    onSelected: (index, item) => root.store.setOnboardingSetting("frameGeneration", item.value)
+                }
+            }
+            BoostRow {
+                width: parent.width; glyph: "monitor"
+                title: qsTr("Upscaling"); badge: root.mac ? qsTr("macOS ONLY") : qsTr("SDR ONLY"); badgeInk: root.blue
+                description: root.mac
+                    ? qsTr("MetalFX spatial upscaling for enlarged video. Falls back to normal scaling when MetalFX is unavailable.")
+                    : qsTr("FSR 1 sharpens enlarged SDR video on the GPU.")
+                Segments {
+                    objectName: "onboardingUpscaling"
+                    options: [{label:qsTr("Off"),value:"off"},{label:root.mac ? "MetalFX" : "FSR 1",value:root.mac ? "metalfx" : "fsr1"}]
+                    optionWidth: 70
+                    selectedIndex: root.upscalingEnabled ? 1 : 0
+                    onSelected: (index, item) => root.store.setOnboardingSetting("upscaling", item.value)
+                }
+            }
+            Repeater {
+                model: [{key:"upscalingSharpness",label:qsTr("Clarity"),glyph:"sun",description:root.mac ? qsTr("Sharpen details before upscaling. 0 disables.") : qsTr("Sharpen details after FSR 1 upscaling. Set to 0 to disable."),maximum:15,fallback:10},
+                    ...(root.mac ? [{key:"upscalingDenoise",label:qsTr("Noise reduction"),glyph:"drop",description:qsTr("Smooth noise before upscaling. 0 disables."),maximum:20,fallback:0}] : [])]
+                delegate: BoostRow {
+                    id: tuningControl
+                    required property var modelData
+                    width: parent.width; glyph: modelData.glyph
+                    title: modelData.label; description: modelData.description
+                    enabled: root.upscalingEnabled
+                    TuningSlider {
+                        objectName: "onboarding-" + tuningControl.modelData.key
+                        accessibleName: tuningControl.modelData.label
+                        opacity: tuningControl.enabled ? 1 : 0.45
+                        trackWidth: Math.max(DesktopTokens.px(70), Math.min(DesktopTokens.px(150), tuningControl.width - DesktopTokens.px(400)))
+                        from: 0; to: tuningControl.modelData.maximum; stepSize: 1; suffix: ""
+                        value: Number(root.settings[tuningControl.modelData.key] ?? tuningControl.modelData.fallback)
+                        onMoved: value => root.store.setOnboardingSetting(tuningControl.modelData.key, Math.round(value))
+                    }
+                }
+            }
+            Item {
+                width: parent.width
+                implicitHeight: Math.max(DesktopTokens.px(52), hint.implicitHeight + DesktopTokens.px(24))
+                DesktopSettingsIcon { x: DesktopTokens.px(18); anchors.verticalCenter: parent.verticalCenter; width: DesktopTokens.px(14); height: width; glyph: "info"; ink: Theme.textMuted }
+                Copy {
+                    id: hint
+                    x: DesktopTokens.px(44); anchors.verticalCenter: parent.verticalCenter; width: parent.width - x - DesktopTokens.px(18)
+                    font.pixelSize: DesktopTokens.px(12)
+                    text: String(root.settings.shortcutToggleStats ?? "Ctrl+N") !== ""
+                        ? qsTr("Check the effect mid-game with %1 (stream statistics) and change it from the %2 stream menu.").arg(String(root.settings.shortcutToggleStats ?? "Ctrl+N")).arg("Ctrl+G")
+                        : qsTr("Change it mid-game from the %1 stream menu.").arg("Ctrl+G")
+                }
+            }
         }
     }
 }

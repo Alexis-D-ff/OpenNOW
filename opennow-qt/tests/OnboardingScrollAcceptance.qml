@@ -18,7 +18,7 @@ QtObject {
         const login = Qt.application.arguments.indexOf("--onboarding-login") >= 0
         const screen = acceptance.find(contentRoot, login ? "desktopSignInScreen" : "desktopOnboardingScreen")
         const scroll = acceptance.find(screen, login ? "signInScroll" : "onboardingScroll")
-        const page = login ? scroll.contentItem : acceptance.find(screen, "onboardingStepLoader").item
+        const page = login ? scroll.contentItem : acceptance.find(screen, "onboardingPageBody")
         if (login) {
             for (const name of ["signInProviderName", "signInProviderRegion"]) {
                 const label = acceptance.find(screen, name)

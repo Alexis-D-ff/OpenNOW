@@ -33,12 +33,14 @@ capture() {
     printf '%s\n' "$output/$name.png"
 }
 
-for step in {0..5}; do
+for step in {0..3}; do
     capture "desktop-$step" --smoke-width 1440 --smoke-height 900 --onboarding-step "$step"
     capture "compact-$step" --smoke-width 960 --smoke-height 540 --onboarding-ui-scale 1.25 --onboarding-step "$step"
     capture "scrolled-$step" --smoke-width 960 --smoke-height 540 --onboarding-ui-scale 1.25 --onboarding-step "$step" --onboarding-scroll-check
     capture "light-$step" --smoke-width 1440 --smoke-height 900 --smoke-light-theme --onboarding-step "$step"
 done
+capture network --smoke-width 1440 --smoke-height 900 --onboarding-awdl-check --onboarding-step 2
+capture network-compact --smoke-width 960 --smoke-height 540 --onboarding-ui-scale 1.25 --onboarding-awdl-check --onboarding-step 2
 capture login --smoke-width 1440 --smoke-height 900 --onboarding-login
 capture login-compact --smoke-width 960 --smoke-height 540 --onboarding-login
 capture login-scrolled --smoke-width 960 --smoke-height 540 --onboarding-login --onboarding-scroll-check
