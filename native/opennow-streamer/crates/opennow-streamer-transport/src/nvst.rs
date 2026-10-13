@@ -10270,26 +10270,13 @@ mod tests {
         let (event_sender, event_receiver) = mpsc::channel();
         let attempts = Arc::new(Mutex::new(Vec::new()));
         let worker_attempts = attempts.clone();
+        let mut sequence = 1;
         let session = spawn_video_with_keepalive_fault(
             client,
             config,
             media_consumer,
             event_sender,
             move |_, _, _| {
-                worker_attempts.lock().unwrap().push(Instant::now());
-                Err(std::io::Error::from_raw_os_error(10055))
-            },
-        );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut sequence = 1;
-        let mut frames = 0;
-        let mut awaiting_frame = false;
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "persistent failures must terminate"
-            );
-            if !awaiting_frame {
                 let packet = protect_for_test(
                     &srtp,
                     build_plaintext_rtp(
@@ -10301,8 +10288,19 @@ mod tests {
                     0,
                 );
                 server.send_to(&packet, client_address).unwrap();
-                awaiting_frame = true;
-            }
+                sequence += 1;
+                worker_attempts.lock().unwrap().push(Instant::now());
+                Err(std::io::Error::from_raw_os_error(10055))
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        thread::sleep(budget + PING_INTERVAL_AFTER_CONNECTION);
+        let mut frames = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "persistent failures must terminate"
+            );
             if let Ok(event) = event_receiver.recv_timeout(PING_INTERVAL_BEFORE_CONNECTION) {
                 assert!(
                     matches!(
@@ -10320,13 +10318,15 @@ mod tests {
                 break;
             }
             for frame in media_receiver.try_iter() {
-                assert_eq!(frame.frame_index, Some(u32::from(sequence)));
                 frames += 1;
-                sequence += 1;
-                awaiting_frame = false;
+                assert_eq!(frame.frame_index, Some(frames));
             }
         }
         session.stop();
+        for frame in media_receiver.try_iter() {
+            frames += 1;
+            assert_eq!(frame.frame_index, Some(frames));
+        }
         let attempts = attempts.lock().unwrap();
         assert!(
             frames > 0,
