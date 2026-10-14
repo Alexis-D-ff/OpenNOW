@@ -14,6 +14,7 @@ FocusScope {
     readonly property var accounts: ShellStore.savedAccounts || []
     readonly property int itemCount: accounts.length + 1
     readonly property bool compact: accounts.length >= 6
+    readonly property bool tightPicker: !consoleMode && stage.height > 0 && stage.height < u(560)
     readonly property real tileSize: consoleMode ? (compact ? 150 : 196) : (compact ? 132 : 168)
     readonly property real cellWidth: u(tileSize + (compact ? 16 : 32))
     readonly property real cellGap: u(compact ? 20 : consoleMode ? 36 : 28)
@@ -381,7 +382,7 @@ FocusScope {
                 objectName: "accountPickerHeading"
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: root.u(10)
-                bottomPadding: root.u(root.compact ? 36 : 56)
+                bottomPadding: stage.height < root.u(560) ? root.u(8) : root.u(root.compact ? 36 : 56)
                 Text {
                     visible: !root.consoleMode
                     anchors.horizontalCenter: parent.horizontalCenter
@@ -399,12 +400,13 @@ FocusScope {
                     text: qsTr("Who’s playing?")
                     color: DesktopTokens.text
                     font.family: DesktopTokens.displayFont
-                    font.pixelSize: root.u(root.consoleMode ? 64 : root.compact ? 44 : 56)
+                    font.pixelSize: root.u(root.consoleMode ? 64 : root.tightPicker ? 32 : root.compact ? 44 : 56)
                     font.weight: Font.Black
                     font.letterSpacing: -root.u(root.consoleMode ? 1.28 : root.compact ? 0.88 : 1.12)
                     Accessible.role: Accessible.Heading
                 }
                 Text {
+                    visible: !root.tightPicker
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: Math.min(implicitWidth, root.width - root.u(64))
                     horizontalAlignment: Text.AlignHCenter
@@ -431,7 +433,7 @@ FocusScope {
                     const capped = Math.min(tiles.height, rowHeight * Math.min(rows, 2) + root.u(28))
                     const reserved = headingBlock.height + noticeBlock.height + actionBlock.height + root.u(12)
                     const room = Math.max(0, stage.height - reserved)
-                    return Math.max(root.u(96), Math.min(capped + root.u(16), room))
+                    return Math.min(capped + root.u(16), room)
                 }
                 contentWidth: width
                 contentHeight: tiles.height + root.u(16)
@@ -500,7 +502,8 @@ FocusScope {
                 readonly property bool noticeShown: focusStrip.visible || root.switching || ShellStore.accountMessage !== ""
                     || root.currentAccount !== null && root.currentAccount.needsSignIn === true && !root.manageMode
                 width: parent.width
-                height: root.u(noticeShown ? 92 : 44)
+                height: root.tightPicker && focusStrip.visible && !root.switching ? 0 : root.u(noticeShown ? 92 : 44)
+                visible: height > 0
 
                 Row {
                     id: focusStrip

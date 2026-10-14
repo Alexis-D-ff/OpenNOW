@@ -58,8 +58,12 @@ static bool accountChromeFits(QQuickWindow *window)
         const auto stageRect = sceneRect(stage);
         const auto gridRect = sceneRect(grid);
         const auto headingRect = sceneRect(heading);
-        if (headingRect.top() < -1 || headingRect.bottom() > window->height() + 1
-                || gridRect.top() < stageRect.top() - 1 || gridRect.bottom() > stageRect.bottom() + 1) {
+        auto *manage = picker->findChild<QQuickItem *>(u"accountManageButton"_s);
+        const auto manageRect = manage && manage->isVisible() ? sceneRect(manage) : QRectF();
+        if (grid->height() < 100 || headingRect.top() < -1 || headingRect.bottom() > window->height() + 1
+                || gridRect.top() < stageRect.top() - 1 || gridRect.bottom() > stageRect.bottom() + 1
+                || (manage && manage->isVisible()
+                    && (manageRect.top() < stageRect.top() - 1 || manageRect.bottom() > stageRect.bottom() + 1))) {
             qCritical("Account picker chrome leaves the window");
             return false;
         }
@@ -69,6 +73,17 @@ static bool accountChromeFits(QQuickWindow *window)
         if (rect.top() < -1 || rect.bottom() > window->height() + 1 || rect.right() > window->width() + 1) {
             qCritical("Account switcher leaves the window");
             return false;
+        }
+        auto *switcher = window->findChild<QQuickItem *>(u"desktopAccountSwitcher"_s);
+        auto *tiles = window->findChild<QQuickItem *>(u"accountSwitcherTiles"_s);
+        if (switcher && tiles && tiles->property("contentHeight").toReal() > tiles->height() + 1) {
+            switcher->setProperty("currentIndex", 0);
+            tiles->setProperty("contentY", 0);
+            switcher->setProperty("currentIndex", switcher->property("tileCount").toInt() - 1);
+            if (tiles->property("contentY").toReal() <= 0) {
+                qCritical("Switcher keyboard focus stays outside the tile list");
+                return false;
+            }
         }
     }
     return true;

@@ -33,6 +33,8 @@ FocusScope {
         : String(activeUser && activeUser.membershipTier || "").toUpperCase()
     readonly property int columns: 5
     signal closeRequested()
+    onCurrentIndexChanged: if (opened && currentIndex >= 0 && currentIndex < tileCount)
+        switcherTiles.reveal(currentIndex)
 
     visible: reveal.present
     enabled: opened
@@ -235,11 +237,23 @@ FocusScope {
                     interactive: contentHeight > height + 1
                     height: Math.min(switcherTileFlow.implicitHeight,
                         Math.max(root.u(86), root.height - root.u(348)))
+                    function reveal(index) {
+                        const item = switcherTileRepeater.itemAt(index)
+                        if (!item || contentHeight <= height)
+                            return
+                        const top = item.y
+                        const bottom = item.y + item.height
+                        if (top < contentY)
+                            contentY = top
+                        else if (bottom > contentY + height)
+                            contentY = Math.max(0, bottom - height)
+                    }
                     Flow {
                     id: switcherTileFlow
                     width: parent.width
                     spacing: root.u(2)
                     Repeater {
+                        id: switcherTileRepeater
                         model: root.tileCount
                         DesktopAccountTile {
                             required property int index
