@@ -47,11 +47,11 @@ It uses fixed system command paths and starts its installer shell with an empty
 environment and a fixed `PATH`, rather than inheriting shell or Perl startup overrides.
 
 The staging copy is capped at 32 MiB and must match the captured size and hash.
-The shell checks that the snapshot is a regular, non-symlink file, but a malicious
-process with the same user identity can replace it between that check and the copy.
-Replacing it with a FIFO can stall the privileged copy. The client times out its
-authorization request, but termination of that privileged copy needs real macOS
-validation. This does not let altered bytes pass verification or select a root command.
+The fixed copy program uses the system Perl, which is also used by the system
+SHA-256 tool. It opens the snapshot with `O_NOFOLLOW` and `O_NONBLOCK`, verifies
+that the opened descriptor is a regular file, and has a five-second copy deadline.
+A same-user process replacing the snapshot with a symlink or FIFO cannot redirect
+or block the copy. Content changes still fail size or hash verification.
 
 In **Settings → Network**, select **Install helper…**, approve the administrator
 prompt, then enable **Suppress AWDL while streaming**. Cancelling the prompt leaves

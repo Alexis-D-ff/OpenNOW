@@ -1,6 +1,8 @@
 #include "app/platform/MacAwdlController.h"
 
 #include <QSignalSpy>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QTest>
 
 class FakeMacAwdlBackend final : public MacAwdlBackend
@@ -37,6 +39,20 @@ public:
 class MacAwdlControllerTest final : public QObject
 {
     Q_OBJECT
+
+    static QString administratorCommand(const QString &request)
+    {
+        const auto prefix = QStringLiteral("do shell script \"");
+        const auto suffix = QStringLiteral("\" with administrator privileges");
+        if (!request.startsWith(prefix) || !request.endsWith(suffix)) return {};
+        const auto encoded = request.mid(prefix.size(), request.size() - prefix.size() - suffix.size());
+        QString shell;
+        for (qsizetype index = 0; index < encoded.size(); ++index) {
+            if (encoded[index] == QLatin1Char('\\') && index + 1 < encoded.size()) ++index;
+            shell += encoded[index];
+        }
+        return shell;
+    }
 
 private slots:
     void defaultBackendNeverRequestsAuthorization()
@@ -150,7 +166,10 @@ private slots:
         QVERIFY(script.contains(fake->payload.sha256));
         QVERIFY(script.contains(QStringLiteral("/usr/bin/shasum -a 256")));
         QVERIFY(script.contains(QStringLiteral("/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c")));
-        QVERIFY(script.contains(QStringLiteral("bs=65536 count=512")));
+        QVERIFY(script.contains(QStringLiteral("O_RDONLY|O_NOFOLLOW|O_NONBLOCK")));
+        QVERIFY(script.contains(QStringLiteral("-f $in or die")));
+        QVERIFY(script.contains(QStringLiteral("alarm 5")));
+        QVERIFY(script.contains(QStringLiteral("$total<=33554432")));
         QVERIFY(script.contains(QStringLiteral("8192")));
         QVERIFY(script.contains(QStringLiteral("<key>ExitTimeOut</key><integer>20</integer>")));
         QVERIFY(script.contains(QStringLiteral("<key>ProgramArguments</key>")));
@@ -198,15 +217,7 @@ private slots:
         fake->currentState = MacAwdlController::NotInstalled;
         MacAwdlController controller(std::move(backend));
         const auto validSyntax = [](const QString &request) {
-            const auto prefix = QStringLiteral("do shell script \"");
-            const auto suffix = QStringLiteral("\" with administrator privileges");
-            if (!request.startsWith(prefix) || !request.endsWith(suffix)) return false;
-            const auto encoded = request.mid(prefix.size(), request.size() - prefix.size() - suffix.size());
-            QString shell;
-            for (qsizetype index = 0; index < encoded.size(); ++index) {
-                if (encoded[index] == QLatin1Char('\\') && index + 1 < encoded.size()) ++index;
-                shell += encoded[index];
-            }
+            auto shell = administratorCommand(request);
             if (!shell.startsWith(QStringLiteral("/usr/bin/env -i PATH="))) return false;
             shell.replace(QStringLiteral("/bin/sh -c"), QStringLiteral("/bin/sh -n -c"));
             QProcess parser;
@@ -220,6 +231,62 @@ private slots:
         emit fake->finished(0, QProcess::NormalExit);
         controller.uninstall();
         QVERIFY(validSyntax(fake->arguments[1]));
+    }
+
+    void privilegedCopyUsesTheOpenedDescriptorAndRejectsSpecialFiles()
+    {
+#ifndef Q_OS_UNIX
+        QSKIP("POSIX descriptor-copy validation requires a Unix host.");
+#endif
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        fake->currentState = MacAwdlController::NotInstalled;
+        MacAwdlController controller(std::move(backend));
+        controller.install();
+        auto command = administratorCommand(fake->arguments[1]);
+        QVERIFY(command.contains(QStringLiteral("/bin/sh -c")));
+        command.replace(QStringLiteral("/bin/sh -c"), QStringLiteral("/usr/bin/printf %s"));
+        QProcess extract;
+        extract.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), command});
+        QVERIFY(extract.waitForFinished(2'000));
+        QCOMPARE(extract.exitCode(), 0);
+        const auto script = QString::fromUtf8(extract.readAllStandardOutput());
+        const auto begin = script.indexOf(QStringLiteral("-e '"));
+        QVERIFY(begin >= 0);
+        const auto end = script.indexOf(QStringLiteral("' "), begin + 4);
+        QVERIFY(end > begin);
+        const auto copyProgram = script.mid(begin + 4, end - begin - 4);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto source = directory.filePath(QStringLiteral("source"));
+        QFile input(source);
+        QVERIFY(input.open(QIODevice::WriteOnly));
+        const QByteArray data(8192, 'x');
+        QCOMPARE(input.write(data), data.size());
+        input.close();
+        const auto destination = directory.filePath(QStringLiteral("destination"));
+        const auto copy = [&](const QString &path, const QString &target, int expectedExit) {
+            QProcess process;
+            process.start(QStringLiteral("/usr/bin/perl"), {
+                QStringLiteral("-MFcntl=O_RDONLY,O_NOFOLLOW,O_NONBLOCK"), QStringLiteral("-e"),
+                copyProgram, path, target, QString::number(data.size())});
+            if (!process.waitForFinished(2'000)) return false;
+            return process.exitStatus() == QProcess::NormalExit
+                && (expectedExit == 0 ? process.exitCode() == 0 : process.exitCode() != 0);
+        };
+        QVERIFY(copy(source, destination, 0));
+        QFile output(destination);
+        QVERIFY(output.open(QIODevice::ReadOnly));
+        QCOMPARE(output.readAll(), data);
+        const auto link = directory.filePath(QStringLiteral("link"));
+        QVERIFY(QFile::link(source, link));
+        const auto rejected = directory.filePath(QStringLiteral("rejected"));
+        QVERIFY(copy(link, rejected, 1));
+        QVERIFY(!QFile::exists(rejected));
+        const auto fifo = directory.filePath(QStringLiteral("fifo"));
+        QCOMPARE(QProcess::execute(QStringLiteral("/usr/bin/mkfifo"), {fifo}), 0);
+        QVERIFY(copy(fifo, rejected, 1));
+        QVERIFY(!QFile::exists(rejected));
     }
 
     void unsafePayloadsAreRejected()
