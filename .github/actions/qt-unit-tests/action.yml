@@ -173,5 +173,22 @@ runs:
       env:
         BUILD_PARALLEL: ${{ inputs.parallel }}
       run: |
+        trap 'status=$?; if (( status != 0 )); then
+          for log in build/opennow-qt-checks/Testing/Temporary/LastTestsFailed.log build/opennow-qt-checks/Testing/Temporary/LastTest.log; do
+            if [[ -f "$log" ]]; then echo "::group::$log"; cat "$log"; echo "::endgroup::"; fi
+          done
+        fi; exit "$status"' EXIT
         ctest --test-dir build/opennow-qt-checks --output-on-failure --no-tests=error \
           -L ci-unit --parallel "$BUILD_PARALLEL" --output-junit qt-unit-tests.xml
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          python - <<'PY'
+        import os
+        import subprocess
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        for attempt in range(30):
+            result = subprocess.run(["build/opennow-qt-checks/opennow-generichidinput-tests.exe", "-o", "-,txt"])
+            print(f"Generic HID attempt {attempt + 1}: exit {result.returncode} (0x{result.returncode & 0xffffffff:08x})", flush=True)
+            if result.returncode:
+                raise SystemExit(1)
+        PY
+        fi

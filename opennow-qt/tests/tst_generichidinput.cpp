@@ -8,6 +8,9 @@
 #include <QTest>
 
 #include <cstring>
+#include <cstdio>
+
+static const auto unbufferedTestOutput = std::setvbuf(stdout, nullptr, _IONBF, 0);
 
 namespace {
 QByteArray descriptor(quint8 id = 0)
