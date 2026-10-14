@@ -1,49 +1,64 @@
 use super::{NvstRtspError, sdp_attribute};
 use opennow_streamer_transport::NvstRecoveryPolicy;
 use serde_json::{Value, json};
+use std::ops::RangeInclusive;
 
-pub(super) fn offered_bool(sdp: &str, name: &str) -> Result<Option<bool>, NvstRtspError> {
-    sdp_attribute(sdp, name)
-        .map(|value| match value.as_str() {
-            "0" => Ok(false),
-            "1" => Ok(true),
-            _ => Err(invalid_offer(name)),
-        })
-        .transpose()
+fn ignore_offer(name: &str, value: &str) {
+    opennow_streamer_protocol::log::log_line(
+        "WARN",
+        "transport",
+        &format!("ignored-server-offer name={name} value={value}"),
+    );
 }
 
-fn offered_u32(sdp: &str, name: &str) -> Result<Option<u32>, NvstRtspError> {
-    sdp_attribute(sdp, name)
-        .map(|value| value.parse().map_err(|_| invalid_offer(name)))
-        .transpose()
+pub(super) fn offered_bool(sdp: &str, name: &str) -> Option<bool> {
+    let value = sdp_attribute(sdp, name)?;
+    match value.as_str() {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => {
+            ignore_offer(name, &value);
+            None
+        }
+    }
 }
 
-fn invalid_offer(name: &str) -> NvstRtspError {
-    NvstRtspError::new(
-        "nvst-offer-unsupported",
-        format!("Server advertised an unsupported {name} value"),
-    )
+fn offered_u32(sdp: &str, name: &str) -> Option<u32> {
+    let value = sdp_attribute(sdp, name)?;
+    value
+        .parse()
+        .inspect_err(|_| ignore_offer(name, &value))
+        .ok()
 }
 
-pub(super) fn recovery_policy(sdp: &str) -> Result<NvstRecoveryPolicy, NvstRtspError> {
-    Ok(NvstRecoveryPolicy {
-        ref_pic_invalidation: offered_bool(sdp, "video[0].refPicInvalidation")?,
-        stream_recovery_type: offered_u32(sdp, "video[0].streamRecoveryType")?,
+fn offered_in(sdp: &str, name: &str, range: RangeInclusive<u32>) -> Option<u32> {
+    let value = offered_u32(sdp, name)?;
+    if range.contains(&value) {
+        return Some(value);
+    }
+    ignore_offer(name, &value.to_string());
+    None
+}
+
+pub(super) fn recovery_policy(sdp: &str) -> NvstRecoveryPolicy {
+    NvstRecoveryPolicy {
+        ref_pic_invalidation: offered_bool(sdp, "video[0].refPicInvalidation"),
+        stream_recovery_type: offered_u32(sdp, "video[0].streamRecoveryType"),
         frames_with_invalid_ref_threshold: offered_u32(
             sdp,
             "video[0].framesWithInvalidRefThreshold",
-        )?,
-        enable_recovery_mode: offered_bool(sdp, "general.enableRecoveryMode")?,
+        ),
+        enable_recovery_mode: offered_bool(sdp, "general.enableRecoveryMode"),
         recovery_mode_trigger_threshold_ms: offered_u32(
             sdp,
             "general.recoveryModeTriggerThresholdMs",
-        )?,
+        ),
         enable_intra_refresh_in_recovery_mode: offered_bool(
             sdp,
             "general.enableIntraRefreshInRecoveryMode",
-        )?,
-        encoder_ltr_feature_setting: offered_u32(sdp, "video[0].encoderLtrFeatureSetting")?,
-    })
+        ),
+        encoder_ltr_feature_setting: offered_u32(sdp, "video[0].encoderLtrFeatureSetting"),
+    }
 }
 
 pub(super) fn negotiated_announce(
@@ -51,23 +66,6 @@ pub(super) fn negotiated_announce(
     describe: &str,
     handoff: &mut Value,
 ) -> Result<String, NvstRtspError> {
-    for name in [
-        "general.disablePlay",
-        "general.rtcpOnSctp",
-        "general.rtcMicOnNativeBundle",
-    ] {
-        offered_bool(describe, name)?;
-    }
-    for (name, minimum, maximum) in [
-        ("video[0].framePacing.mode", 1, 2),
-        ("video[0].framePacing.feedbackMode", 0, 1),
-        ("packetPacing.version", 3, 3),
-        ("packetPacing.mode", 1, 1),
-    ] {
-        if offered_u32(describe, name)?.is_some_and(|value| !(minimum..=maximum).contains(&value)) {
-            return Err(invalid_offer(name));
-        }
-    }
     let mut values = serde_json::Map::new();
     for (name, minimum, maximum) in [
         ("vqos[0].fec.enable", 0, 1),
@@ -87,36 +85,29 @@ pub(super) fn negotiated_announce(
         ("packetPacing.enableSmoothTransition", 0, 1),
         ("packetPacing.allowFpsBasedToggle", 0, 1),
     ] {
-        let value = offered_u32(describe, name)?
-            .or(offered_u32(announce, name)?)
+        let value = offered_in(describe, name, minimum..=maximum)
+            .or(offered_u32(announce, name))
             .unwrap();
-        if !(minimum..=maximum).contains(&value) {
-            return Err(invalid_offer(name));
-        }
         values.insert(name.to_owned(), json!(value));
     }
-    let min = values["vqos[0].fec.repairMinPercent"].as_u64().unwrap();
-    let max = values["vqos[0].fec.repairMaxPercent"].as_u64().unwrap();
+    let mut min = values["vqos[0].fec.repairMinPercent"].as_u64().unwrap();
+    let mut max = values["vqos[0].fec.repairMaxPercent"].as_u64().unwrap();
     if min > max {
-        return Err(invalid_offer("vqos[0].fec.repairMinPercent"));
+        ignore_offer("vqos[0].fec.repairMinPercent", &format!("{min}>{max}"));
+        min = u64::from(offered_u32(announce, "vqos[0].fec.repairMinPercent").unwrap());
+        max = u64::from(offered_u32(announce, "vqos[0].fec.repairMaxPercent").unwrap());
+        values["vqos[0].fec.repairMinPercent"] = json!(min);
+        values["vqos[0].fec.repairMaxPercent"] = json!(max);
     }
     let repair = values["vqos[0].fec.repairPercent"].as_u64().unwrap();
-    if sdp_attribute(describe, "vqos[0].fec.repairPercent").is_some()
-        && !(min..=max).contains(&repair)
-    {
-        return Err(invalid_offer("vqos[0].fec.repairPercent"));
-    }
     values["vqos[0].fec.repairPercent"] = json!(repair.clamp(min, max));
-    let ceiling = offered_u32(announce, "vqos[0].bw.maximumBitrateKbps")?.unwrap();
-    let initial = offered_u32(describe, "video[0].initialBitrateKbps")?
+    let ceiling = offered_u32(announce, "vqos[0].bw.maximumBitrateKbps").unwrap();
+    let initial = offered_in(describe, "video[0].initialBitrateKbps", 1..=u32::MAX)
         .unwrap_or(ceiling)
         .min(ceiling);
-    let peak = offered_u32(describe, "video[0].initialPeakBitrateKbps")?
+    let peak = offered_u32(describe, "video[0].initialPeakBitrateKbps")
         .unwrap_or(ceiling)
-        .min(ceiling);
-    if initial == 0 || peak < initial {
-        return Err(invalid_offer("video[0].initialBitrateKbps"));
-    }
+        .clamp(initial, ceiling);
     values.insert("video[0].initialBitrateKbps".to_owned(), json!(initial));
     values.insert("video[0].initialPeakBitrateKbps".to_owned(), json!(peak));
     values.insert("vqos[0].bw.maximumBitrateKbps".to_owned(), json!(ceiling));
@@ -143,16 +134,13 @@ pub(super) fn negotiated_announce(
     Ok(result)
 }
 
-pub(super) fn microphone_handoff(sdp: &str, handoff: &mut Value) -> Result<(), NvstRtspError> {
-    let enabled = offered_bool(sdp, "aqos.enableRedundancyForMic")?.unwrap_or(false);
+pub(super) fn microphone_handoff(sdp: &str, handoff: &mut Value) {
+    let enabled = offered_bool(sdp, "aqos.enableRedundancyForMic").unwrap_or(false);
     let level = if enabled {
-        offered_u32(sdp, "aqos.redundancyLevelForMic")?.unwrap_or(0)
+        offered_in(sdp, "aqos.redundancyLevelForMic", 0..=3).unwrap_or(0)
     } else {
         0
     };
-    if level > 3 {
-        return Err(invalid_offer("aqos.redundancyLevelForMic"));
-    }
     handoff["microphoneRedundancyLevel"] = json!(level);
     let mut in_mic = false;
     let mut payloads = Vec::new();
@@ -193,15 +181,13 @@ pub(super) fn microphone_handoff(sdp: &str, handoff: &mut Value) -> Result<(), N
             } else {
                 continue;
             };
-            let payload = payload
-                .parse::<u8>()
-                .ok()
-                .filter(|value| *value <= 127)
-                .ok_or_else(|| invalid_offer(field))?;
+            let Some(payload) = payload.parse::<u8>().ok().filter(|value| *value <= 127) else {
+                ignore_offer(field, payload);
+                continue;
+            };
             handoff[field] = json!(payload);
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -210,21 +196,30 @@ mod tests {
 
     #[test]
     fn recovery_describe_is_typed_and_does_not_guess_defaults() {
-        let policy = recovery_policy("a=x-nv-video[0].refPicInvalidation:1\r\na=x-nv-video[0].streamRecoveryType:2\r\na=x-nv-video[0].framesWithInvalidRefThreshold:4\r\na=x-nv-general.enableRecoveryMode:1\r\na=x-nv-general.recoveryModeTriggerThresholdMs:6000\r\na=x-nv-general.enableIntraRefreshInRecoveryMode:1\r\na=x-nv-video[0].encoderLtrFeatureSetting:2\r\n").unwrap();
+        let policy = recovery_policy(
+            "a=x-nv-video[0].refPicInvalidation:1\r\na=x-nv-video[0].streamRecoveryType:2\r\na=x-nv-video[0].framesWithInvalidRefThreshold:4\r\na=x-nv-general.enableRecoveryMode:1\r\na=x-nv-general.recoveryModeTriggerThresholdMs:6000\r\na=x-nv-general.enableIntraRefreshInRecoveryMode:1\r\na=x-nv-video[0].encoderLtrFeatureSetting:2\r\n",
+        );
         assert_eq!(policy.ref_pic_invalidation, Some(true));
         assert_eq!(policy.stream_recovery_type, Some(2));
         assert_eq!(policy.frames_with_invalid_ref_threshold, Some(4));
         assert_eq!(policy.recovery_mode_trigger_threshold_ms, Some(6000));
         assert_eq!(policy.encoder_ltr_feature_setting, Some(2));
-        assert_eq!(recovery_policy("").unwrap(), NvstRecoveryPolicy::default());
-        assert!(recovery_policy("a=x-nv-video[0].refPicInvalidation:2").is_err());
-        assert!(recovery_policy("a=x-nv-video[0].framesWithInvalidRefThreshold:-1").is_err());
+        assert_eq!(recovery_policy(""), NvstRecoveryPolicy::default());
+        assert_eq!(
+            recovery_policy(
+                "a=x-nv-video[0].refPicInvalidation:2\r\na=x-nv-video[0].framesWithInvalidRefThreshold:-1\r\n"
+            ),
+            NvstRecoveryPolicy::default()
+        );
     }
 
     #[test]
     fn mic_handoff_uses_only_its_offered_payloads_and_red_depth() {
         let mut handoff = json!({});
-        microphone_handoff("a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=audio 5000 RTP/AVP 111 112\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:112 red/48000/2\r\nm=mic 5002 RTP/AVP 113 114\r\na=rtpmap:113 opus/48000/1\r\na=rtpmap:114 red/48000/1\r\na=rtpmap:115 red/48000/1\r\n", &mut handoff).unwrap();
+        microphone_handoff(
+            "a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=audio 5000 RTP/AVP 111 112\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:112 red/48000/2\r\nm=mic 5002 RTP/AVP 113 114\r\na=rtpmap:113 opus/48000/1\r\na=rtpmap:114 red/48000/1\r\na=rtpmap:115 red/48000/1\r\n",
+            &mut handoff,
+        );
         assert_eq!(
             handoff,
             json!({"microphoneOpusPayloadType":113,"microphoneRedPayloadType":114,"microphoneRedundancyLevel":3})
@@ -234,23 +229,17 @@ mod tests {
             "a=x-nv-aqos.enableRedundancyForMic:0\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=audio 5000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n",
         ] {
             let mut handoff = json!({});
-            microphone_handoff(sdp, &mut handoff).unwrap();
+            microphone_handoff(sdp, &mut handoff);
             assert_eq!(handoff, json!({"microphoneRedundancyLevel":0}));
         }
-        assert!(
-            microphone_handoff(
-                "m=mic 5002 RTP/AVP 128\r\na=rtpmap:128 opus/48000/1\r\n",
-                &mut json!({})
-            )
-            .is_err()
-        );
-        assert!(
-            microphone_handoff(
-                "a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:4",
-                &mut json!({})
-            )
-            .is_err()
-        );
+        for sdp in [
+            "m=mic 5002 RTP/AVP 128\r\na=rtpmap:128 opus/48000/1\r\n",
+            "a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:4",
+        ] {
+            let mut handoff = json!({});
+            microphone_handoff(sdp, &mut handoff);
+            assert_eq!(handoff, json!({"microphoneRedundancyLevel":0}));
+        }
     }
 
     #[test]
@@ -265,7 +254,10 @@ mod tests {
             "remoteIceUsernameFragment":"remote01","remoteIcePassword":"remote-password-value-01",
             "remoteDtlsFingerprint":"AA:BB"
         });
-        microphone_handoff("a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=mic 5002 RTP/AVP 113 114\r\na=rtpmap:113 opus/48000/1\r\na=rtpmap:114 red/48000/1\r\n", &mut handoff).unwrap();
+        microphone_handoff(
+            "a=x-nv-aqos.enableRedundancyForMic:1\r\na=x-nv-aqos.redundancyLevelForMic:3\r\nm=mic 5002 RTP/AVP 113 114\r\na=rtpmap:113 opus/48000/1\r\na=rtpmap:114 red/48000/1\r\n",
+            &mut handoff,
+        );
         assert_eq!(handoff["microphoneOpusPayloadType"], 113);
         assert_eq!(handoff["microphoneRedPayloadType"], 114);
         assert_eq!(handoff["microphoneRedundancyLevel"], 3);
@@ -292,8 +284,7 @@ mod tests {
         microphone_handoff(
             "a=x-nv-aqos.enableRedundancyForMic:0\r\na=x-nv-aqos.redundancyLevelForMic:3\r\n",
             &mut handoff,
-        )
-        .unwrap();
+        );
         assert_eq!(handoff["microphoneRedundancyLevel"], 0);
         assert!(
             NvstVideoConfig::from_legacy_handoff(&handoff, None)

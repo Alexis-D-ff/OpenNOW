@@ -1120,7 +1120,6 @@ fn prepare_on_endpoint(
     })?;
     let video_qos_offers = video_qos_offers(&describe.body);
     video_qos_offers.validate()?;
-    video_qos_offers.pacing_feedback_mode(&describe.body)?;
     let max_control_report_bytes = qos_messages_size(&describe.body)?;
     let described_ping_version = sdp_attribute(&describe.body, "general.pingVersion")
         .and_then(|value| value.parse::<u8>().ok())
@@ -1151,7 +1150,7 @@ fn prepare_on_endpoint(
     setup_headers.push(("x-nv-ping", described_ping_version.to_string()));
     let bundle_endpoint = bundle_endpoint(context);
     let described_unified_socket =
-        offered_bool(&describe.body, "general.enableUnifiedSocket")?.unwrap_or(false);
+        offered_bool(&describe.body, "general.enableUnifiedSocket").unwrap_or(false);
     opennow_streamer_protocol::log::log_line(
         "INFO",
         "rtsps",
@@ -1320,8 +1319,8 @@ fn prepare_on_endpoint(
     }
     handoff["bundlePeerIp"] = json!(bundle_peer.ip().to_string());
     handoff["bundlePeerPort"] = json!(bundle_peer.port());
-    handoff["recoveryPolicy"] = json!(recovery_policy(&describe.body)?);
-    microphone_handoff(&describe.body, &mut handoff)?;
+    handoff["recoveryPolicy"] = json!(recovery_policy(&describe.body));
+    microphone_handoff(&describe.body, &mut handoff);
 
     // Only log transport shape, never SDP, runtime keys, or ICE credentials.
     opennow_streamer_protocol::log::log_line(
@@ -2580,12 +2579,12 @@ mod tests {
         );
         assert_eq!(sdp_attribute(&filtered, "ri.timestampsEnabled"), None);
         assert_eq!(sdp_attribute(&filtered, "runtime.videoSrtp"), None);
-        assert!(
+        assert_eq!(
             offered_bool(
                 "a=x-nv-general.enableUnifiedSocket:2\r\n",
                 "general.enableUnifiedSocket"
-            )
-            .is_err()
+            ),
+            None
         );
     }
 
@@ -2639,16 +2638,22 @@ mod tests {
             ),
             sdp_attribute(&announce, "video[0].initialBitrateKbps")
         );
-        for invalid in [
+        let defaults = negotiated_announce(&announce, "", &mut json!({})).unwrap();
+        for unsupported in [
             "a=x-nv-vqos[0].fec.repairMinPercent:101",
             "a=x-nv-vqos[0].fec.repairMinPercent:40\r\na=x-nv-vqos[0].fec.repairMaxPercent:5",
             "a=x-nv-packetPacing.version:4",
+            "a=x-nv-video[0].framePacing.mode:0",
             "a=x-nv-video[0].framePacing.mode:3",
+            "a=x-nv-video[0].framePacing.feedbackMode:2",
+            "a=x-nv-general.disablePlay:2",
             "a=x-nv-video[0].initialBitrateKbps:0",
+            "a=x-nv-vqos[0].fec.enable:yes",
         ] {
-            assert!(
-                negotiated_announce(&announce, invalid, &mut json!({})).is_err(),
-                "{invalid}"
+            assert_eq!(
+                negotiated_announce(&announce, unsupported, &mut json!({})).unwrap(),
+                defaults,
+                "{unsupported}"
             );
         }
     }
