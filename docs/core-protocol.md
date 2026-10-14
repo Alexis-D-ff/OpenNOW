@@ -1374,6 +1374,27 @@ invalid persisted collections cause an `InvalidData` load error before any write
 rather than silently dropping collections or truncating identifiers. A successful
 `settings.reset` clears collections along with other preferences.
 
+`controllerLeftStickDeadzone`, `controllerRightStickDeadzone` (integers 0–50,
+default 5) and `controllerVibrationIntensity` (integer 0–100, default 100) stay the
+global controller tuning and the default for every pad. `controllerProfiles`
+defaults to `{}` and holds per-pad overrides keyed by pad identity. Qt builds the
+key as `serial:<vendor>:<product>:<serial>` (four-digit lowercase hex vendor and
+product IDs) when SDL reports a serial number, and as `guid:<SDL GUID string>`
+otherwise. Two identical pads without a serial therefore share one key and one
+profile. Each value has the form
+`{"name":"DualSense","leftStickDeadzone":8,"rightStickDeadzone":5,"vibrationIntensity":70,"lastSeen":1760440000000}`.
+Every tuning field is optional; a missing field means the global setting applies.
+`settings.set` replaces the whole map and normalizes it rather than rejecting it:
+keys are trimmed and must hold 1–160 characters; tuning fields that are not
+integers are dropped and integers are clamped to the global ranges; `name` is
+trimmed to at most 80 characters and dropped when empty; `lastSeen` (Unix
+milliseconds) defaults to 0. Entries that are not objects or keep no tuning field
+are dropped, so deleting a pad's fields resets it to the globals. At most 32
+profiles are kept, preferring the highest `lastSeen`. Non-object values normalize
+to `{}`. Settings saved before this key existed load with `{}`, and
+`settings.reset` clears it. These values apply live in Qt before input reaches the
+streamer; they never require a new session.
+
 Provider discovery falls back to NVIDIA's
 default service when discovery is unavailable. Device-login tokens are stored
 through the OS credential store (DPAPI/Credential Manager, Keychain or Secret

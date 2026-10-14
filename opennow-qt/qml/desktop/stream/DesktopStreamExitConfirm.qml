@@ -8,6 +8,8 @@ FocusScope {
     property bool quittingApplication: false
     property string switchTargetName: ""
     readonly property bool switchingAccount: switchTargetName !== ""
+    readonly property color onDarkTitle: Theme.lightMode ? "#F6F3EE" : DesktopTokens.text
+    readonly property color onDarkBody: Theme.lightMode ? "#C5CDD6" : DesktopTokens.textBody
     readonly property string sessionTitle: {
         const title = ShellStore.sessionGameTitle(ShellStore.activeSession)
         return title || (ShellStore.selectedGame && ShellStore.selectedGame.title ? String(ShellStore.selectedGame.title) : "")
@@ -66,18 +68,20 @@ FocusScope {
                 font.letterSpacing: 1.4
             }
             Text {
+                objectName: "accountSwitchTitle"
                 width: parent.width
                 topPadding: 10
                 elide: Text.ElideRight
                 text: root.quittingApplication ? qsTr("Quit OpenNOW?")
                     : root.switchingAccount ? qsTr("Switch to %1?").arg(root.switchTargetName)
                     : qsTr("End this cloud session?")
-                color: DesktopTokens.text
+                color: root.onDarkTitle
                 font.family: DesktopTokens.displayFont
                 font.pixelSize: 28
                 font.weight: Font.Black
             }
             Text {
+                objectName: "accountSwitchBody"
                 width: parent.width
                 topPadding: 10
                 elide: Text.ElideRight
@@ -91,7 +95,7 @@ FocusScope {
                     : AppController.route === "inserting"
                     ? qsTr("Your session request will be cancelled and you will leave the queue.")
                     : qsTr("Your game will close on the remote rig. This session cannot be resumed after it ends.")
-                color: DesktopTokens.textBody
+                color: root.onDarkBody
                 font.family: DesktopTokens.bodyFont
                 font.pixelSize: 14
                 font.weight: Font.Medium

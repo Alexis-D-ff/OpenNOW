@@ -8,6 +8,8 @@ Row {
     property alias to: slider.to
     property alias stepSize: slider.stepSize
     property alias value: slider.value
+    property alias wheelEnabled: slider.wheelEnabled
+    readonly property alias control: slider
     property real trackWidth: Math.max(0, (parent && parent.availableWidth !== undefined ? parent.availableWidth : DesktopTokens.settingsControlWidth) - valueLabel.width - spacing)
     property string suffix: "%"
     property int decimals: 0

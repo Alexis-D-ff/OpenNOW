@@ -43,8 +43,31 @@ FocusScope {
         ? Math.max(0, Math.floor((clockNowMs - ShellStore.streamStartedAtMs) / 1000)) : 0
     Timer {
         interval: 1000; repeat: true
-        running: root.visible && root.streaming && ShellStore.settings.sessionCounterEnabled === true
+        running: root.visible && root.streaming
+            && (ShellStore.settings.sessionCounterEnabled === true || ShellStore.antiAfkEnabled)
         onTriggered: root.clockNowMs = Date.now()
+    }
+    MotionProgress {
+        id: antiAfkReveal
+        shown: root.videoReady && ShellStore.antiAfkIndicatorShown(root.clockSeconds)
+            && AppController.overlay.indexOf("stats") < 0
+    }
+    Rectangle {
+        objectName: "desktopAntiAfkIndicator"
+        anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 24
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        width: antiAfkLabel.implicitWidth + 28; height: 36; radius: 18; z: 4
+        color: Qt.rgba(Theme.shell.r,Theme.shell.g,Theme.shell.b,0.85)
+        visible: antiAfkReveal.present
+        opacity: antiAfkReveal.progress
+        Accessible.role: Accessible.StaticText
+        Accessible.name: qsTr("Anti-AFK is enabled")
+        Row {
+            id: antiAfkLabel; anchors.centerIn: parent; spacing: 8
+            Rectangle { width: 8; height: 8; radius: 4; color: DesktopTokens.green; anchors.verticalCenter: parent.verticalCenter }
+            Text { text: qsTr("ANTI-AFK ON"); color: Theme.label; font.family: Theme.monoFont; font.pixelSize: 12 }
+        }
     }
     Rectangle {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 24

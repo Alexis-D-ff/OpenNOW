@@ -33,6 +33,8 @@ FocusScope {
         : String(activeUser && activeUser.membershipTier || "").toUpperCase()
     readonly property int columns: 5
     signal closeRequested()
+    onCurrentIndexChanged: if (opened && currentIndex >= 0 && currentIndex < tileCount)
+        switcherTiles.reveal(currentIndex)
 
     visible: reveal.present
     enabled: opened
@@ -118,10 +120,12 @@ FocusScope {
 
     Rectangle {
         id: card
+        objectName: "accountSwitcherCard"
         x: DesktopTokens.railCollapsedWidth + root.u(12)
-        y: root.height - height - root.u(20)
+        y: Math.max(root.u(8), root.height - height - root.u(20))
         width: root.u(420)
-        height: content.implicitHeight
+        height: Math.min(content.implicitHeight, Math.max(root.u(160), root.height - root.u(16)))
+        clip: true
         radius: root.u(16)
         color: Theme.lightMode ? "#FAFFFFFF" : "#F512161F"
         border.width: 1
@@ -222,10 +226,34 @@ FocusScope {
                     font.weight: Font.DemiBold
                     font.letterSpacing: root.u(1.4)
                 }
-                Flow {
+                Flickable {
+                    id: switcherTiles
+                    objectName: "accountSwitcherTiles"
+                    width: parent.width
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    contentWidth: width
+                    contentHeight: switcherTileFlow.implicitHeight
+                    interactive: contentHeight > height + 1
+                    height: Math.min(switcherTileFlow.implicitHeight,
+                        Math.max(root.u(86), root.height - root.u(348)))
+                    function reveal(index) {
+                        const item = switcherTileRepeater.itemAt(index)
+                        if (!item || contentHeight <= height)
+                            return
+                        const top = item.y
+                        const bottom = item.y + item.height
+                        if (top < contentY)
+                            contentY = top
+                        else if (bottom > contentY + height)
+                            contentY = Math.max(0, bottom - height)
+                    }
+                    Flow {
+                    id: switcherTileFlow
                     width: parent.width
                     spacing: root.u(2)
                     Repeater {
+                        id: switcherTileRepeater
                         model: root.tileCount
                         DesktopAccountTile {
                             required property int index
@@ -245,6 +273,7 @@ FocusScope {
                                 root.activate(index)
                             }
                         }
+                    }
                     }
                 }
                 Rectangle {

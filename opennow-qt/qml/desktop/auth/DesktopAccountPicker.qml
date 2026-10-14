@@ -14,6 +14,7 @@ FocusScope {
     readonly property var accounts: ShellStore.savedAccounts || []
     readonly property int itemCount: accounts.length + 1
     readonly property bool compact: accounts.length >= 6
+    readonly property bool tightPicker: !consoleMode && stage.height > 0 && stage.height < u(560)
     readonly property real tileSize: consoleMode ? (compact ? 150 : 196) : (compact ? 132 : 168)
     readonly property real cellWidth: u(tileSize + (compact ? 16 : 32))
     readonly property real cellGap: u(compact ? 20 : consoleMode ? 36 : 28)
@@ -358,6 +359,8 @@ FocusScope {
 
     Item {
         id: stage
+        objectName: "accountPickerStage"
+        clip: true
         anchors.top: topStrip.bottom
         anchors.bottom: footer.top
         anchors.bottomMargin: root.consoleMode ? root.u(92) : 0
@@ -365,9 +368,9 @@ FocusScope {
 
         Column {
             id: body
-            anchors.centerIn: parent
-            anchors.verticalCenterOffset: -root.u(root.consoleMode ? 10 : 24)
+            anchors.horizontalCenter: parent.horizontalCenter
             width: parent.width
+            y: Math.max(0, (stage.height - height) / 2 - root.u(root.consoleMode ? 10 : 24))
             spacing: 0
             opacity: root.pinAccount ? 0 : root.confirmKind !== "" ? 0.16 : 1
             visible: opacity > 0
@@ -375,9 +378,11 @@ FocusScope {
             Behavior on opacity { NumberAnimation { duration: DesktopTokens.quickDuration } }
 
             Column {
+                id: headingBlock
+                objectName: "accountPickerHeading"
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: root.u(10)
-                bottomPadding: root.u(root.compact ? 36 : 56)
+                bottomPadding: stage.height < root.u(560) ? root.u(8) : root.u(root.compact ? 36 : 56)
                 Text {
                     visible: !root.consoleMode
                     anchors.horizontalCenter: parent.horizontalCenter
@@ -395,12 +400,13 @@ FocusScope {
                     text: qsTr("Who’s playing?")
                     color: DesktopTokens.text
                     font.family: DesktopTokens.displayFont
-                    font.pixelSize: root.u(root.consoleMode ? 64 : root.compact ? 44 : 56)
+                    font.pixelSize: root.u(root.consoleMode ? 64 : root.tightPicker ? 32 : root.compact ? 44 : 56)
                     font.weight: Font.Black
                     font.letterSpacing: -root.u(root.consoleMode ? 1.28 : root.compact ? 0.88 : 1.12)
                     Accessible.role: Accessible.Heading
                 }
                 Text {
+                    visible: !root.tightPicker
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: Math.min(implicitWidth, root.width - root.u(64))
                     horizontalAlignment: Text.AlignHCenter
@@ -423,7 +429,12 @@ FocusScope {
                     ? tileRepeater.itemAt(0).height : root.u(root.tileSize + 80)
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: Math.min(root.width, tiles.width + root.u(32))
-                height: Math.min(tiles.height, rowHeight * 2 + root.u(28)) + root.u(16)
+                height: {
+                    const capped = Math.min(tiles.height, rowHeight * Math.min(rows, 2) + root.u(28))
+                    const reserved = headingBlock.height + noticeBlock.height + actionBlock.height + root.u(12)
+                    const room = Math.max(0, stage.height - reserved)
+                    return Math.min(capped + root.u(16), room)
+                }
                 contentWidth: width
                 contentHeight: tiles.height + root.u(16)
                 interactive: contentHeight > height
@@ -487,14 +498,16 @@ FocusScope {
             }
 
             Item {
+                id: noticeBlock
                 readonly property bool noticeShown: focusStrip.visible || root.switching || ShellStore.accountMessage !== ""
                     || root.currentAccount !== null && root.currentAccount.needsSignIn === true && !root.manageMode
                 width: parent.width
-                height: root.u(noticeShown ? 92 : 44)
+                height: noticeShown ? root.u(root.tightPicker ? 40 : 92) : root.tightPicker ? 0 : root.u(44)
+                visible: height > 0
 
                 Row {
                     id: focusStrip
-                    visible: root.compact && root.currentAccount !== null && !root.switching
+                    visible: !root.tightPicker && root.compact && root.currentAccount !== null && !root.switching
                         && !root.currentAccount.needsSignIn
                     anchors.centerIn: parent
                     spacing: root.u(10)
@@ -578,6 +591,8 @@ FocusScope {
                     width: Math.min(implicitWidth, root.width - root.u(64))
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
+                    maximumLineCount: root.tightPicker ? 1 : 3
+                    elide: root.tightPicker ? Text.ElideRight : Text.ElideNone
                     text: ShellStore.accountMessage
                     color: DesktopTokens.danger
                     font.family: DesktopTokens.bodyFont
@@ -587,6 +602,7 @@ FocusScope {
             }
 
             Column {
+                id: actionBlock
                 visible: !root.consoleMode
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: root.u(18)
@@ -796,6 +812,7 @@ FocusScope {
 
     Rectangle {
         id: footer
+        objectName: "accountPickerFooter"
         visible: !root.consoleMode
         anchors.bottom: parent.bottom
         width: parent.width

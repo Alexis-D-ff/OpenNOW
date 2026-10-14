@@ -4,6 +4,7 @@
 #include "streaming/NativeStreamRuntime.h"
 #include "acceptance/MotionAcceptance.h"
 
+#include <QColor>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QDeadlineTimer>
@@ -23,6 +24,104 @@
 #include <memory>
 
 using namespace Qt::StringLiterals;
+
+static qreal relativeLuminance(const QColor &color)
+{
+    return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF();
+}
+
+static QRectF sceneRect(QQuickItem *item)
+{
+    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+}
+
+static QQuickItem *findVisualChild(QQuickItem *item, const QString &name)
+{
+    if (!item)
+        return nullptr;
+    if (item->objectName() == name)
+        return item;
+    const auto children = item->childItems();
+    for (auto *child : children) {
+        if (auto *found = findVisualChild(child, name))
+            return found;
+    }
+    return nullptr;
+}
+
+static bool accountChromeFits(QQuickWindow *window)
+{
+    if (!window)
+        return false;
+    if (auto *confirm = window->findChild<QQuickItem *>(u"accountSwitchConfirmation"_s); confirm && confirm->isVisible()) {
+        auto *title = confirm->findChild<QQuickItem *>(u"accountSwitchTitle"_s);
+        auto *body = confirm->findChild<QQuickItem *>(u"accountSwitchBody"_s);
+        const auto titleColor = title ? title->property("color").value<QColor>() : QColor();
+        const auto bodyColor = body ? body->property("color").value<QColor>() : QColor();
+        if (!title || !body || relativeLuminance(titleColor) < 0.55 || relativeLuminance(bodyColor) < 0.28) {
+            qCritical("Switch confirmation text is not readable on its dark card");
+            return false;
+        }
+    }
+    if (auto *picker = window->findChild<QQuickItem *>(u"desktopAccountPicker"_s); picker && picker->isVisible()) {
+        auto *stage = picker->findChild<QQuickItem *>(u"accountPickerStage"_s);
+        auto *grid = picker->findChild<QQuickItem *>(u"accountPickerGrid"_s);
+        auto *heading = picker->findChild<QQuickItem *>(u"accountPickerHeading"_s);
+        if (!stage || !grid || !heading)
+            return false;
+        const auto stageRect = sceneRect(stage);
+        const auto gridRect = sceneRect(grid);
+        const auto headingRect = sceneRect(heading);
+        auto *manage = picker->findChild<QQuickItem *>(u"accountManageButton"_s);
+        const auto manageRect = manage && manage->isVisible() ? sceneRect(manage) : QRectF();
+        if (grid->height() < 100 || headingRect.top() < -1 || headingRect.bottom() > window->height() + 1
+                || gridRect.top() < stageRect.top() - 1 || gridRect.bottom() > stageRect.bottom() + 1
+                || (manage && manage->isVisible()
+                    && (manageRect.top() < stageRect.top() - 1 || manageRect.bottom() > stageRect.bottom() + 1))) {
+            qCritical("Account picker chrome leaves the window");
+            return false;
+        }
+        auto *tile = findVisualChild(grid, u"accountTile0"_s);
+        if (!tile || !tile->isVisible()) {
+            qCritical("Account picker tile row is missing");
+            return false;
+        }
+        const auto tileRect = sceneRect(tile);
+        const auto visible = qMin(tileRect.bottom(), gridRect.bottom()) - qMax(tileRect.top(), gridRect.top());
+        if (visible < 110) {
+            qCritical("Account picker tile row is sliced");
+            return false;
+        }
+        if (auto *error = picker->findChild<QQuickItem *>(u"accountActionError"_s);
+                error && !error->property("text").toString().isEmpty()) {
+            const auto errorRect = sceneRect(error);
+            if (!error->isVisible() || errorRect.height() < 8
+                    || errorRect.top() < stageRect.top() - 1 || errorRect.bottom() > stageRect.bottom() + 1) {
+                qCritical("Account error is not visible inside the window");
+                return false;
+            }
+        }
+    }
+    if (auto *card = window->findChild<QQuickItem *>(u"accountSwitcherCard"_s); card && card->isVisible()) {
+        const auto rect = sceneRect(card);
+        if (rect.top() < -1 || rect.bottom() > window->height() + 1 || rect.right() > window->width() + 1) {
+            qCritical("Account switcher leaves the window");
+            return false;
+        }
+        auto *switcher = window->findChild<QQuickItem *>(u"desktopAccountSwitcher"_s);
+        auto *tiles = window->findChild<QQuickItem *>(u"accountSwitcherTiles"_s);
+        if (switcher && tiles && tiles->property("contentHeight").toReal() > tiles->height() + 1) {
+            switcher->setProperty("currentIndex", 0);
+            tiles->setProperty("contentY", 0);
+            switcher->setProperty("currentIndex", switcher->property("tileCount").toInt() - 1);
+            if (tiles->property("contentY").toReal() <= 0) {
+                qCritical("Switcher keyboard focus stays outside the tile list");
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 void presentUpdateSurface(QQmlApplicationEngine &engine, QQuickWindow *window, const QString &surface)
 {
@@ -477,6 +576,8 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-push-invalidation"_s)
                      || m_arguments.contains(u"--smoke-bug-reports"_s)
                      || m_arguments.contains(u"--smoke-microphone"_s)
+                     || m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
+                     || m_arguments.contains(u"--smoke-stream-controllers"_s)
                      || m_arguments.contains(u"--smoke-audio-output"_s)
                      || m_arguments.contains(u"--smoke-background-stream"_s)
                      || m_arguments.contains(u"--smoke-recording"_s)
@@ -516,6 +617,10 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/QueueDropsAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-microphone"_s)
             ? u"qrc:/acceptance/MicrophoneAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
+            ? u"qrc:/acceptance/DesktopAntiAfkAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-stream-controllers"_s)
+            ? u"qrc:/acceptance/DesktopStreamControllersAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-audio-output"_s)
             ? u"qrc:/acceptance/AudioOutputAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-background-stream"_s)
@@ -552,6 +657,11 @@ int AcceptanceSession::startSmokeWorkload()
         fixture->setParent(&m_engine);
         if (m_arguments.contains(u"--smoke-console-spacing"_s))
             fixture->setProperty("recordingSection", m_arguments.contains(u"--smoke-spacing-recording"_s));
+        if (m_arguments.contains(u"--smoke-stream-controllers"_s)) {
+            auto *input = fixture->property("input").value<QObject *>();
+            if (!input) return EXIT_FAILURE;
+            m_engine.rootContext()->setContextProperty(u"ControllerInput"_s, input);
+        }
         if (m_arguments.contains(u"--smoke-stream-recovery"_s)
             || m_arguments.contains(u"--smoke-microphone"_s)
             || m_arguments.contains(u"--smoke-recording"_s)
@@ -600,6 +710,7 @@ int AcceptanceSession::startSmokeWorkload()
                 });
             }
             if (ok && (m_arguments.contains(u"--smoke-command-search"_s)
+                       || m_arguments.contains(u"--smoke-stream-controllers"_s)
                        || m_arguments.contains(u"--smoke-shortcuts"_s)
                        || m_arguments.contains(u"--smoke-console-settings"_s)
                        || m_arguments.contains(u"--bug-report-notice-check"_s)
@@ -898,6 +1009,10 @@ int AcceptanceSession::startSmokeWorkload()
                 return;
             }
             auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+            if (m_arguments.contains(u"--smoke-account-chrome-check"_s) && !accountChromeFits(window)) {
+                m_application.exit(EXIT_FAILURE);
+                return;
+            }
             const auto saved = window && window->grabWindow().save(screenshotPath);
             m_application.exit(saved ? EXIT_SUCCESS : EXIT_FAILURE);
         });

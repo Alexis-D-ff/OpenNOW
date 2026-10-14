@@ -304,8 +304,10 @@ int AcceptanceSession::prepareWindow()
             if (auto *picker = window ? window->findChild<QObject *>(u"desktopAccountPicker"_s) : nullptr) {
                 if (state == u"expired"_s || state == u"switching"_s || state == u"remove"_s)
                     picker->setProperty("currentIndex", 1);
-                if (state == u"manage"_s || state == u"remove"_s)
+                if (state == u"manage"_s || state == u"remove"_s || state == u"remove-error"_s)
                     picker->setProperty("manageMode", true);
+                if (state == u"switch-error"_s || state == u"remove-error"_s)
+                    store->setProperty("accountMessage", u"Could not switch to this saved sign-in."_s);
                 if (state == u"remove"_s) {
                     picker->setProperty("confirmTarget", target);
                     picker->setProperty("confirmKind", u"remove"_s);

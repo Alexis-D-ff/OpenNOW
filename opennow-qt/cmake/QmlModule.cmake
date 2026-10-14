@@ -337,6 +337,8 @@ qt_add_qml_module(opennow-qt
         qml/desktop/store/DesktopStoreShelf.qml
         qml/desktop/stream/DesktopInStreamMenu.qml
         qml/desktop/stream/DesktopSessionStarting.qml
+        qml/desktop/stream/DesktopStreamControllersPage.qml
+        qml/desktop/stream/DesktopStreamDrawerButton.qml
         qml/desktop/stream/DesktopStreamExitConfirm.qml
         qml/desktop/stream/DesktopStreamOverlayHost.qml
         qml/desktop/stream/DesktopStreamScreen.qml

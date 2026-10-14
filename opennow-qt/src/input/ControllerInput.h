@@ -31,6 +31,8 @@ class ControllerInput final : public QObject
     Q_PROPERTY(int leftStickDeadzone READ leftStickDeadzone WRITE setLeftStickDeadzone NOTIFY leftStickDeadzoneChanged)
     Q_PROPERTY(int rightStickDeadzone READ rightStickDeadzone WRITE setRightStickDeadzone NOTIFY rightStickDeadzoneChanged)
     Q_PROPERTY(int vibrationIntensity READ vibrationIntensity WRITE setVibrationIntensity NOTIFY vibrationIntensityChanged)
+    Q_PROPERTY(QVariantMap controllerProfiles READ controllerProfiles WRITE setControllerProfiles NOTIFY controllerProfilesChanged)
+    Q_PROPERTY(bool leftStickNavigationEnabled READ leftStickNavigationEnabled WRITE setLeftStickNavigationEnabled NOTIFY leftStickNavigationEnabledChanged)
 
 public:
     static constexpr quint32 syntheticControllerScanCode = 0x4f504e57;
@@ -80,6 +82,13 @@ public:
     void setLeftStickDeadzone(int percent);
     void setRightStickDeadzone(int percent);
     void setVibrationIntensity(int percent);
+    [[nodiscard]] QVariantMap controllerProfiles() const { return m_controllerProfiles; }
+    void setControllerProfiles(const QVariantMap &profiles);
+    [[nodiscard]] bool leftStickNavigationEnabled() const { return m_leftStickNavigationEnabled; }
+    void setLeftStickNavigationEnabled(bool enabled);
+    Q_INVOKABLE QVariantMap stickSample(quint32 instanceId) const;
+    Q_INVOKABLE bool testRumble(quint32 instanceId);
+    [[nodiscard]] static QString profileKey(quint16 vendor, quint16 product, const char *serial, SDL_GUID guid);
     void playRumble(quint8 controllerId, quint16 lowFrequency, quint16 highFrequency, quint32 durationMs,
                     quint64 sourceIncarnation = 0);
     void stopRumble();
@@ -103,6 +112,8 @@ signals:
     void leftStickDeadzoneChanged();
     void rightStickDeadzoneChanged();
     void vibrationIntensityChanged();
+    void controllerProfilesChanged();
+    void leftStickNavigationEnabledChanged();
     void controllerActivity();
     void controllerActivityDetailed(const QString &device, const QString &control, int value);
     void gamepadSnapshot(quint8 controllerId, quint16 bitmap, quint16 buttons,
@@ -146,6 +157,11 @@ private:
         quint64 incarnation = 0;
         quint16 vendor = 0;
         quint16 product = 0;
+        QString profileKey;
+        bool hasSerial = false;
+        int leftDeadzone = 5;
+        int rightDeadzone = 5;
+        int vibration = 100;
         bool touchpadClick = false;
         bool guideLatched = false;
         std::array<SonyContact, 2> contacts{};
@@ -184,6 +200,8 @@ private:
     void updateShellInputDrain();
     [[nodiscard]] bool isSonySlot(int slotIndex) const;
     void refreshControllerMetadata();
+    void applySlotTuning();
+    void tuneSlot(GamepadSlot &slot) const;
     static quint16 buttonMask(Uint8 button);
     static QPair<qint16, qint16> radialDeadzone(qint16 x, qint16 y, int percent);
     static quint8 triggerValue(qint16 value);
@@ -204,6 +222,8 @@ private:
     int m_leftStickDeadzone = 5;
     int m_rightStickDeadzone = 5;
     int m_vibrationIntensity = 100;
+    QVariantMap m_controllerProfiles;
+    bool m_leftStickNavigationEnabled = true;
     qint64 m_lastControllerMetadataAt = 0;
     qint64 m_lastGamepadSnapshotAt = 0;
     quint64 m_nextIncarnation = 1;
