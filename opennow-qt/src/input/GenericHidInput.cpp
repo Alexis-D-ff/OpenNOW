@@ -497,9 +497,7 @@ void GenericHidInput::run()
         for (const auto &key : sources.keys()) {
             if (failed.contains(sources[key].claim.incarnation)) closeSource(key, true);
         }
-        const auto discoveryElapsed = discoveryClock.elapsed();
-        if (!firstScan && sources.isEmpty()) qWarning("Generic HID idle tick at %lld ms", discoveryElapsed);
-        if (firstScan || discoveryElapsed >= 300) {
+        if (firstScan || discoveryClock.elapsed() >= 300) {
             firstScan = false;
             discoveryClock.restart();
             QHash<QByteArray, QList<GenericHidBackend::Device>> groups;
@@ -684,8 +682,8 @@ void GenericHidInput::run()
             }
             if (!healthy) closeSource(key, true);
         }
-        const auto interval = sources.isEmpty() ? 300 : 4;
-        if (timer.interval() != interval) timer.setInterval(interval);
+        const auto interval = sources.isEmpty() ? std::max<qint64>(1, 300 - discoveryClock.elapsed()) : 4;
+        if (timer.interval() != interval) timer.setInterval(static_cast<int>(interval));
     };
     timer.setTimerType(Qt::PreciseTimer);
     timer.setInterval(300);
