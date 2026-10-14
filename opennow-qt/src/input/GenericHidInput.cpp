@@ -569,21 +569,21 @@ void GenericHidInput::run()
                 }
                 QHash<int, QList<const Collection *>> interfaces;
                 for (const auto &collection : std::as_const(source.collections)) interfaces[collection.device.interfaceNumber].append(&collection);
-                for (auto interface = interfaces.cbegin(); valid && interface != interfaces.cend(); ++interface) {
+                for (auto group = interfaces.cbegin(); valid && group != interfaces.cend(); ++group) {
                     QByteArray descriptor;
                     QSet<quint8> ids;
-                    for (const auto *collection : interface.value()) {
-                        if (interface.value().size() > 1 && (collection->descriptor.isEmpty() || collection->reportIds.isEmpty())) {
+                    for (const auto *collection : group.value()) {
+                        if (group.value().size() > 1 && (collection->descriptor.isEmpty() || collection->reportIds.isEmpty())) {
                             valid = false;
                             break;
                         }
                         for (const auto id : collection->reportIds) if (ids.contains(id)) valid = false;
                         ids.unite(collection->reportIds);
-                        if (interface.value().size() == 1) descriptor = collection->descriptor;
+                        if (group.value().size() == 1) descriptor = collection->descriptor;
                         else descriptor += QByteArray(1, char(0xa4)) + collection->descriptor + QByteArray(1, char(0xb4));
                     }
                     if (descriptor.size() > 4096) valid = false;
-                    source.claim.interfaces.append({quint8(interface.key()), descriptor});
+                    source.claim.interfaces.append({quint8(group.key()), descriptor});
                 }
                 if (!valid) {
                     for (const auto &collection : source.collections) m_backend->close(collection.handle);

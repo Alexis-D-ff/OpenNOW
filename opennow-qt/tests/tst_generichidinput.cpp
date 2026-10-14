@@ -198,7 +198,7 @@ private slots:
         int interfaces = 0;
         for (const auto &claim : claims) interfaces += claim.interfaces.size();
         QCOMPARE(interfaces, 4);
-        for (const auto &claim : claims) for (const auto &interface : claim.interfaces) QVERIFY(interface.number != 0xff);
+        for (const auto &claim : claims) for (const auto &hidInterface : claim.interfaces) QVERIFY(hidInterface.number != 0xff);
         input.stop();
         QCOMPARE(backend->opens, backend->closes);
         QVERIFY(backend->stopped);

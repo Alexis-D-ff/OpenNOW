@@ -871,14 +871,14 @@ OpenNowStreamerStatus NativeStreamRuntime::replaceGenericHidInventory(
     for (const auto &claim : claims) {
         if (claim.interfaces.isEmpty() || claim.interfaces.size() > 16)
             return OPENNOW_STREAMER_INVALID_CONFIG;
-        for (const auto &interface : claim.interfaces) {
-            if (interface.descriptor.size() > 4096) return OPENNOW_STREAMER_MESSAGE_TOO_LARGE;
+        for (const auto &hidInterface : claim.interfaces) {
+            if (hidInterface.descriptor.size() > 4096) return OPENNOW_STREAMER_MESSAGE_TOO_LARGE;
             interfaces[count++] = OpenNowGenericHidInterface{
                 OPENNOW_STREAMER_GENERIC_HID_VERSION, sizeof(OpenNowGenericHidInterface),
-                claim.slot, interface.number, 0, claim.incarnation,
+                claim.slot, hidInterface.number, 0, claim.incarnation,
                 claim.vendor, claim.product, claim.revision, 0,
-                reinterpret_cast<const std::uint8_t *>(interface.descriptor.constData()),
-                static_cast<std::size_t>(interface.descriptor.size())};
+                reinterpret_cast<const std::uint8_t *>(hidInterface.descriptor.constData()),
+                static_cast<std::size_t>(hidInterface.descriptor.size())};
         }
     }
     const auto status = d->api.replaceGenericHidInventory(d->handle, interfaces.data(), count);
