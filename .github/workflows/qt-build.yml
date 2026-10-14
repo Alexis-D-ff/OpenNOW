@@ -710,9 +710,22 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    uses: ./.github/workflows/qt-flatpak.yml
+    with:
+      arch: ${{ matrix.arch }}
+      version: ${{ needs.metadata.outputs.version }}
+      update_public_key: ${{ inputs.update_public_key }}
+
   artifact-inventory:
     name: Verify complete unsigned artifact set
-    needs: [metadata, packages]
+    needs: [metadata, packages, flatpak]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     env:
       RELEASE_VERSION: ${{ needs.metadata.outputs.version }}

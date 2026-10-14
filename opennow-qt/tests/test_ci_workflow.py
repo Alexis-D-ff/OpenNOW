@@ -56,11 +56,12 @@ class CIWorkflowTest(unittest.TestCase):
 
     def test_manual_packages_cannot_bypass_dispatch_gate(self):
         entries = jobs((WORKFLOWS / "qt-build.yml").read_text())
-        self.assertEqual(set(entries), {"metadata", "packages", "artifact-inventory"})
+        self.assertEqual(set(entries), {"metadata", "packages", "flatpak", "artifact-inventory"})
         self.assertIn("    if: github.event_name == 'workflow_dispatch'\n", entries["metadata"])
         self.assertIn("    needs: metadata\n", entries["packages"])
         self.assertNotIn("always()", entries["packages"])
-        self.assertIn("    needs: [metadata, packages]\n", entries["artifact-inventory"])
+        self.assertIn("    needs: metadata\n", entries["flatpak"])
+        self.assertIn("    needs: [metadata, packages, flatpak]\n", entries["artifact-inventory"])
         self.assertIn("        if: inputs.upload_complete\n", entries["artifact-inventory"])
 
     def test_all_platforms_share_one_packaging_matrix(self):

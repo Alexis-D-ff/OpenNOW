@@ -97,7 +97,7 @@ class CIReleaseTrustTest(unittest.TestCase):
         builds, signer = workflow.split("  inventory:\n", 1)
         self.assertIn("runs-on: blacksmith-2vcpu-ubuntu-2404", signer)
         self.assertIn("environment: qt-update-signing", signer)
-        self.assertIn("needs: [preflight, linux, windows, macos]", signer)
+        self.assertIn("needs: [preflight, linux, windows, macos, flatpak]", signer)
         self.assertIn("timeout-minutes: 30", signer)
         self.assertIn("name: Verify signing tools", signer)
         self.assertEqual(signer.count("secrets.OPENNOW_UPDATE_ED25519_PRIVATE_KEY"), 1)

@@ -30,7 +30,9 @@ class StableReleaseTest(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             names = expected_packages("1.0.0", "a" * 40, "stable")
-            self.assertEqual(len(names), 13)
+            self.assertEqual(len(names), 15)
+            self.assertIn("OpenNOW-Qt-1.0.0-Linux-x64.flatpak", names)
+            self.assertIn("OpenNOW-Qt-1.0.0-Linux-arm64.flatpak", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Darwin-arm64.dmg", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Windows-x64-setup.exe", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Windows-arm64-setup.exe", names)
