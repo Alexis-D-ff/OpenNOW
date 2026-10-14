@@ -1287,12 +1287,31 @@ QtObject {
 
     function leaveAccountPicker() {
         const back = AppController.backRoute
-        const ownedSeat = Boolean(activeSession) && sessionOwnerSignedIn()
-        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0
-                || (!ownedSeat && ["stream", "inserting", "joining"].indexOf(back) >= 0))
+        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0)
             AppController.navigateFromLastPrimary("home")
         else
             AppController.goBack()
+    }
+
+    // The one place a completed auth.accounts.switch decides where to land,
+    // whichever entry point started it. Session routes belong to the seat's
+    // owner; anyone else leaves them for Home instead of an empty stream.
+    function settleRouteAfterAccountSwitch() {
+        const route = AppController.route
+        const picking = route === "accounts" || route === "profile-pin"
+        if (!authSession) {
+            if (route === "profile-pin")
+                AppController.navigate("accounts")
+            return
+        }
+        const ownedSeat = Boolean(activeSession) && sessionOwnerSignedIn()
+        const landing = picking ? AppController.backRoute : route
+        if (ownedSeat && picking)
+            AppController.navigate("stream")
+        else if (!ownedSeat && ["stream", "inserting", "joining"].indexOf(landing) >= 0)
+            AppController.navigateFromLastPrimary("home")
+        else if (picking)
+            leaveAccountPicker()
     }
 
     // auth.accounts.switch never ends a cloud seat, so picking anyone but the
@@ -3919,16 +3938,7 @@ QtObject {
                 root.refreshAccountServices()
                 root.refreshSavedAccounts(true)
                 root.pinMessage = qsTr("")
-                const pickerRoute = ["accounts", "profile-pin"].indexOf(AppController.route) >= 0
-                if (root.authSession && root.activeSession && root.sessionOwnerSignedIn() && pickerRoute)
-                    AppController.navigate("stream")
-                else if (root.authSession && pickerRoute)
-                    root.leaveAccountPicker()
-                else if (root.authSession && !root.activeSession
-                         && ["stream", "inserting", "joining"].indexOf(AppController.route) >= 0)
-                    AppController.navigateFromLastPrimary("home")
-                else if (AppController.route === "profile-pin")
-                    AppController.navigate("accounts")
+                root.settleRouteAfterAccountSwitch()
             } else if (requestId === root.accountRemoveRequestId) {
                 root.accountRemoveRequestId = ""
                 root.refreshSavedAccounts(true)

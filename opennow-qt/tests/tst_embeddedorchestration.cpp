@@ -110,7 +110,8 @@ bool prepareAuthentication(QJSEngine &engine)
              "startDeviceLogin", "cancelDeviceLogin", "switchAccount", "refreshSavedAccounts", "showSavedAccountSelection",
              "accountPickerLaunchDecision", "leaveAccountPicker", "accountSwitchEndsSession", "isActiveAccount",
              "chooseAccount", "continueAccountChoice", "chooseAccountAt", "confirmAccountSwitch", "cancelAccountSwitch",
-             "continuePendingAccountSwitch", "beginAccountSignIn", "openPin", "sessionOwnerSignedIn"}) {
+             "continuePendingAccountSwitch", "beginAccountSignIn", "openPin", "sessionOwnerSignedIn",
+             "settleRouteAfterAccountSwitch"}) {
         if (!loadShellFunction(engine, QString::fromLatin1(name))) return false;
     }
     return loadShellFunction(engine, QStringLiteral("onResponseReceived"), 8)
@@ -511,35 +512,72 @@ private slots:
             [chooseAccountAt(0), AppController.overlay].join(',')
         )JS"));
         QCOMPARE(owner.toString(), QStringLiteral("switch,"));
-        const auto left = engine.evaluate(QStringLiteral(R"JS(
-            let backs = 0;
-            AppController.goBack = function() { backs++; this.route = this.backRoute; };
+    }
+
+    void everyAccountSwitchEntryLeavesSessionRoutesItDoesNotOwn()
+    {
+        const QList<std::pair<QString, QString>> callers{
+            {QStringLiteral("qml/desktop/auth/DesktopAccountPicker.qml"), QStringLiteral("ShellStore.chooseAccount(account, !consoleMode)")},
+            {QStringLiteral("qml/desktop/shell/DesktopAccountSwitcher.qml"), QStringLiteral("ShellStore.chooseAccount(others[index], false)")},
+            {QStringLiteral("qml/desktop/shell/DesktopShell.qml"), QStringLiteral("sequence: \"Ctrl+Shift+A\"")},
+            {QStringLiteral("qml/Main.qml"), QStringLiteral("onActivated: ShellStore.chooseAccountAt(index)")},
+            {QStringLiteral("qml/desktop/shell/DesktopCommandPalette.qml"), QStringLiteral("ShellStore.chooseAccount(action.account, false)")}};
+        for (const auto &[file, call] : callers)
+            QVERIFY2(source(file).contains(call), qPrintable(file + QStringLiteral(" no longer switches through ShellStore.chooseAccount")));
+        QCOMPARE(source(QStringLiteral("qml/state/ShellStore.qml")).count(QStringLiteral("settleRouteAfterAccountSwitch()")), 2);
+
+        // Every entry point reaches the store through chooseAccount or
+        // chooseAccountAt from its own route; one switch completion must land
+        // the same way for all of them.
+        const QList<std::tuple<QString, QString, QString, QString, QString>> entries{
+            {QStringLiteral("picker opened from the stream"), QStringLiteral("accounts"), QStringLiteral("stream"), QStringLiteral("chooseAccount(target, true)"), QStringLiteral("home")},
+            {QStringLiteral("PIN screen opened from the stream"), QStringLiteral("profile-pin"), QStringLiteral("stream"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("home")},
+            {QStringLiteral("stream screen"), QStringLiteral("stream"), QStringLiteral("library"), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("queue screen"), QStringLiteral("inserting"), QStringLiteral("library"), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("sidebar popover and Ctrl+Shift+A"), QStringLiteral("library"), QStringLiteral("home"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("library")},
+            {QStringLiteral("Ctrl+1-9"), QStringLiteral("home"), QStringLiteral(""), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("command palette"), QStringLiteral("store"), QStringLiteral("home"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("store")}};
+        for (const auto &[name, route, back, pick, landing] : entries) {
+            QJSEngine engine;
+            QVERIFY(prepareAuthentication(engine));
+            const auto result = engine.evaluate(QStringLiteral(R"JS(
+                resetRegionPing = function() {};
+                AppController.goBack = function() { this.route = this.backRoute; };
+                savedAccounts = [{userId:'old',displayName:'Old'},{userId:'new',displayName:'New'}];
+                const target = savedAccounts[1];
+                activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+                AppController.route = '%1';
+                AppController.backRoute = '%2';
+                const outcome = %3;
+                confirmAccountSwitch();
+                streamStopRequestId = '';
+                activeSession = null;
+                continuePendingAccountSwitch();
+                onResponseReceived(accountSwitchRequestId,
+                    {session:{user:{userId:'new',displayName:'New'},provider:{idpId:'alliance'}},persistence:'secure-store'});
+                [outcome, stopRequests, authSession.user.userId, AppController.route].join(',')
+            )JS").arg(route, back, pick));
+            QVERIFY2(!result.isError(), qPrintable(name + QStringLiteral(": ") + result.toString()));
+            QVERIFY2(result.toString() == QStringLiteral("confirm,1,new,") + landing,
+                qPrintable(name + QStringLiteral(": ") + result.toString()));
+        }
+
+        QJSEngine owner;
+        QVERIFY(prepareAuthentication(owner));
+        const auto back = owner.evaluate(QStringLiteral(R"JS(
+            resetRegionPing = function() {};
+            savedAccounts = [{userId:'old',displayName:'Old'},{userId:'locked',displayName:'Locked',hasPin:true}];
+            authSession = {user:{userId:'locked',displayName:'Locked'},provider:{idpId:'alliance'}};
+            activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
             AppController.route = 'accounts';
             AppController.backRoute = 'stream';
-            activeSession = null;
-            leaveAccountPicker();
-            const afterEndedSeat = AppController.route;
-            AppController.route = 'accounts';
-            AppController.backRoute = 'library';
-            leaveAccountPicker();
-            [afterEndedSeat, AppController.route, backs].join(',')
-        )JS"));
-        QVERIFY2(!left.isError(), qPrintable(left.toString()));
-        QCOMPARE(left.toString(), QStringLiteral("home,library,1"));
-        const auto streamSwitch = engine.evaluate(QStringLiteral(R"JS(
-            reloadCatalogForSession = function() {};
-            refreshAccountServices = function() {};
-            resetRegionPing = function() {};
-            AppController.route = 'stream';
-            activeSession = null;
-            accountSwitchRequestId = '';
-            switchAccount('old', '');
+            const outcome = chooseAccountAt(0);
             onResponseReceived(accountSwitchRequestId,
                 {session:{user:{userId:'old',displayName:'Old'},provider:{idpId:'alliance'}},persistence:'secure-store'});
-            AppController.route
+            [outcome, stopRequests, activeSession.sessionId, AppController.route].join(',')
         )JS"));
-        QVERIFY2(!streamSwitch.isError(), qPrintable(streamSwitch.toString()));
-        QCOMPARE(streamSwitch.toString(), QStringLiteral("home"));
+        QVERIFY2(!back.isError(), qPrintable(back.toString()));
+        QCOMPARE(back.toString(), QStringLiteral("switch,0,seat,stream"));
     }
 
     void exhaustedTransportNegotiationDoesNotReclaimTheSeat_data()
