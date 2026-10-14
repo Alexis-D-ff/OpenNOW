@@ -73,3 +73,76 @@ The reference polling period is 4 ms. Its coalescing can discard intermediate jo
 ## Physical validation still required
 
 Unit tests cover wire bytes, allowlisting, descriptor release, queue bounds, stale device identities, and lifecycle transitions. Physical validation still needs an allowlisted stick or throttle and a wheel: server registration, all axes and buttons, multiple interfaces, focus and overlay release, unplug and reconnect, and output or force-feedback behavior. Windows and macOS runtime behavior, firmware-specific reports, and a real account's effective allowlist require those checks. OS control-report calls can block inside a driver; shutdown joins the worker that owns those calls rather than destroying a live handle. Linux libusb-only paths without a verifiable hidraw identity are not admitted.
+
+## Flight-controls UI
+
+Settings → Controls persists native forwarding in the Rust core, enabled by
+default. Qt changes routing only after the setting write is confirmed. When it
+is off, mapped SDL devices become controllers and unmapped devices are ignored.
+The connected list distinguishes detection (`ready`) from a verified server
+attach (`active`) and refusal (`declined`). Session teardown and capture detach
+reset admission; stale incarnations cannot update a replacement device.
+
+### T.Flight Hotas 4 guidance
+
+Unplug the device, hold **SHARE + OPTIONS**, connect USB, wait a few seconds, then
+release both buttons. Repeat this each time you start a GeForce NOW session.
+This is static guidance, not mode detection: no independently confirmed PS4-mode
+product ID is available, so there is no `needsHidMode` state.
+
+Sources: [Thrustmaster KB 1881](https://support.thrustmaster.com/en/kb/1881-en/)
+and [NVIDIA answer 5787](https://nvidia.custhelp.com/app/answers/detail/a_id/5787).
+
+### Display-name evidence
+
+| VID:PID | Device | Evidence |
+| --- | --- | --- |
+| 046D:C262 | Logitech G920 | usb.ids |
+| 046D:C24F | Logitech G29, PS3 mode | usb.ids |
+| 046D:C26E | Logitech G923, Xbox/PC | Oversteer |
+| 046D:C266 | Logitech G923, PlayStation/PC | Oversteer |
+| 046D:C272 | Logitech G PRO, Xbox/PC / RS50 compatibility mode | Oversteer; TrueForce |
+| 046D:C268 | Logitech G PRO, PlayStation/PC | Oversteer |
+| 046D:C276 | Logitech RS50 | USB product-string evidence |
+| 044F:B67C | Thrustmaster T.Flight Hotas 4 | linux-hardware |
+| 044F:B68D | Thrustmaster T.Flight Hotas One, PC mode | Flight Simulator forum; HID product log |
+| 044F:B68F | Thrustmaster TPR Pendular Rudder | linux-hardware |
+| 044F:0402 | Thrustmaster HOTAS Warthog Joystick | usb.ids |
+| 044F:0404 | Thrustmaster HOTAS Warthog Throttle | usb.ids |
+| 044F:B687 | Thrustmaster TWCS Throttle | usb.ids |
+| 044F:B697 | Thrustmaster T80 / T98 Ferrari 296 GTB | Driver database revision evidence |
+| 06A3:075C | Saitek X52 | usb.ids |
+| 06A3:0762 | Saitek X52 Pro | usb.ids |
+| 0738:2221 | Saitek X56 Stick | x56linux |
+| 0738:A221 | Saitek X56 Throttle | x56linux |
+
+Sources: [usb.ids](https://github.com/usbids/usbids/blob/master/usb.ids),
+[Oversteer USB rules](https://github.com/berarma/oversteer/blob/master/data/udev/99-logitech-wheel-perms.rules),
+[TrueForce driver](https://github.com/mescon/logitech-trueforce-linux-driver),
+[RS50 product-string evidence](https://github.com/mescon/logitech-trueforce-linux-driver/issues/21),
+[Hotas 4](https://linux-hardware.org/?id=usb:044f-b67c),
+[Hotas One](https://forums.flightsimulator.com/t/thrustmaster-hotas-one-not-working-in-geforce-now/757328),
+[HID product log](https://github.com/mixxxdj/mixxx/issues/14632),
+[TPR](https://linux-hardware.org/?id=usb:044f-b68f),
+[T80](https://treexy.com/products/driver-fusion/database/human-interface-devices/thrustmaster/t80/),
+[T98 revision evidence](https://treexy.com/products/driver-fusion/database/id/usb/vid_044f/pid_b697/),
+and [X56](https://github.com/Chryseus/x56linux).
+
+`C272` is shared by two models, and `B697` varies by revision and does not establish
+a firmware mode. The list retains those ambiguities. Paper's T.Flight Rudder
+Pedals row is not in this allowlist; `B68F` identifies TPR instead. The seven wheel
+IDs include G PRO and RS50, so the UI does not collapse them into G29/G920/G923.
+
+### Visual acceptance
+
+The reference is [Paper → OpenNOW → Settings](https://app.paper.design/file/01M11SPTRPMYQB9S9AX948A6WH/p-H-1),
+the Flight controls row of artboards. Run
+`ctest --test-dir build/opennow-qt -R '^qml-flight-controls-' --output-on-failure`.
+Screenshot fixtures use `--smoke-test --allow-multiple-instances --desktop
+--smoke-flight-controls --flight-state STATE --reduced-motion --screenshot PATH`.
+Settings states use `--route settings-input`; stream states use `--route stream`.
+Add `--flight-fullscreen` for fullscreen. Stream fixtures check that closing and
+reopening overlays preserves the same video item and session.
+The sunrise backdrop and telemetry values in these captures are acceptance
+fixtures, not a live gameplay recording. They do not replace the production video
+item or change production admission states.

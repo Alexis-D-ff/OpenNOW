@@ -143,6 +143,174 @@ class GenericHidInputTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void supportedDeviceMetadataMatchesAllowlist()
+    {
+        ControllerInput input;
+        const auto supported = input.supportedFlightDevices();
+        QCOMPARE(supported.size(), 18);
+        QSet<QString> ids;
+        const QSet<QString> allowedTypes{QStringLiteral("stick"), QStringLiteral("throttle"),
+            QStringLiteral("pedals"), QStringLiteral("wheel")};
+        QSet<QString> types;
+        int wheels = 0;
+        for (const auto &value : supported) {
+            const auto entry = value.toMap();
+            const auto id = entry.value(QStringLiteral("vidPid")).toString();
+            const auto parts = id.split(QLatin1Char(':'));
+            QCOMPARE(parts.size(), 2);
+            QVERIFY(GenericHidInput::allowed(parts[0].toUShort(nullptr, 16), parts[1].toUShort(nullptr, 16)));
+            QVERIFY(!entry.value(QStringLiteral("name")).toString().isEmpty());
+            const auto type = entry.value(QStringLiteral("type")).toString();
+            QVERIFY(allowedTypes.contains(type));
+            types.insert(type);
+            QVERIFY(entry.value(QStringLiteral("evidence")).toString().startsWith(QStringLiteral("https://")));
+            if (entry.value(QStringLiteral("type")).toString() == QStringLiteral("wheel")) ++wheels;
+            ids.insert(id);
+        }
+        QCOMPARE(ids.size(), 18);
+        QCOMPARE(types, allowedTypes);
+        QCOMPARE(wheels, 8);
+        QVERIFY(!GenericHidInput::deviceMetadata(0x044f, 0xb67c).value(QStringLiteral("uncertainty")).toString().isEmpty());
+        QVERIFY(!GenericHidInput::deviceMetadata(0x044f, 0xb697).value(QStringLiteral("uncertainty")).toString().isEmpty());
+    }
+
+    void forwardingGateKeepsInventoryAndReincarnatesClaims()
+    {
+        auto backend = std::make_shared<FakeBackend>();
+        backend->devices = {device("a", "parent-a"), device("b", "parent-a", 1),
+            device("unresolved", "")};
+        GenericHidInput input(backend);
+        QTRY_COMPARE(input.claims().size(), 1);
+        QTRY_COMPARE(input.devices().size(), 2);
+        const auto previous = input.claims().first();
+        const auto ids = input.devices();
+        backend->push("a", 1);
+        QTest::qWait(20);
+        input.setForwardingEnabled(false);
+        QVERIFY(input.claims().isEmpty());
+        QVERIFY(input.drain().reports.isEmpty());
+        input.submitOutput(output(previous, 1, QByteArray::fromHex("0102")));
+        QTRY_COMPARE(backend->closeCount(), 2);
+        const auto scans = backend->scanCount();
+        QTRY_VERIFY(backend->scanCount() > scans);
+        QCOMPARE(backend->opens, 2);
+        QCOMPARE(backend->outputCount(), 0);
+        QCOMPARE(input.devices().size(), 2);
+        for (int i = 0; i < ids.size(); ++i) {
+            QCOMPARE(input.devices()[i].deviceId, ids[i].deviceId);
+            QCOMPARE(input.devices()[i].incarnation, quint64(0));
+        }
+        input.setForwardingEnabled(true);
+        QTRY_COMPARE(input.claims().size(), 1);
+        QVERIFY(input.claims().first().incarnation > previous.incarnation);
+        input.stop();
+        QCOMPARE(backend->opens, backend->closes);
+        QVERIFY(!backend->onGuiThread);
+    }
+
+    void controllerInventoryUsesServerAdmissionAndResets()
+    {
+        auto backend = std::make_shared<FakeBackend>();
+        backend->devices = {device("a", "parent-a"), device("b", "parent-a", 1),
+            device("unresolved", "")};
+        ControllerInput input(nullptr, backend);
+        QSignalSpy changes(&input, &ControllerInput::flightDevicesChanged);
+        QTRY_COMPARE(input.genericHidClaims().size(), 1);
+        QTRY_COMPARE(input.flightDevices().size(), 2);
+        QVERIFY(input.forwardFlightControls());
+        for (const auto &value : input.flightDevices()) {
+            const auto entry = value.toMap();
+            QCOMPARE(entry.size(), 6);
+            QCOMPARE(entry.value(QStringLiteral("status")).toString(), QStringLiteral("ready"));
+            QCOMPARE(entry.value(QStringLiteral("player")).toInt(), 0);
+        }
+        const auto previous = input.genericHidClaims().first();
+        const auto statusCount = [&](const QString &status) {
+            int count = 0;
+            for (const auto &value : input.flightDevices())
+                if (value.toMap().value(QStringLiteral("status")).toString() == status) ++count;
+            return count;
+        };
+        input.setGenericHidAdmission(previous.slot, previous.incarnation + 1, GenericHidAdmission::Admitted);
+        QCOMPARE(statusCount(QStringLiteral("active")), 0);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Admitted);
+        QCOMPARE(statusCount(QStringLiteral("active")), 1);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Declined);
+        QCOMPARE(statusCount(QStringLiteral("declined")), 1);
+        input.resetGenericHidAdmissions();
+        QCOMPARE(statusCount(QStringLiteral("ready")), 2);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Admitted);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Pending);
+        QCOMPARE(statusCount(QStringLiteral("ready")), 2);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Admitted);
+        QSignalSpy reports(&input, &ControllerInput::genericHidReport);
+        input.setForwardFlightControls(false);
+        QVERIFY(input.genericHidClaims().isEmpty());
+        QCOMPARE(statusCount(QStringLiteral("ignored")), 2);
+        backend->push("a", 1);
+        input.handleGenericHidOutput(output(previous, 1, QByteArray::fromHex("0102")));
+        QTest::qWait(350);
+        QCOMPARE(reports.size(), 0);
+        QCOMPARE(backend->outputCount(), 0);
+        input.setForwardFlightControls(true);
+        QTRY_COMPARE(input.genericHidClaims().size(), 1);
+        QVERIFY(input.genericHidClaims().first().incarnation > previous.incarnation);
+        QCOMPARE(statusCount(QStringLiteral("ready")), 2);
+        input.setGenericHidAdmission(previous.slot, previous.incarnation, GenericHidAdmission::Admitted);
+        QCOMPARE(statusCount(QStringLiteral("active")), 0);
+        const auto current = input.genericHidClaims().first();
+        input.setGenericHidAdmission(current.slot, current.incarnation, GenericHidAdmission::Declined);
+        {
+            QMutexLocker lock(&backend->mutex);
+            backend->devices.clear();
+        }
+        QTRY_VERIFY(input.flightDevices().isEmpty());
+        QVERIFY(!changes.isEmpty());
+    }
+
+    void allowlistedSdlControllerUsesNormalPathWhenForwardingDisabled()
+    {
+        auto backend = std::make_shared<FakeBackend>();
+        ControllerInput input(nullptr, backend);
+        SDL_VirtualJoystickDesc virtualDevice{};
+        SDL_INIT_INTERFACE(&virtualDevice);
+        virtualDevice.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        virtualDevice.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        virtualDevice.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        virtualDevice.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+        virtualDevice.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        virtualDevice.name = "OpenNOW forwarding toggle test";
+        virtualDevice.vendor_id = 0x044f;
+        virtualDevice.product_id = 0x0402;
+        const auto id = SDL_AttachVirtualJoystick(&virtualDevice);
+        QVERIFY(id && SDL_IsGamepad(id));
+        struct Detach {
+            SDL_JoystickID id;
+            ~Detach() { SDL_DetachVirtualJoystick(id); }
+        } detach{id};
+        QTRY_COMPARE(input.flightDevices().size(), 1);
+        QCOMPARE(input.controllerCount(), 0);
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("ready"));
+        input.setForwardFlightControls(false);
+        QTRY_COMPARE(input.controllerCount(), 1);
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("controller"));
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("player")).toInt(), 1);
+        QCOMPARE(input.deviceClaims().first().product, quint16(0x0402));
+        QVERIFY(input.genericHidClaims().isEmpty());
+        input.setShellCaptureEnabled(false);
+        QSignalSpy snapshots(&input, &ControllerInput::gamepadSnapshot);
+        auto *joystick = SDL_GetJoystickFromID(id);
+        QVERIFY(joystick);
+        QVERIFY(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true));
+        QTRY_VERIFY(!snapshots.isEmpty() && snapshots.last()[2].toUInt() == 0x1000);
+        input.setForwardFlightControls(true);
+        QCOMPARE(input.controllerCount(), 0);
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("ready"));
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("player")).toInt(), 0);
+        input.setForwardFlightControls(false);
+        QCOMPARE(input.controllerCount(), 1);
+    }
+
     void allowlistAndPhysicalIdentity()
     {
         const QList<QPair<quint16, quint16>> pairs{{0x046d, 0xc262}, {0x046d, 0xc24f},

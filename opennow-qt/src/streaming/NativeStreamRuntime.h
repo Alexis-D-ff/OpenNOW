@@ -67,6 +67,8 @@ public:
             const OpenNowStreamer *, const OpenNowGenericHidReport *);
         using TakeGenericHidOutput = OpenNowStreamerStatus (*)(
             const OpenNowStreamer *, OpenNowGenericHidOutput *);
+        using GetGenericHidAdmissions = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, OpenNowGenericHidAdmissions *);
 
         Create create = nullptr;
         Send send = nullptr;
@@ -91,6 +93,7 @@ public:
         ReplaceGenericHidInventory replaceGenericHidInventory = nullptr;
         SubmitGenericHidReport submitGenericHidReport = nullptr;
         TakeGenericHidOutput takeGenericHidOutput = nullptr;
+        GetGenericHidAdmissions getGenericHidAdmissions = nullptr;
     };
 
     static constexpr int DefaultShutdownTimeoutMs = 1'500;
@@ -189,6 +192,8 @@ signals:
     void controllerRumbleStopped();
     void genericHidOutputRequested(const GenericHidReport &report);
     void genericHidOutputStopped();
+    void genericHidAdmissionChanged(quint8 slot, quint64 incarnation, GenericHidAdmission admission);
+    void genericHidAdmissionsReset();
     void callbacksDropped(int count);
 
 private:
@@ -212,6 +217,7 @@ private:
     void publishDecodedDisplaySize(const QSize &size, quint64 generation);
     void resetInputCapture();
     void updateGenericHidOutputPolling();
+    void pollGenericHidAdmissions();
     void setStreaming(bool streaming);
 
     std::unique_ptr<Private> d;

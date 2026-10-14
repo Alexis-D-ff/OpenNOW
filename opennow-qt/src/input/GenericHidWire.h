@@ -5,6 +5,8 @@
 #include <QMetaType>
 #include <QtGlobal>
 
+enum class GenericHidAdmission : quint8 { Pending, Admitted, Declined };
+
 struct GenericHidInterface
 {
     quint8 number = 0;
@@ -35,3 +37,4 @@ Q_DECLARE_METATYPE(GenericHidInterface)
 Q_DECLARE_METATYPE(GenericHidDeviceClaim)
 Q_DECLARE_METATYPE(QList<GenericHidDeviceClaim>)
 Q_DECLARE_METATYPE(GenericHidReport)
+Q_DECLARE_METATYPE(GenericHidAdmission)

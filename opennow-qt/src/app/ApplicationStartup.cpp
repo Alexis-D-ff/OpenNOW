@@ -213,6 +213,10 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
                      &controllerInput, &ControllerInput::handleGenericHidOutput);
     QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidOutputStopped,
                      &controllerInput, &ControllerInput::stopGenericHidOutput);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionChanged,
+                     &controllerInput, &ControllerInput::setGenericHidAdmission);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionsReset,
+                     &controllerInput, &ControllerInput::resetGenericHidAdmissions);
     QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::runningChanged,
                      &controllerInput, [&controllerInput, &nativeStreamRuntime] {
                          if (!nativeStreamRuntime.running()) return;

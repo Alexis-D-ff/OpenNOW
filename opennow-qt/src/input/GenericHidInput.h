@@ -6,6 +6,7 @@
 #include <QMutex>
 #include <QSet>
 #include <QThread>
+#include <QVariantList>
 
 #include <array>
 #include <deque>
@@ -45,6 +46,16 @@ class GenericHidInput final : public QThread
 public:
     static constexpr int maxSources = 8;
     static constexpr int maxReportBytes = 256;
+    struct DetectedDevice {
+        QString deviceId;
+        QByteArray key;
+        QString serial;
+        quint16 vendor = 0;
+        quint16 product = 0;
+        quint8 slot = 0;
+        quint64 incarnation = 0;
+        bool operator==(const DetectedDevice &) const = default;
+    };
     struct Batch {
         bool inventoryChanged = false;
         QList<GenericHidDeviceClaim> claims;
@@ -54,9 +65,14 @@ public:
     explicit GenericHidInput(std::shared_ptr<GenericHidBackend> backend = {}, QObject *parent = nullptr);
     ~GenericHidInput() override;
     static bool allowed(quint16 vendor, quint16 product);
+    static QVariantList supportedDevices();
+    static QVariantMap deviceMetadata(quint16 vendor, quint16 product);
     static QByteArray groupKey(const GenericHidBackend::Device &device);
+    static QByteArray physicalDeviceKey(quint16 vendor, quint16 product, const char *path);
     Batch drain(int limit = 32);
     QList<GenericHidDeviceClaim> claims() const;
+    QList<DetectedDevice> devices() const;
+    void setForwardingEnabled(bool enabled);
     void submitOutput(const GenericHidReport &report);
     void clearOutputs();
     void stop();
@@ -86,4 +102,7 @@ private:
     int m_drainSlot = 0;
     bool m_inventoryChanged = false;
     QSet<quint64> m_failedSources;
+    QList<DetectedDevice> m_devices;
+    bool m_forwardingEnabled = true;
+    quint64 m_forwardingEpoch = 0;
 };

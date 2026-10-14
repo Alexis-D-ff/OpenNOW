@@ -44,6 +44,10 @@ QtObject {
     readonly property color amber: "#FFD166"
     readonly property color ledAmber: "#F5A623"
     readonly property color danger: "#FF8A80"
+    readonly property color flightReady: Theme.lightMode ? "#126B4E" : green
+    readonly property color flightMint: "#6EE7B7"
+    readonly property color flightWarning: Theme.lightMode ? "#806017" : amber
+    readonly property color flightDeclined: Theme.lightMode ? "#A9362C" : danger
     readonly property string displayFont: Theme.displayFont
     readonly property string bodyFont: Theme.bodyFont
     readonly property string monoFont: Theme.monoFont

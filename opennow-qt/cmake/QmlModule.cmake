@@ -5,6 +5,14 @@ set_source_files_properties(qml/components/InputPromptIcons.qml PROPERTIES QT_QM
 set_source_files_properties(qml/components/ConsoleStores.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 set(OPENNOW_CONTROLLER_ICON_FILES
+    res/input-prompts/flight_stick.svg
+    res/input-prompts/flight_stick-dark.svg
+    res/input-prompts/flight_throttle.svg
+    res/input-prompts/flight_throttle-dark.svg
+    res/input-prompts/flight_pedals.svg
+    res/input-prompts/flight_pedals-dark.svg
+    res/input-prompts/flight_wheel.svg
+    res/input-prompts/flight_wheel-dark.svg
     res/input-prompts/controller_playstation5-dark.svg
     res/input-prompts/controller_playstation5.svg
     res/input-prompts/controller_xboxseries-dark.svg
@@ -315,6 +323,7 @@ qt_add_qml_module(opennow-qt
         qml/desktop/settings/pages/DesktopSettingsConsolePage.qml
         qml/desktop/settings/pages/DesktopSettingsControllersPage.qml
         qml/desktop/settings/pages/DesktopSettingsControlsPage.qml
+        qml/desktop/settings/controls/DesktopSettingsFlightControlsPanel.qml
         qml/desktop/settings/pages/DesktopSettingsInterfacePage.qml
         qml/desktop/settings/pages/DesktopSettingsLookPage.qml
         qml/desktop/settings/pages/DesktopSettingsNetworkPage.qml

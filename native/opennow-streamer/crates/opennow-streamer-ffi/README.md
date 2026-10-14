@@ -13,12 +13,19 @@ This crate exposes `opennow-streamer-core::Engine` as a C-compatible in-process 
 - `opennow_streamer_destroy` consumes the handle exactly once, waits for the engine and both callback queues to drain, and then returns. No call may race with destroy. A null handle is rejected; reusing a destroyed pointer is caller-side undefined behavior.
 - Every exported function catches Rust panics before they can unwind through the C ABI. A worker-thread panic closes the command queue.
 
-### Generic flight controls and wheels (ABI 14)
+### Generic flight controls and wheels (ABI 15)
 
-Rebuild Qt and the native library together with ABI 14. The generic-HID exports are
+Rebuild Qt and the native library together with ABI 15. The generic-HID exports are
 `opennow_streamer_replace_generic_hid_inventory`,
-`opennow_streamer_submit_generic_hid_report`, and
-`opennow_streamer_take_generic_hid_output`.
+`opennow_streamer_submit_generic_hid_report`,
+`opennow_streamer_take_generic_hid_output`, and
+`opennow_streamer_get_generic_hid_admissions`.
+
+The admission query takes a versioned `OpenNowGenericHidAdmissions` snapshot initialized
+with `OPENNOW_STREAMER_GENERIC_HID_VERSION` and its C size. It returns at most eight
+rows keyed by slot and incarnation: Pending until a sent attach receives a valid
+control-1 response, Admitted after acceptance, or Declined after refusal. Detach
+fallback and session replacement reset admission to Pending without inventing acceptance.
 
 Inventory rows use versioned `OpenNowGenericHidInterface` structures. Each row identifies
 one interface of a source slot and carries the source incarnation, VID, PID, revision,
@@ -46,7 +53,7 @@ the physical checks still required.
 
 ### Server timers and termination (ABI 13)
 
-Rebuild Qt and the native library together with the current ABI 14. Structure layouts and callback
+Rebuild Qt and the native library together with the current ABI 15. Structure layouts and callback
 ownership are unchanged. `event_callback` now delivers generation-scoped
 `session-timer` events with `startId`, `timerType`, `secondsLeft` and `active`.
 Timer type 4 warns of idle expiry; type 5 clears the warning. Successful gameplay

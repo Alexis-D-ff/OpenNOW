@@ -308,6 +308,11 @@ ApplicationWindow {
     }
     Binding {
         target: ControllerInput
+        property: "forwardFlightControls"
+        value: ShellStore.settingsOwnerState.forwardFlightControls
+    }
+    Binding {
+        target: ControllerInput
         property: "rightStickDeadzone"
         value: Number(ShellStore.settings.controllerRightStickDeadzone ?? 5)
     }

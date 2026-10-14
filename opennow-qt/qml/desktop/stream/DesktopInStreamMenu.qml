@@ -40,6 +40,13 @@ FocusScope {
     readonly property bool invitesAvailable: Boolean(ShellStore.socialCapabilities && ShellStore.socialCapabilities.invitesAvailable)
     readonly property bool controllerHints: AppController.inputMode === "controller"
     readonly property var pads: ControllerInput.availableControllers || []
+    readonly property var flightDevices: ControllerInput.flightDevices || []
+    readonly property bool flightVisible: ControllerInput.forwardFlightControls && flightDevices.length > 0
+    readonly property int activeFlightCount: flightDevices.filter(device => device.status === "active").length
+    readonly property int declinedFlightCount: flightDevices.filter(device => device.status === "declined").length
+    readonly property color flightColor: activeFlightCount === flightDevices.length
+        ? (Theme.lightMode ? DesktopTokens.flightReady : DesktopTokens.flightMint)
+        : (Theme.lightMode ? DesktopTokens.flightWarning : DesktopTokens.ledAmber)
     readonly property int drawerMargin: 16
     readonly property int drawerWidth: Math.min(456, root.width - 2 * drawerMargin)
 
@@ -211,6 +218,7 @@ FocusScope {
         property string title: ""
         property string subtitle: ""
         property string detail: ""
+        property color detailColor: DesktopTokens.textFaint
         property string glyph: ""
         property bool danger: false
         property bool drillIn: false
@@ -256,7 +264,7 @@ FocusScope {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: row.detail !== ""
                 text: row.detail
-                color: DesktopTokens.textFaint
+                color: row.detailColor
                 font.family: DesktopTokens.monoFont; font.pixelSize: 9
                 font.weight: Font.Bold; font.letterSpacing: 0.8
             }
@@ -467,15 +475,22 @@ FocusScope {
                             width: Math.max(0, statusBadge.x - x - 12)
                             spacing: 12
                             Repeater {
-                                model: [
-                                    { label: "FPS", value: root.fpsText },
-                                    { label: qsTr("OUTPUT"), value: root.resolution },
-                                    { label: qsTr("BITRATE"), value: root.bitrateText }
-                                ]
+                                id: headerMetrics
+                                model: {
+                                    const metrics = [
+                                        { label: "FPS", value: root.fpsText },
+                                        { label: qsTr("OUTPUT"), value: root.resolution },
+                                        { label: qsTr("BITRATE"), value: root.bitrateText }
+                                    ]
+                                    if (root.flightVisible)
+                                        metrics.push({ label: qsTr("FLIGHT"), value: root.activeFlightCount === root.flightDevices.length
+                                            ? String(root.activeFlightCount) : root.activeFlightCount + "/" + root.flightDevices.length, flight: true })
+                                    return metrics
+                                }
                                 delegate: Column {
                                     id: headerMetric
                                     required property var modelData
-                                    width: Math.max(0, (metricRow.width - metricRow.spacing * 2) / 3)
+                                    width: Math.max(0, (metricRow.width - metricRow.spacing * (headerMetrics.count - 1)) / headerMetrics.count)
                                     spacing: 4
                                     Text {
                                         width: headerMetric.width
@@ -487,14 +502,23 @@ FocusScope {
                                         font.letterSpacing: 1
                                         elide: Text.ElideRight
                                     }
-                                    Text {
+                                    Row {
                                         width: headerMetric.width
-                                        text: headerMetric.modelData.value
-                                        color: DesktopTokens.textHigh
-                                        font.family: DesktopTokens.monoFont
-                                        font.pixelSize: 14
-                                        font.weight: Font.Bold
-                                        elide: Text.ElideRight
+                                        spacing: 4
+                                        Rectangle {
+                                            visible: headerMetric.modelData.flight === true
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 6; height: 6; radius: 3; color: root.flightColor
+                                        }
+                                        Text {
+                                            width: Math.max(0, headerMetric.width - (headerMetric.modelData.flight ? 10 : 0))
+                                            text: headerMetric.modelData.value
+                                            color: headerMetric.modelData.flight ? root.flightColor : DesktopTokens.textHigh
+                                            font.family: DesktopTokens.monoFont
+                                            font.pixelSize: 14
+                                            font.weight: Font.Bold
+                                            elide: Text.ElideRight
+                                        }
                                     }
                                 }
                             }
@@ -621,9 +645,16 @@ FocusScope {
                         objectName: "streamControllersRow"
                         glyph: "desktop-gamepad.svg"
                         title: qsTr("Controllers")
-                        subtitle: root.pads.length === 0 ? qsTr("No controller connected")
+                        subtitle: root.flightVisible
+                            ? (root.pads.length === 0 ? qsTr("No pad") : qsTr("%1 connected").arg(root.pads.length))
+                                + " · " + qsTr("%1 of %2 flight devices forwarded").arg(root.activeFlightCount).arg(root.flightDevices.length)
+                            : root.pads.length === 0 ? qsTr("No controller connected")
                             : root.pads.length === 1 ? qsTr("1 connected · dead zones and vibration")
                             : qsTr("%1 connected · dead zones and vibration").arg(root.pads.length)
+                        detail: !root.flightVisible || root.activeFlightCount === root.flightDevices.length ? ""
+                            : "● " + (root.declinedFlightCount > 0 ? qsTr("%1 DECLINED").arg(root.declinedFlightCount)
+                                : qsTr("%1 NOT SENT").arg(root.flightDevices.length - root.activeFlightCount))
+                        detailColor: root.flightColor
                         drillIn: true
                         onClicked: root.runAction("controllers")
                     }

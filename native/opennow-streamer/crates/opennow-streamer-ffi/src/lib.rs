@@ -7,7 +7,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use opennow_streamer_core::{Engine, EventSender};
-use opennow_streamer_hid::generic::{GenericDevice, GenericError, GenericInterface, GenericReport};
+use opennow_streamer_hid::generic::{
+    GenericAdmission, GenericDevice, GenericError, GenericInterface, GenericReport,
+};
 use opennow_streamer_hid::{
     HidRuntime, InventoryOutcome, SdlDeviceClaim, SnapshotAdmission, SonySnapshot,
 };
@@ -24,7 +26,7 @@ use serde_json::Value;
 
 static FIRST_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
 
-pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 14;
+pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 15;
 pub const OPENNOW_STREAMER_MAX_TEXT_BYTES: usize =
     opennow_streamer_protocol::text_input::MAX_TEXT_BYTES;
 pub const OPENNOW_STREAMER_VULKAN_DEVICE_INFO_VERSION: u32 = 1;
@@ -76,6 +78,24 @@ pub struct OpenNowSonySnapshot {
 pub const OPENNOW_STREAMER_SONY_SNAPSHOT_VERSION: u32 = 1;
 
 pub const OPENNOW_STREAMER_GENERIC_HID_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OpenNowGenericHidAdmission {
+    pub slot: u8,
+    pub admission: u8,
+    pub reserved: [u8; 6],
+    pub incarnation: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenNowGenericHidAdmissions {
+    pub version: u32,
+    pub struct_size: usize,
+    pub count: usize,
+    pub devices: [OpenNowGenericHidAdmission; 8],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1409,6 +1429,52 @@ pub unsafe extern "C" fn opennow_streamer_take_generic_hid_output(
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+/// `handle` must be null or live and not being destroyed. `admissions` must be null
+/// or have a readable version/size header and writable storage for the complete snapshot.
+pub unsafe extern "C" fn opennow_streamer_get_generic_hid_admissions(
+    handle: *const OpenNowStreamer,
+    admissions: *mut OpenNowGenericHidAdmissions,
+) -> OpenNowStreamerStatus {
+    ffi_status(|| {
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return OpenNowStreamerStatus::NullPointer;
+        };
+        if admissions.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let version = unsafe { ptr::addr_of!((*admissions).version).read() };
+        let struct_size = unsafe { ptr::addr_of!((*admissions).struct_size).read() };
+        if version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+            || struct_size < size_of::<OpenNowGenericHidAdmissions>()
+        {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        let snapshot = handle.hid.generic.admissions_snapshot();
+        let mut result = OpenNowGenericHidAdmissions {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidAdmissions>(),
+            count: snapshot.len(),
+            devices: [OpenNowGenericHidAdmission::default(); 8],
+        };
+        for (target, source) in result.devices.iter_mut().zip(snapshot) {
+            *target = OpenNowGenericHidAdmission {
+                slot: source.slot,
+                incarnation: source.incarnation,
+                admission: match source.admission {
+                    GenericAdmission::Pending => 0,
+                    GenericAdmission::Admitted => 1,
+                    GenericAdmission::Declined => 2,
+                },
+                reserved: [0; 6],
+            };
+        }
+        unsafe { admissions.write(result) };
+        OpenNowStreamerStatus::Ok
+    })
+}
+
+#[unsafe(no_mangle)]
 unsafe extern "C" fn opennow_streamer_submit_sony_snapshot(
     handle: *const OpenNowStreamer,
     snapshot: *const OpenNowSonySnapshot,
@@ -2027,7 +2093,7 @@ mod tests {
 
     #[test]
     fn abi_twelve_adds_the_deterministic_graphics_unsupported_status() {
-        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 14);
+        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 15);
         assert_eq!(OpenNowStreamerStatus::GraphicsUnsupported as i32, 15);
         let header = include_str!("../include/opennow_streamer_ffi.h");
         assert!(header.contains("OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED = 15,"));
@@ -2974,7 +3040,7 @@ mod tests {
     #[test]
     fn generic_output_contract_is_versioned_bounded_and_matches_header() {
         let header = include_str!("../include/opennow_streamer_ffi.h");
-        assert!(header.contains("#define OPENNOW_STREAMER_FFI_ABI_VERSION 14u"));
+        assert!(header.contains("#define OPENNOW_STREAMER_FFI_ABI_VERSION 15u"));
         assert!(header.contains("#define OPENNOW_STREAMER_GENERIC_HID_VERSION 1u"));
         for name in [
             "OpenNowGenericHidInterface",
@@ -3067,6 +3133,88 @@ mod tests {
             unsafe { opennow_streamer_take_generic_hid_output(&handle, &mut output) },
             OpenNowStreamerStatus::Closed
         );
+    }
+
+    #[test]
+    fn generic_admission_query_is_versioned_bounded_and_keyed_by_identity() {
+        use opennow_streamer_hid::generic::GenericSession;
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("opennow_streamer_get_generic_hid_admissions("));
+        assert_eq!(size_of::<OpenNowGenericHidAdmission>(), 16);
+        assert_eq!(size_of::<OpenNowGenericHidAdmissions>(), 152);
+        let messages = Box::new(CallbackMessages::default());
+        let handle = graphics_test_handle(&messages);
+        let mut output = OpenNowGenericHidAdmissions {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidAdmissions>(),
+            count: 0,
+            devices: [OpenNowGenericHidAdmission::default(); 8],
+        };
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(ptr::null(), &mut output) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, ptr::null_mut()) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        output.version = 2;
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
+        output.struct_size -= 1;
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.struct_size += 1;
+        let interfaces = (0..8)
+            .map(|slot| generic_interface(slot, 3))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unsafe {
+                opennow_streamer_replace_generic_hid_inventory(
+                    &handle,
+                    interfaces.as_ptr(),
+                    interfaces.len(),
+                )
+            },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(output.count, 8);
+        for (slot, row) in output.devices.iter().enumerate() {
+            assert_eq!(row.slot, slot as u8);
+            assert_eq!(row.incarnation, slot as u64 + 41);
+            assert_eq!(row.admission, 0);
+            assert_eq!(row.reserved, [0; 6]);
+        }
+        handle.hid.generic.bind_session(1);
+        let mut session = GenericSession::new(1);
+        let (inventory, _) = handle.hid.generic.inventory_snapshot();
+        for action in session.reconcile(&inventory, true) {
+            session.sent(&action);
+        }
+        session.handle_response(10, 1, 0, 22);
+        session.handle_response(11, 0, 0, 23);
+        handle.hid.generic.publish_admissions(&session);
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(output.devices[0].admission, 1);
+        assert_eq!(output.devices[1].admission, 2);
+        handle.hid.generic.unbind_session(1);
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert!(output.devices.iter().all(|row| row.admission == 0));
     }
 
     #[test]

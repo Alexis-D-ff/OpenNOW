@@ -30,7 +30,7 @@ int profileField(const QVariantMap &profile, QLatin1StringView name, int fallbac
 }
 }
 
-ControllerInput::ControllerInput(QObject *parent)
+ControllerInput::ControllerInput(QObject *parent, std::shared_ptr<GenericHidBackend> hidBackend)
     : QObject(parent), m_pollTimer(this)
 {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -41,7 +41,7 @@ ControllerInput::ControllerInput(QObject *parent)
     if (!m_sdlReady) {
         qWarning("SDL gamepad initialization failed: %s", SDL_GetError());
     }
-    m_genericHid = std::make_unique<GenericHidInput>();
+    m_genericHid = std::make_unique<GenericHidInput>(std::move(hidBackend));
     connect(m_genericHid.get(), &GenericHidInput::inventoryChanged, this, [this] {
         updatePollInterval();
         poll();
@@ -92,6 +92,138 @@ QVariantList ControllerInput::controllers() const
 QVariantList ControllerInput::availableControllers() const
 {
     return m_availableControllerMetadata;
+}
+
+QVariantList ControllerInput::supportedFlightDevices() const
+{
+    return GenericHidInput::supportedDevices();
+}
+
+void ControllerInput::setForwardFlightControls(bool enabled)
+{
+    if (m_forwardFlightControls == enabled) return;
+    m_forwardFlightControls = enabled;
+    m_genericHid->setForwardingEnabled(enabled);
+    m_genericHidAdmissions.clear();
+    emit genericDeviceClaimsChanged();
+    if (enabled) {
+        QList<SDL_JoystickID> closing;
+        for (const auto &slot : m_slots)
+            if (slot.gamepad && GenericHidInput::allowed(slot.vendor, slot.product)) closing.append(slot.instanceId);
+        for (const auto id : closing) closeController(id);
+    } else if (m_sdlReady) {
+        int count = 0;
+        if (auto *ids = SDL_GetGamepads(&count)) {
+            for (int index = 0; index < count; ++index) openController(ids[index]);
+            SDL_free(ids);
+        }
+    }
+    refreshFlightDevices();
+    updatePollInterval();
+    emit forwardFlightControlsChanged();
+}
+
+void ControllerInput::setGenericHidAdmission(quint8 slot, quint64 incarnation, GenericHidAdmission admission)
+{
+    const auto claims = genericHidClaims();
+    if (!incarnation || std::none_of(claims.cbegin(), claims.cend(), [&](const auto &claim) {
+            return claim.slot == slot && claim.incarnation == incarnation;
+        })) return;
+    if (m_genericHidAdmissions.value(incarnation, GenericHidAdmission::Pending) == admission) return;
+    m_genericHidAdmissions.insert(incarnation, admission);
+    refreshFlightDevices();
+}
+
+void ControllerInput::resetGenericHidAdmissions()
+{
+    if (m_genericHidAdmissions.isEmpty()) return;
+    m_genericHidAdmissions.clear();
+    refreshFlightDevices();
+}
+
+void ControllerInput::refreshFlightDevices()
+{
+    const auto devices = m_genericHid ? m_genericHid->devices() : QList<GenericHidInput::DetectedDevice>{};
+    const auto claims = genericHidClaims();
+    for (auto it = m_genericHidAdmissions.begin(); it != m_genericHidAdmissions.end();) {
+        if (std::none_of(claims.cbegin(), claims.cend(), [&](const auto &claim) { return claim.incarnation == it.key(); }))
+            it = m_genericHidAdmissions.erase(it);
+        else ++it;
+    }
+    QVariantList result;
+    QSet<SDL_JoystickID> matched;
+    int count = 0;
+    auto *ids = m_sdlReady ? SDL_GetJoysticks(&count) : nullptr;
+    QHash<SDL_JoystickID, QByteArray> physicalKeys;
+    for (int index = 0; index < count; ++index) {
+        const auto id = ids[index];
+        physicalKeys.insert(id, GenericHidInput::physicalDeviceKey(SDL_GetJoystickVendorForID(id),
+            SDL_GetJoystickProductForID(id), SDL_GetJoystickPathForID(id)));
+    }
+    for (const auto &device : devices) {
+        auto metadata = GenericHidInput::deviceMetadata(device.vendor, device.product);
+        metadata.remove(QStringLiteral("evidence"));
+        metadata.remove(QStringLiteral("uncertainty"));
+        metadata.insert(QStringLiteral("deviceId"), device.deviceId);
+        QString status = m_forwardFlightControls ? QStringLiteral("ready") : QStringLiteral("ignored");
+        int player = 0;
+        if (m_forwardFlightControls && device.incarnation) {
+            switch (m_genericHidAdmissions.value(device.incarnation, GenericHidAdmission::Pending)) {
+            case GenericHidAdmission::Pending: break;
+            case GenericHidAdmission::Admitted: status = QStringLiteral("active"); break;
+            case GenericHidAdmission::Declined: status = QStringLiteral("declined"); break;
+            }
+        }
+        QList<SDL_JoystickID> candidates;
+        for (int index = 0; index < count; ++index) {
+            const auto id = ids[index];
+            if (matched.contains(id) || SDL_GetJoystickVendorForID(id) != device.vendor
+                || SDL_GetJoystickProductForID(id) != device.product) continue;
+            auto *joystick = SDL_GetJoystickFromID(id);
+            const auto *serial = joystick ? SDL_GetJoystickSerial(joystick) : nullptr;
+            const auto samePhysicalDevice = !device.key.isEmpty() && physicalKeys.value(id) == device.key;
+            const auto sameSerial = !device.serial.isEmpty() && serial && QString::fromUtf8(serial) == device.serial;
+            if (!samePhysicalDevice && !sameSerial) continue;
+            candidates.append(id);
+        }
+        const auto matchingDevices = std::count_if(devices.cbegin(), devices.cend(), [&](const auto &entry) {
+            return entry.vendor == device.vendor && entry.product == device.product
+                && ((!entry.key.isEmpty() && entry.key == device.key)
+                    || (!device.serial.isEmpty() && entry.serial == device.serial));
+        });
+        if (candidates.size() == 1 && matchingDevices == 1) {
+            const auto id = candidates.first();
+            matched.insert(id);
+            if (!m_forwardFlightControls && m_gamepadSlots.contains(id)) {
+                status = QStringLiteral("controller");
+                player = m_gamepadSlots.value(id) + 1;
+            }
+        }
+        metadata.insert(QStringLiteral("status"), status);
+        metadata.insert(QStringLiteral("player"), player);
+        result.append(metadata);
+    }
+    for (int index = 0; index < count; ++index) {
+        const auto id = ids[index];
+        if (matched.contains(id)) continue;
+        auto metadata = GenericHidInput::deviceMetadata(SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id));
+        if (metadata.isEmpty()) continue;
+        metadata.remove(QStringLiteral("evidence"));
+        metadata.remove(QStringLiteral("uncertainty"));
+        metadata.insert(QStringLiteral("deviceId"), QStringLiteral("sdl:%1").arg(id));
+        const auto open = !m_forwardFlightControls && m_gamepadSlots.contains(id);
+        metadata.insert(QStringLiteral("status"), m_forwardFlightControls ? QStringLiteral("ready")
+            : open ? QStringLiteral("controller") : QStringLiteral("ignored"));
+        metadata.insert(QStringLiteral("player"), open ? m_gamepadSlots.value(id) + 1 : 0);
+        result.append(metadata);
+    }
+    SDL_free(ids);
+    std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+        return a.toMap().value(QStringLiteral("deviceId")).toString() < b.toMap().value(QStringLiteral("deviceId")).toString();
+    });
+    if (result == m_flightDevices) return;
+    m_flightDevices = std::move(result);
+    emit flightDevicesChanged();
 }
 
 quint32 ControllerInput::inputControllerId() const
@@ -196,6 +328,7 @@ void ControllerInput::refreshControllerMetadata()
         m_availableControllerMetadata = std::move(available);
         emit availableControllersChanged();
     }
+    refreshFlightDevices();
 }
 
 bool ControllerInput::shellCaptureEnabled() const
@@ -444,8 +577,9 @@ void ControllerInput::poll()
         if (batch.inventoryChanged) {
             updatePollInterval();
             emit genericDeviceClaimsChanged();
+            refreshFlightDevices();
         }
-        for (const auto &report : batch.reports) emit genericHidReport(report);
+        if (m_forwardFlightControls) for (const auto &report : batch.reports) emit genericHidReport(report);
     }
     if (!m_sdlReady) return;
     SDL_Event event;
@@ -474,6 +608,8 @@ void ControllerInput::poll()
         default:
             break;
         }
+        if (event.type == SDL_EVENT_JOYSTICK_ADDED || event.type == SDL_EVENT_JOYSTICK_REMOVED
+            || event.type == SDL_EVENT_GAMEPAD_ADDED || event.type == SDL_EVENT_GAMEPAD_REMOVED) refreshFlightDevices();
     }
 
     const auto now = m_clock.elapsed();
@@ -491,7 +627,7 @@ void ControllerInput::poll()
 void ControllerInput::openController(SDL_JoystickID id)
 {
     if (m_gamepadSlots.contains(id)) return;
-    if (m_genericHid && GenericHidInput::allowed(SDL_GetGamepadVendorForID(id), SDL_GetGamepadProductForID(id))) return;
+    if (m_forwardFlightControls && GenericHidInput::allowed(SDL_GetGamepadVendorForID(id), SDL_GetGamepadProductForID(id))) return;
     const auto freeSlot = std::find_if(m_slots.begin(), m_slots.end(),
                                       [](const GamepadSlot &slot) { return !slot.gamepad; });
     if (freeSlot == m_slots.end()) return;
@@ -526,12 +662,12 @@ void ControllerInput::openController(SDL_JoystickID id)
 
 QList<GenericHidDeviceClaim> ControllerInput::genericHidClaims() const
 {
-    return m_genericHid ? m_genericHid->claims() : QList<GenericHidDeviceClaim>{};
+    return m_forwardFlightControls && m_genericHid ? m_genericHid->claims() : QList<GenericHidDeviceClaim>{};
 }
 
 void ControllerInput::handleGenericHidOutput(const GenericHidReport &report)
 {
-    if (m_genericHid) m_genericHid->submitOutput(report);
+    if (m_forwardFlightControls && m_genericHid) m_genericHid->submitOutput(report);
 }
 
 void ControllerInput::stopGenericHidOutput()

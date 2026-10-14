@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::generic::{
-    GenericDevice, GenericError, GenericOutput, GenericReport, MAX_GENERIC_SOURCES,
-    validate_inventory, validate_operation, validate_report,
+    GenericAdmission, GenericAdmissionStatus, GenericDevice, GenericError, GenericOutput,
+    GenericReport, GenericSession, MAX_GENERIC_SOURCES, validate_inventory, validate_operation,
+    validate_report,
 };
 
 const MAX_REPORTS_PER_SOURCE: usize = 64;
@@ -45,6 +46,7 @@ struct State {
     next_source: usize,
     outputs: VecDeque<GenericOutput>,
     output_bytes: usize,
+    admissions: [Option<GenericAdmissionStatus>; MAX_GENERIC_SOURCES],
 }
 
 impl State {
@@ -53,6 +55,7 @@ impl State {
         self.next_source = 0;
         self.outputs.clear();
         self.output_bytes = 0;
+        self.admissions = Default::default();
     }
 
     fn source(&self, slot: u8, incarnation: u64, interface: u8) -> Result<(), GenericError> {
@@ -102,6 +105,7 @@ impl GenericRuntime {
             if state.inventory.contains(&device) {
                 continue;
             }
+            state.admissions[usize::from(device.slot)] = None;
             let lane = &mut state.lanes[usize::from(device.slot)];
             lane.clear_reports();
             lane.release.get_or_insert(device.incarnation);
@@ -122,6 +126,37 @@ impl GenericRuntime {
     pub fn inventory_snapshot(&self) -> (Vec<GenericDevice>, u64) {
         let state = self.lock();
         (state.inventory.clone(), state.inventory_epoch)
+    }
+
+    pub fn publish_admissions(&self, session: &GenericSession) {
+        let mut state = self.lock();
+        if state.binding != Some(session.generation()) {
+            return;
+        }
+        for index in 0..state.inventory.len() {
+            let device = &state.inventory[index];
+            let status = GenericAdmissionStatus {
+                slot: device.slot,
+                incarnation: device.incarnation,
+                admission: session.admission(device),
+            };
+            state.admissions[usize::from(status.slot)] = Some(status);
+        }
+    }
+
+    pub fn admissions_snapshot(&self) -> Vec<GenericAdmissionStatus> {
+        let state = self.lock();
+        state
+            .inventory
+            .iter()
+            .map(|device| {
+                state.admissions[usize::from(device.slot)].unwrap_or(GenericAdmissionStatus {
+                    slot: device.slot,
+                    incarnation: device.incarnation,
+                    admission: GenericAdmission::Pending,
+                })
+            })
+            .collect()
     }
 
     pub fn submit_report(&self, report: GenericReport) -> Result<(), GenericError> {
@@ -272,6 +307,104 @@ mod tests {
         runtime
     }
 
+    #[test]
+    fn admission_tracks_verified_responses_and_resets_on_detach_or_replacement() {
+        let runtime = runtime();
+        let mut source = device(0, 1);
+        source.interfaces[0].descriptor.clear();
+        runtime.replace_inventory(vec![source.clone()]).unwrap();
+        let mut session = GenericSession::new(1);
+        let actions = session.reconcile(&[source.clone()], true);
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot()[0].admission,
+            GenericAdmission::Pending
+        );
+        session.handle_response(10, 1, 0, 22);
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot()[0].admission,
+            GenericAdmission::Pending
+        );
+        session.sent(&actions[0]);
+        session.handle_response(10, 1, 0, 22);
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot()[0].admission,
+            GenericAdmission::Admitted
+        );
+        let detach = session.set_capture(false);
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot()[0].admission,
+            GenericAdmission::Pending
+        );
+        session.sent(&detach[0]);
+        let actions = session.set_capture(true);
+        session.sent(&actions[0]);
+        session.handle_response(11, 2, 0, 22);
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot()[0].admission,
+            GenericAdmission::Declined
+        );
+        source.incarnation = 2;
+        runtime.replace_inventory(vec![source]).unwrap();
+        runtime.publish_admissions(&session);
+        assert_eq!(
+            runtime.admissions_snapshot(),
+            vec![GenericAdmissionStatus {
+                slot: 0,
+                incarnation: 2,
+                admission: GenericAdmission::Pending,
+            }]
+        );
+        runtime.replace_inventory(vec![]).unwrap();
+        assert!(runtime.admissions_snapshot().is_empty());
+    }
+
+    #[test]
+    fn admission_reset_is_session_scoped_and_bounded() {
+        let runtime = runtime();
+        let devices = (0..8)
+            .map(|slot| device(slot, u64::from(slot) + 1))
+            .collect::<Vec<_>>();
+        runtime.replace_inventory(devices.clone()).unwrap();
+        let mut session = GenericSession::new(1);
+        for action in session.reconcile(&devices, true) {
+            session.sent(&action);
+        }
+        for slot in 0..8 {
+            session.handle_response(10 + slot, 1, 0, 30 + slot);
+        }
+        runtime.publish_admissions(&session);
+        let statuses = runtime.admissions_snapshot();
+        assert_eq!(statuses.len(), 8);
+        assert!(
+            statuses
+                .iter()
+                .all(|row| row.admission == GenericAdmission::Admitted)
+        );
+        runtime.unbind_session(9);
+        assert_eq!(runtime.admissions_snapshot(), statuses);
+        runtime.unbind_session(1);
+        runtime.publish_admissions(&session);
+        assert!(
+            runtime
+                .admissions_snapshot()
+                .iter()
+                .all(|row| row.admission == GenericAdmission::Pending)
+        );
+        runtime.bind_session(2);
+        runtime.publish_admissions(&session);
+        assert!(
+            runtime
+                .admissions_snapshot()
+                .iter()
+                .all(|row| row.admission == GenericAdmission::Pending)
+        );
+    }
+
     fn output() -> GenericOutput {
         GenericOutput {
             slot: 0,
@@ -407,7 +540,7 @@ mod tests {
         use crate::generic::{GenericOutbound, GenericSession};
 
         let runtime = runtime();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let attach = session.reconcile(&runtime.inventory_snapshot().0, true);
         session.sent(&attach[0]);
         session.handle_response(10, 1, 0, 22);
