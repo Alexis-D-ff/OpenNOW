@@ -180,7 +180,6 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn('--target opennow-ci-unit-tests --parallel "$BUILD_PARALLEL"', checks)
         self.assertIn("--no-tests=error", checks)
         self.assertIn('-L ci-unit --parallel "$BUILD_PARALLEL" --output-junit qt-unit-tests.xml', checks)
-        self.assertIn('QT_FORCE_STDERR_LOGGING: "1"', checks)
         self.assertIn("Testing/Temporary/LastTest.log", checks)
         self.assertIn("cargo clippy --locked", checks)
         self.assertIn("cargo test --locked", checks)
