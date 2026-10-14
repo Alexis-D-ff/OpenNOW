@@ -169,8 +169,9 @@ session is allocated for either NVIDIA or alliance accounts. It does not convert
 or end a running NVST game. NVST remains the default and the recommended option
 for performance. The switch warns users to expect lower performance with WebRTC.
 
-The initial compatibility profile uses up to 1920×1080 at 60 FPS, H.264,
-8-bit 4:2:0 SDR, and stereo audio.
+With the default codec of auto, this mode requests H.264, 8-bit 4:2:0 SDR,
+at most 1920×1080, and at most 60 FPS, while an H.265 or HEVC codec setting
+keeps the selected resolution, allows 10-bit 4:2:0, and allows up to 360 FPS.
 It requires a direct UDP path. TURN gathering, microphone upload, clipboard text,
 and native HID passthrough are not supported by this mode. The native decoder and
 Qt video item remain the same as the NVST path.
