@@ -502,7 +502,7 @@ FocusScope {
                 readonly property bool noticeShown: focusStrip.visible || root.switching || ShellStore.accountMessage !== ""
                     || root.currentAccount !== null && root.currentAccount.needsSignIn === true && !root.manageMode
                 width: parent.width
-                height: noticeShown ? root.u(92) : root.tightPicker ? 0 : root.u(44)
+                height: noticeShown ? root.u(root.tightPicker ? 40 : 92) : root.tightPicker ? 0 : root.u(44)
                 visible: height > 0
 
                 Row {
@@ -591,6 +591,8 @@ FocusScope {
                     width: Math.min(implicitWidth, root.width - root.u(64))
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
+                    maximumLineCount: root.tightPicker ? 1 : 3
+                    elide: root.tightPicker ? Text.ElideRight : Text.ElideNone
                     text: ShellStore.accountMessage
                     color: DesktopTokens.danger
                     font.family: DesktopTokens.bodyFont
