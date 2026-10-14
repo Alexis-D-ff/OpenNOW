@@ -134,6 +134,12 @@ FocusScope {
         item.forceActiveFocus()
         mainScroll.reveal(item)
     }
+    function followMainFocus(item) {
+        if (!item) return
+        item.activeFocusChanged.connect(() => {
+            if (item.activeFocus) mainScroll.reveal(item)
+        })
+    }
     function stepMain(from, step) {
         for (let offset = 1; offset <= mainItems.length; ++offset) {
             const index = (from + step * offset + mainItems.length * offset) % mainItems.length
@@ -432,38 +438,8 @@ FocusScope {
                         color: "#0AFFFFFF"
                         border.width: 1
                         border.color: "#17FFFFFF"
-                        Row {
-                            x: 16; y: 14
-                            spacing: 26
-                            Repeater {
-                                model: [
-                                    { label: "FPS", value: root.fpsText },
-                                    { label: qsTr("OUTPUT"), value: root.resolution },
-                                    { label: qsTr("BITRATE"), value: root.bitrateText }
-                                ]
-                                delegate: Column {
-                                    id: headerMetric
-                                    required property var modelData
-                                    spacing: 5
-                                    Text {
-                                        text: headerMetric.modelData.label
-                                        color: DesktopTokens.textFaint
-                                        font.family: DesktopTokens.monoFont
-                                        font.pixelSize: 8
-                                        font.weight: Font.Bold
-                                        font.letterSpacing: 1
-                                    }
-                                    Text {
-                                        text: headerMetric.modelData.value
-                                        color: DesktopTokens.textHigh
-                                        font.family: DesktopTokens.monoFont
-                                        font.pixelSize: 14
-                                        font.weight: Font.Bold
-                                    }
-                                }
-                            }
-                        }
                         Rectangle {
+                            id: statusBadge
                             anchors.right: parent.right
                             anchors.rightMargin: 14
                             y: 12
@@ -484,19 +460,59 @@ FocusScope {
                                 font.letterSpacing: 0.8
                             }
                         }
+                        Row {
+                            id: metricRow
+                            x: 16; y: 12
+                            width: Math.max(0, statusBadge.x - x - 12)
+                            spacing: 12
+                            Repeater {
+                                model: [
+                                    { label: "FPS", value: root.fpsText },
+                                    { label: qsTr("OUTPUT"), value: root.resolution },
+                                    { label: qsTr("BITRATE"), value: root.bitrateText }
+                                ]
+                                delegate: Column {
+                                    id: headerMetric
+                                    required property var modelData
+                                    width: Math.max(0, (metricRow.width - metricRow.spacing * 2) / 3)
+                                    spacing: 4
+                                    Text {
+                                        width: headerMetric.width
+                                        text: headerMetric.modelData.label
+                                        color: DesktopTokens.textFaint
+                                        font.family: DesktopTokens.monoFont
+                                        font.pixelSize: 8
+                                        font.weight: Font.Bold
+                                        font.letterSpacing: 1
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        width: headerMetric.width
+                                        text: headerMetric.modelData.value
+                                        color: DesktopTokens.textHigh
+                                        font.family: DesktopTokens.monoFont
+                                        font.pixelSize: 14
+                                        font.weight: Font.Bold
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                        }
                         Text {
-                            anchors.right: parent.right
-                            anchors.rightMargin: 14
-                            y: 40
+                            id: transportLine
+                            x: 16
+                            y: 46
+                            width: parent.width - 32
                             text: [root.transportText, root.codecText, root.backendText].join(" · ")
                             color: DesktopTokens.textMuted
                             font.family: DesktopTokens.monoFont
                             font.pixelSize: 9
                             font.weight: Font.Bold
                             font.letterSpacing: 0.6
+                            elide: Text.ElideRight
                         }
                         Text {
-                            x: 16; y: 64
+                            x: 16; y: 62
                             width: parent.width - 32
                             text: qsTr("Quality, bitrate and codec change from the next session.")
                             color: DesktopTokens.textFaint
@@ -703,4 +719,5 @@ FocusScope {
         forceActiveFocus()
         backButton.forceActiveFocus()
     }
+    Component.onCompleted: mainItems.forEach(root.followMainFocus)
 }

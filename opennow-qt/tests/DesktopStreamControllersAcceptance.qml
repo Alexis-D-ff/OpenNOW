@@ -138,6 +138,38 @@ QtObject {
             check(need("streamMenuBackToGame").activeFocus, "Back to game starts focused")
             check(input.shellCaptureEnabled, "the open drawer keeps controller input away from the game")
             check(streamAlive(), "opening the drawer keeps the stream and the video item")
+            const saved = ShellStore.streamer
+            ShellStore.streamer = {status: "streaming", sessionId: sessionId, transport: "nvst",
+                codec: "automatic", mediaBackend: "pending"}
+            const card = need("streamMenuConnection")
+            const found = []
+            function walk(item) {
+                if (!item) return
+                if (item.text) found.push(item)
+                for (const child of item.children || []) walk(child)
+            }
+            walk(card)
+            const metrics = found.filter(item => item.text === qsTr("Measuring"))
+            const meta = found.find(item => String(item.text).indexOf("NVST") >= 0)
+            check(metrics.length >= 1 && meta, "the measuring card is missing its values")
+            function box(item) {
+                const point = item.mapToItem(card, 0, 0)
+                return {x: point.x, y: point.y, r: point.x + item.width, b: point.y + item.height}
+            }
+            const metaBox = box(meta)
+            for (const metric of metrics) {
+                const metricBox = box(metric)
+                check(metricBox.r <= metaBox.x + 1 || metricBox.b <= metaBox.y + 1 || metaBox.b <= metricBox.y + 1,
+                    "a measuring value overlaps the transport line")
+            }
+            ShellStore.streamer = saved
+            const end = need("streamEndSessionRow")
+            end.forceActiveFocus()
+            const local = end.mapToItem(drawer, 0, 0)
+            check(local.y >= -1 && local.y + end.height <= drawer.height + 1,
+                "End session is focused outside the drawer y=" + local.y + " h=" + end.height + " drawer=" + drawer.height)
+            check(streamAlive(), "scrolling to End session keeps the stream")
+            need("streamMenuBackToGame").forceActiveFocus()
             press(Qt.Key_Down)
         },
         function() {
