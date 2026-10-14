@@ -610,10 +610,12 @@ jobs:
             printf '%s\n' "$identity" | grep -Fx 'Signature=adhoc'
             printf '%s\n' "$identity" | grep -Fx 'TeamIdentifier=not set'
             bin="$app/Contents/MacOS"
-            for executable in OpenNOW opennow-core opennow-acceptance-verify opennow-update-helper opennow-streamer ../Helpers/opennow-awdl-helper; do
+            for executable in OpenNOW opennow-core opennow-acceptance-verify opennow-update-helper opennow-streamer; do
               test -x "$bin/$executable"
               lipo "$bin/$executable" -verify_arch arm64
             done
+            test -x "$app/Contents/Helpers/opennow-awdl-helper"
+            lipo "$app/Contents/Helpers/opennow-awdl-helper" -verify_arch arm64
             /usr/bin/codesign --verify --strict "$app/Contents/Helpers/opennow-awdl-helper"
             /usr/bin/codesign --display --verbose=4 "$app/Contents/Helpers/opennow-awdl-helper" 2>&1 \
               | grep -Fx 'Identifier=io.github.opencloudgaming.OpenNOW.awdl-helper'
