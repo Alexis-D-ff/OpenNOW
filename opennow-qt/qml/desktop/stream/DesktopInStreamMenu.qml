@@ -363,6 +363,7 @@ FocusScope {
 
             Flickable {
                 id: mainScroll
+                objectName: "streamMenuMainScroll"
                 x: 22
                 y: 20
                 width: parent.width - 44

@@ -163,12 +163,37 @@ QtObject {
                     "a measuring value overlaps the transport line")
             }
             ShellStore.streamer = saved
+        },
+        function() {
+            const window = parent.Window.window
+            if (window.height !== 540) {
+                window.width = 960
+                window.height = 540
+                need("streamMenuBackToGame").forceActiveFocus()
+                return false
+            }
             const end = need("streamEndSessionRow")
-            end.forceActiveFocus()
-            const local = end.mapToItem(drawer, 0, 0)
-            check(local.y >= -1 && local.y + end.height <= drawer.height + 1,
-                "End session is focused outside the drawer y=" + local.y + " h=" + end.height + " drawer=" + drawer.height)
+            const scroll = need("streamMenuMainScroll")
+            if (endBeforeY < 0) {
+                check(scroll.contentY === 0, "the short drawer was already scrolled")
+                const before = end.mapToItem(scroll, 0, 0)
+                endBeforeY = before.y
+                check(before.y >= scroll.height,
+                    "End session already fits in the short drawer y=" + before.y + " view=" + scroll.height)
+            }
+            if (!end.activeFocus) {
+                check(shortTabs < 12, "Tab never reached End session on the short drawer")
+                shortTabs += 1
+                press(Qt.Key_Tab)
+                return false
+            }
+            check(scroll.contentY > 0, "Tab did not scroll the short drawer, contentY=" + scroll.contentY)
+            const local = end.mapToItem(scroll, 0, 0)
+            check(local.y >= -1 && local.y + end.height <= scroll.height + 1,
+                "End session is outside the scroll viewport y=" + local.y + " h=" + end.height + " view=" + scroll.height)
             check(streamAlive(), "scrolling to End session keeps the stream")
+            window.width = 1600
+            window.height = 900
             need("streamMenuBackToGame").forceActiveFocus()
             press(Qt.Key_Down)
         },
@@ -318,6 +343,8 @@ QtObject {
         }
     ]
 
+    property int shortTabs: 0
+    property real endBeforeY: -1
     property bool sceneReady: false
     property int sceneTicks: 0
     function scene() {
