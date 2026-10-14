@@ -502,12 +502,12 @@ FocusScope {
                 readonly property bool noticeShown: focusStrip.visible || root.switching || ShellStore.accountMessage !== ""
                     || root.currentAccount !== null && root.currentAccount.needsSignIn === true && !root.manageMode
                 width: parent.width
-                height: root.tightPicker && focusStrip.visible && !root.switching ? 0 : root.u(noticeShown ? 92 : 44)
+                height: noticeShown ? root.u(92) : root.tightPicker ? 0 : root.u(44)
                 visible: height > 0
 
                 Row {
                     id: focusStrip
-                    visible: root.compact && root.currentAccount !== null && !root.switching
+                    visible: !root.tightPicker && root.compact && root.currentAccount !== null && !root.switching
                         && !root.currentAccount.needsSignIn
                     anchors.centerIn: parent
                     spacing: root.u(10)
