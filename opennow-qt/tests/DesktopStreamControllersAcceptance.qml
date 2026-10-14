@@ -138,6 +138,63 @@ QtObject {
             check(need("streamMenuBackToGame").activeFocus, "Back to game starts focused")
             check(input.shellCaptureEnabled, "the open drawer keeps controller input away from the game")
             check(streamAlive(), "opening the drawer keeps the stream and the video item")
+            const saved = ShellStore.streamer
+            ShellStore.streamer = {status: "streaming", sessionId: sessionId, transport: "nvst",
+                codec: "automatic", mediaBackend: "pending"}
+            const card = need("streamMenuConnection")
+            const found = []
+            function walk(item) {
+                if (!item) return
+                if (item.text) found.push(item)
+                for (const child of item.children || []) walk(child)
+            }
+            walk(card)
+            const metrics = found.filter(item => item.text === qsTr("Measuring"))
+            const meta = found.find(item => String(item.text).indexOf("NVST") >= 0)
+            check(metrics.length >= 1 && meta, "the measuring card is missing its values")
+            function box(item) {
+                const point = item.mapToItem(card, 0, 0)
+                return {x: point.x, y: point.y, r: point.x + item.width, b: point.y + item.height}
+            }
+            const metaBox = box(meta)
+            for (const metric of metrics) {
+                const metricBox = box(metric)
+                check(metricBox.r <= metaBox.x + 1 || metricBox.b <= metaBox.y + 1 || metaBox.b <= metricBox.y + 1,
+                    "a measuring value overlaps the transport line")
+            }
+            ShellStore.streamer = saved
+        },
+        function() {
+            const window = parent.Window.window
+            if (window.height !== 540) {
+                window.width = 960
+                window.height = 540
+                need("streamMenuBackToGame").forceActiveFocus()
+                return false
+            }
+            const end = need("streamEndSessionRow")
+            const scroll = need("streamMenuMainScroll")
+            if (endBeforeY < 0) {
+                check(scroll.contentY === 0, "the short drawer was already scrolled")
+                const before = end.mapToItem(scroll, 0, 0)
+                endBeforeY = before.y
+                check(before.y >= scroll.height,
+                    "End session already fits in the short drawer y=" + before.y + " view=" + scroll.height)
+            }
+            if (!end.activeFocus) {
+                check(shortTabs < 12, "Tab never reached End session on the short drawer")
+                shortTabs += 1
+                press(Qt.Key_Tab)
+                return false
+            }
+            check(scroll.contentY > 0, "Tab did not scroll the short drawer, contentY=" + scroll.contentY)
+            const local = end.mapToItem(scroll, 0, 0)
+            check(local.y >= -1 && local.y + end.height <= scroll.height + 1,
+                "End session is outside the scroll viewport y=" + local.y + " h=" + end.height + " view=" + scroll.height)
+            check(streamAlive(), "scrolling to End session keeps the stream")
+            window.width = 1600
+            window.height = 900
+            need("streamMenuBackToGame").forceActiveFocus()
             press(Qt.Key_Down)
         },
         function() {
@@ -286,6 +343,8 @@ QtObject {
         }
     ]
 
+    property int shortTabs: 0
+    property real endBeforeY: -1
     property bool sceneReady: false
     property int sceneTicks: 0
     function scene() {

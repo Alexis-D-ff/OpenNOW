@@ -97,6 +97,14 @@ FocusScope {
         ? [backButton, padTabs, leftTune.control, rightTune.control, vibrationTune.control, testButton,
            playerOneRow, resetButton, applyButton]
         : [backButton, globalLeftTune.control, globalRightTune.control, globalVibrationTune.control]
+    property var focusFollowed: []
+    function followFocus(item) {
+        if (!item || root.focusFollowed.indexOf(item) >= 0) return
+        root.focusFollowed = root.focusFollowed.concat([item])
+        item.activeFocusChanged.connect(() => {
+            if (item.activeFocus) scroll.reveal(item)
+        })
+    }
     function focusFirst() {
         Qt.callLater(() => {
             const first = root.focusItems.find(item => item.visible && item.enabled && item !== backButton)
@@ -135,12 +143,16 @@ FocusScope {
     function activeFocusItemInside() {
         return focusItems.some(item => item.activeFocus)
     }
+    onFocusItemsChanged: focusItems.forEach(root.followFocus)
     onActiveChanged: {
         lostPadName = ""
         lostPadKey = ""
         if (active && !selectedPad && pads.length > 0) selectedInstanceId = Number(pads[0].instanceId)
     }
-    Component.onCompleted: previousPads = pads
+    Component.onCompleted: {
+        previousPads = pads
+        focusItems.forEach(root.followFocus)
+    }
 
     Timer {
         objectName: "controllerStickSampler"
