@@ -67,6 +67,23 @@ static bool accountChromeFits(QQuickWindow *window)
             qCritical("Account picker chrome leaves the window");
             return false;
         }
+        if (auto *tile = picker->findChild<QQuickItem *>(u"accountTile0"_s); tile && tile->isVisible()) {
+            const auto tileRect = sceneRect(tile);
+            const auto visible = qMin(tileRect.bottom(), gridRect.bottom()) - qMax(tileRect.top(), gridRect.top());
+            if (visible < 80) {
+                qCritical("Account picker tile row is sliced");
+                return false;
+            }
+        }
+        if (auto *error = picker->findChild<QQuickItem *>(u"accountActionError"_s);
+                error && !error->property("text").toString().isEmpty()) {
+            const auto errorRect = sceneRect(error);
+            if (!error->isVisible() || errorRect.height() < 8
+                    || errorRect.top() < stageRect.top() - 1 || errorRect.bottom() > stageRect.bottom() + 1) {
+                qCritical("Account error is not visible inside the window");
+                return false;
+            }
+        }
     }
     if (auto *card = window->findChild<QQuickItem *>(u"accountSwitcherCard"_s); card && card->isVisible()) {
         const auto rect = sceneRect(card);
