@@ -172,6 +172,7 @@ runs:
       working-directory: ${{ env.OPENNOW_CHECKOUT }}
       env:
         BUILD_PARALLEL: ${{ inputs.parallel }}
+        QT_FORCE_STDERR_LOGGING: "1"
       run: |
         trap 'status=$?; if (( status != 0 )); then
           for log in build/opennow-qt-checks/Testing/Temporary/LastTestsFailed.log build/opennow-qt-checks/Testing/Temporary/LastTest.log; do
