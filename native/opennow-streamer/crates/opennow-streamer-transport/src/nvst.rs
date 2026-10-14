@@ -6743,6 +6743,7 @@ fn pump_generic_hid_pending(
             return false;
         }
     }
+    runtime.publish_admissions(session);
     true
 }
 
@@ -6760,6 +6761,7 @@ fn store_generic_hid_message(
             device_id,
         } => {
             session.handle_response(request_id, control, opaque, device_id);
+            runtime.publish_admissions(session);
         }
         GenericHidMessage::Output {
             device_id,
@@ -6776,6 +6778,7 @@ fn store_generic_hid_message(
                     ) => {}
                     Err(_) => {
                         let actions = session.fault(slot, incarnation);
+                        runtime.publish_admissions(session);
                         return send_generic_hid_actions(session, actions, send);
                     }
                 }
@@ -6842,9 +6845,73 @@ mod generic_hid_tests {
     }
 
     #[test]
+    fn generic_admission_publication_tracks_server_response_and_pause_detach() {
+        use opennow_streamer_hid::generic::GenericAdmission;
+        for control in [0, 1, 2, 255] {
+            let runtime = runtime();
+            let mut source = device(1);
+            source.interfaces[0].descriptor.clear();
+            runtime.replace_inventory(vec![source]).unwrap();
+            let mut session = GenericSession::new(1);
+            let mut release_epoch = 0;
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, _| true
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                GenericHidMessage::Response {
+                    request_id: 10,
+                    control,
+                    opaque: u32::MAX,
+                    device_id: 42,
+                },
+                |_, _| true
+            ));
+            let expected = if control == 1 {
+                GenericAdmission::Admitted
+            } else {
+                GenericAdmission::Declined
+            };
+            assert_eq!(runtime.admissions_snapshot()[0].admission, expected);
+            if control != 1 {
+                continue;
+            }
+            runtime.set_capture(false);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| teardown
+            ));
+            let status = runtime.admissions_snapshot()[0];
+            assert_eq!(status.incarnation, 1);
+            assert_eq!(status.admission, GenericAdmission::Pending);
+            runtime.set_capture(true);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| !teardown
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+        }
+    }
+
+    #[test]
     fn generic_registration_accepts_only_pending_sent_control_one_and_rejects_stale_ack() {
         let runtime = runtime();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         assert!(!pump_generic_hid_pending(
             &runtime,
             &mut session,
@@ -6854,7 +6921,7 @@ mod generic_hid_tests {
         session.handle_response(10, 1, 0, 42);
         assert!(session.output(42, 2, 0, &[1]).is_none());
         for (control, opaque, returned) in [(3, 0, 42), (1, 0, 255), (1, 0, 9)] {
-            let mut session = GenericSession::new();
+            let mut session = GenericSession::new(1);
             assert!(pump_generic_hid_pending(
                 &runtime,
                 &mut session,
@@ -6866,7 +6933,7 @@ mod generic_hid_tests {
             session.handle_response(10, control, opaque, returned);
             assert!(session.output(returned, 2, 0, &[1]).is_none());
         }
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         admit(&runtime, &mut session);
         let actions = session.retire_all();
         assert!(send_generic_hid_actions(
@@ -6890,7 +6957,7 @@ mod generic_hid_tests {
     #[test]
     fn generic_release_uses_last_successful_send_and_precedes_collapsed_capture_reports() {
         let runtime = runtime();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         admit(&runtime, &mut session);
         runtime.submit_report(report(0xa5)).unwrap();
         assert!(pump_generic_hid_pending(
@@ -6939,7 +7006,7 @@ mod generic_hid_tests {
     #[test]
     fn generic_wire_response_and_empty_get_error_round_trip_without_sony_haptics() {
         let runtime = runtime();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         assert!(pump_generic_hid_pending(
             &runtime,
             &mut session,
@@ -7018,7 +7085,7 @@ mod generic_hid_tests {
     #[test]
     fn generic_drain_is_bounded_and_fault_or_inventory_removal_releases_before_detach() {
         let runtime = runtime();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         admit(&runtime, &mut session);
         for _ in 0..40 {
             runtime.submit_report(report(0x77)).unwrap();
@@ -7085,7 +7152,7 @@ mod generic_hid_tests {
     fn generic_outputs_are_typed_and_overflow_retires_source_or_reports_queue_failure() {
         for queues_release in [true, false] {
             let runtime = runtime();
-            let mut session = GenericSession::new();
+            let mut session = GenericSession::new(1);
             admit(&runtime, &mut session);
             runtime.submit_report(report(0xa5)).unwrap();
             assert!(pump_generic_hid_pending(
@@ -7151,7 +7218,7 @@ mod generic_hid_tests {
                 entry.interfaces[0].descriptor.clear();
                 runtime.replace_inventory(vec![entry]).unwrap();
             }
-            let mut session = GenericSession::new();
+            let mut session = GenericSession::new(1);
             admit(&runtime, &mut session);
             runtime.submit_report(report(0xa5)).unwrap();
             assert!(pump_generic_hid_pending(
@@ -7399,7 +7466,9 @@ fn run_nvst_webrtc_bundle(
         })
     });
     let mut hid_published_mask = 0_u16;
-    let mut generic_session = hid_runtime.as_ref().map(|_| GenericSession::new());
+    let mut generic_session = hid_runtime
+        .as_ref()
+        .map(|runtime| GenericSession::new(runtime.session_generation().unwrap_or(0)));
     let mut generic_release_epoch = 0;
     let mut input_state = NvstInputChannelState::default();
     let mut input_codec = NvstInputCodec::default();

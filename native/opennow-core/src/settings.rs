@@ -1180,7 +1180,7 @@ fn defaults() -> Map<String, Value> {
         "statsShowVideo":true, "statsShowClock":true, "statsShowGraphs":true,
         "appAccentColor":"green", "appTheme":"auto", "appLanguage":"system", "themePack":"nocturne", "translucentUI":false,
         "showTileLabels":true,
-        "controllerMode":true, "controllerModePromptDismissed":false,
+        "controllerMode":true, "controllerModePromptDismissed":false, "forwardFlightControls":true,
         "controllerLeftStickDeadzone":5, "controllerRightStickDeadzone":5,
         "controllerVibrationIntensity":100, "controllerProfiles":{},
         "reducedMotion":false, "uiSoundsEnabled":true,
@@ -1636,6 +1636,32 @@ mod tests {
         store.reset().unwrap();
         assert_eq!(store.all()["suppressAwdlWhileStreaming"], json!(false));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn flight_control_forwarding_defaults_on_and_persists_boolean_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+        assert_eq!(store.all()["forwardFlightControls"], json!(true));
+        assert_eq!(
+            store.set("forwardFlightControls", json!(false)).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            SettingsStore::load(Some(directory.path().to_path_buf()))
+                .unwrap()
+                .all()["forwardFlightControls"],
+            json!(false)
+        );
+        for invalid in [json!("false"), json!(0), json!(null), json!([]), json!({})] {
+            assert_eq!(
+                store.set("forwardFlightControls", invalid).unwrap(),
+                json!(true)
+            );
+        }
+        store.set("forwardFlightControls", json!(false)).unwrap();
+        store.reset().unwrap();
+        assert_eq!(store.all()["forwardFlightControls"], json!(true));
     }
 
     #[test]

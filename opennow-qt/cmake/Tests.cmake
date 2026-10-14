@@ -597,6 +597,25 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route stream --smoke-desktop-anti-afk --reduced-motion)
     set_tests_properties(qml-desktop-anti-afk PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    qt_add_resources(opennow-qt flight_controls_acceptance
+        PREFIX "/acceptance" BASE tests FILES tests/FlightControlsAcceptance.qml)
+    foreach(flight_state connected light-ready empty supported-expanded forwarding-off badges drawer-home drawer-controllers stats-expanded stream-clear)
+        set(flight_route settings-input)
+        if(flight_state MATCHES "^(drawer-|stats-expanded|stream-clear|badges)")
+            set(flight_route stream)
+        endif()
+        foreach(flight_mode windowed fullscreen)
+            set(flight_args --smoke-test --allow-multiple-instances --desktop
+                --route ${flight_route} --smoke-flight-controls --flight-state ${flight_state} --reduced-motion)
+            if(flight_mode STREQUAL "fullscreen")
+                list(APPEND flight_args --flight-fullscreen)
+            endif()
+            add_test(NAME "qml-flight-controls-${flight_state}-${flight_mode}"
+                COMMAND opennow-qt ${flight_args})
+            set_tests_properties("qml-flight-controls-${flight_state}-${flight_mode}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+        endforeach()
+    endforeach()
     add_test(NAME qml-desktop-stream-controllers
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route stream --smoke-stream-controllers --reduced-motion)

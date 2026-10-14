@@ -1,6 +1,7 @@
 #include "input/GenericHidInput.h"
 
 #include <QElapsedTimer>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -41,6 +42,35 @@ constexpr std::array<std::pair<quint16, quint16>, 18> allowlist{{
     {0x06a3, 0x075c}, {0x06a3, 0x0762}, {0x0738, 0x2221}, {0x0738, 0xa221}
 }};
 
+struct SupportedDevice {
+    const char *name;
+    const char *type;
+    const char *evidence;
+    const char *uncertainty;
+};
+constexpr const char *usbIds = "https://github.com/usbids/usbids/blob/master/usb.ids";
+constexpr const char *logitechIds = "https://github.com/berarma/oversteer/blob/master/data/udev/99-logitech-wheel-perms.rules";
+constexpr std::array<SupportedDevice, 18> supported{{
+    {"Logitech G920", "wheel", usbIds, ""},
+    {"Logitech G29 (PS3 mode)", "wheel", usbIds, ""},
+    {"Logitech G923 (Xbox/PC)", "wheel", logitechIds, ""},
+    {"Logitech G923 (PlayStation/PC)", "wheel", logitechIds, ""},
+    {"Logitech G PRO (Xbox/PC) / RS50 compatibility mode", "wheel", "https://github.com/mescon/logitech-trueforce-linux-driver", "This PID is shared by two wheel models."},
+    {"Logitech G PRO (PlayStation/PC)", "wheel", logitechIds, ""},
+    {"Logitech RS50", "wheel", "https://github.com/mescon/logitech-trueforce-linux-driver/issues/21", ""},
+    {"Thrustmaster T.Flight Hotas 4", "stick", "https://linux-hardware.org/?id=usb:044f-b67c", "PID alone does not confirm PS4 mode."},
+    {"Thrustmaster T.Flight Hotas One (PC mode)", "stick", "https://forums.flightsimulator.com/t/thrustmaster-hotas-one-not-working-in-geforce-now/757328", ""},
+    {"Thrustmaster TPR Pendular Rudder", "pedals", "https://linux-hardware.org/?id=usb:044f-b68f", ""},
+    {"Thrustmaster HOTAS Warthog Joystick", "stick", usbIds, ""},
+    {"Thrustmaster HOTAS Warthog Throttle", "throttle", usbIds, ""},
+    {"Thrustmaster TWCS Throttle", "throttle", usbIds, ""},
+    {"Thrustmaster T80 / T98 Ferrari 296 GTB", "wheel", "https://treexy.com/products/driver-fusion/database/id/usb/vid_044f/pid_b697/", "Model depends on revision; this PID is shared. Mode is not confirmed."},
+    {"Saitek X52", "stick", usbIds, ""},
+    {"Saitek X52 Pro", "stick", usbIds, ""},
+    {"Saitek X56 Stick", "stick", "https://github.com/Chryseus/x56linux", ""},
+    {"Saitek X56 Throttle", "throttle", "https://github.com/Chryseus/x56linux", ""}
+}};
+
 #ifdef Q_OS_MACOS
 io_service_t hidService(const QByteArray &path)
 {
@@ -61,8 +91,10 @@ struct DeviceIdentity {
 DeviceIdentity deviceIdentity(const GenericHidBackend::Device &device)
 {
 #ifdef Q_OS_LINUX
-    if (!device.path.startsWith("/dev/hidraw")) return {};
-    auto current = QFileInfo(QStringLiteral("/sys/class/hidraw/%1/device")
+    const auto deviceClass = device.path.startsWith("/dev/hidraw") ? QStringLiteral("hidraw")
+        : device.path.startsWith("/dev/input/event") ? QStringLiteral("input") : QString{};
+    if (deviceClass.isEmpty()) return {};
+    auto current = QFileInfo(QStringLiteral("/sys/class/%1/%2/device").arg(deviceClass)
                                 .arg(QFileInfo(QString::fromLocal8Bit(device.path)).fileName())).canonicalFilePath();
     if (current.isEmpty()) return {};
     const auto instancePath = current.toUtf8();
@@ -363,10 +395,60 @@ bool GenericHidInput::allowed(quint16 vendor, quint16 product)
     return std::find(allowlist.begin(), allowlist.end(), std::pair{vendor, product}) != allowlist.end();
 }
 
+QVariantMap GenericHidInput::deviceMetadata(quint16 vendor, quint16 product)
+{
+    const auto it = std::find(allowlist.begin(), allowlist.end(), std::pair{vendor, product});
+    if (it == allowlist.end()) return {};
+    const auto &entry = supported[std::distance(allowlist.begin(), it)];
+    return {{QStringLiteral("name"), QString::fromUtf8(entry.name)},
+        {QStringLiteral("type"), QString::fromUtf8(entry.type)},
+        {QStringLiteral("vidPid"), QStringLiteral("%1:%2").arg(vendor, 4, 16, QLatin1Char('0')).arg(product, 4, 16, QLatin1Char('0'))},
+        {QStringLiteral("evidence"), QString::fromUtf8(entry.evidence)},
+        {QStringLiteral("uncertainty"), QString::fromUtf8(entry.uncertainty)}};
+}
+
+QVariantList GenericHidInput::supportedDevices()
+{
+    QVariantList result;
+    for (const auto [vendor, product] : allowlist) result.append(deviceMetadata(vendor, product));
+    return result;
+}
+
+QList<GenericHidInput::DetectedDevice> GenericHidInput::devices() const
+{
+    QMutexLocker lock(&m_mutex);
+    return m_devices;
+}
+
+void GenericHidInput::setForwardingEnabled(bool enabled)
+{
+    QMutexLocker lock(&m_mutex);
+    if (m_forwardingEnabled == enabled) return;
+    m_forwardingEnabled = enabled;
+    ++m_forwardingEpoch;
+    ++m_outputEpoch;
+    m_outputs.clear();
+    m_outputBytes = 0;
+    for (auto &lane : m_lanes) lane = {};
+    for (auto &device : m_devices) device.incarnation = 0;
+    markInventoryChangedLocked();
+}
+
 QByteArray GenericHidInput::groupKey(const GenericHidBackend::Device &device)
 {
     if (!allowed(device.vendor, device.product) || device.physicalKey.isEmpty()) return {};
     return QByteArray::number(device.vendor, 16) + ':' + QByteArray::number(device.product, 16) + ':' + device.physicalKey;
+}
+
+QByteArray GenericHidInput::physicalDeviceKey(quint16 vendor, quint16 product, const char *path)
+{
+    if (!path || !allowed(vendor, product)) return {};
+    GenericHidBackend::Device device;
+    device.path = path;
+    device.vendor = vendor;
+    device.product = product;
+    device.physicalKey = deviceIdentity(device).physicalKey;
+    return groupKey(device);
 }
 
 QList<GenericHidDeviceClaim> GenericHidInput::claims() const
@@ -404,6 +486,7 @@ void GenericHidInput::removeLocked(quint8 slot, quint64 incarnation)
 {
     if (slot >= maxSources || m_lanes[slot].claim.incarnation != incarnation) return;
     m_lanes[slot] = {};
+    for (auto &device : m_devices) if (device.incarnation == incarnation) device.incarnation = 0;
     markInventoryChangedLocked();
     m_failedSources.insert(incarnation);
     for (auto it = m_outputs.begin(); it != m_outputs.end();) {
@@ -425,7 +508,7 @@ bool GenericHidInput::append(const GenericHidReport &report)
 {
     QMutexLocker lock(&m_mutex);
     auto &lane = m_lanes[report.slot];
-    if (lane.claim.incarnation != report.incarnation) return false;
+    if (!m_forwardingEnabled || lane.claim.incarnation != report.incarnation) return false;
     if (lane.reports.size() >= 64 || lane.bytes + report.bytes.size() > 16 * 1024) {
         qWarning("Generic HID input overflow; removing source %u", report.slot);
         removeLocked(report.slot, report.incarnation);
@@ -439,7 +522,7 @@ bool GenericHidInput::append(const GenericHidReport &report)
 void GenericHidInput::submitOutput(const GenericHidReport &report)
 {
     QMutexLocker lock(&m_mutex);
-    if (report.slot >= maxSources || !report.incarnation || report.error
+    if (!m_forwardingEnabled || report.slot >= maxSources || !report.incarnation || report.error
         || m_lanes[report.slot].claim.incarnation != report.incarnation) return;
     if (m_outputs.size() >= 32 || m_outputBytes + report.bytes.size() > 8 * 1024
         || report.bytes.isEmpty() || report.bytes.size() > maxReportBytes || report.operation > 4) {
@@ -472,6 +555,7 @@ void GenericHidInput::run()
     QElapsedTimer discoveryClock;
     discoveryClock.start();
     bool firstScan = true;
+    quint64 workerEpoch = 0;
     QTimer timer;
     auto closeSource = [&](const QByteArray &key, bool suppress) {
         auto it = sources.find(key);
@@ -490,9 +574,19 @@ void GenericHidInput::run()
             return;
         }
         QSet<quint64> failed;
+        bool forwarding = false;
+        quint64 forwardingEpoch = 0;
         {
             QMutexLocker lock(&m_mutex);
             failed.swap(m_failedSources);
+            forwarding = m_forwardingEnabled;
+            forwardingEpoch = m_forwardingEpoch;
+        }
+        if (workerEpoch != forwardingEpoch || !forwarding) {
+            for (const auto &key : sources.keys()) closeSource(key, false);
+            suppressed.clear();
+            firstScan = true;
+            workerEpoch = forwardingEpoch;
         }
         for (const auto &key : sources.keys()) {
             if (failed.contains(sources[key].claim.incarnation)) closeSource(key, true);
@@ -501,6 +595,7 @@ void GenericHidInput::run()
             firstScan = false;
             discoveryClock.restart();
             QHash<QByteArray, QList<GenericHidBackend::Device>> groups;
+            QHash<QByteArray, DetectedDevice> detected;
             QSet<QByteArray> unresolved;
             for (const auto &device : m_backend->enumerate()) {
                 if (!allowed(device.vendor, device.product)) continue;
@@ -509,6 +604,12 @@ void GenericHidInput::run()
                     || (device.usagePage == 0x0d && (device.usage == 1 || device.usage == 2
                         || device.usage == 4 || device.usage == 5))) continue;
                 const auto key = groupKey(device);
+                const auto inventoryKey = key.isEmpty() ? device.path : key;
+                if (!inventoryKey.isEmpty() && (detected.contains(inventoryKey) || detected.size() < 64)) {
+                    detected.insert(inventoryKey, {
+                        QString::fromLatin1(QCryptographicHash::hash(inventoryKey, QCryptographicHash::Sha256).toHex()),
+                        key, device.serial, device.vendor, device.product});
+                }
                 if (key.isEmpty() || device.instanceKey.isEmpty()) {
                     if (!rejectedPaths.contains(device.path)) qWarning("Generic HID physical or arrival identity unresolved; refusing device");
                     unresolved.insert(device.path);
@@ -532,6 +633,7 @@ void GenericHidInput::run()
                 if (!groups.contains(key) || !sameDevices(suppressed[key], groups[key])) suppressed.remove(key);
             }
             for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+                if (!forwarding) break;
                 if (sources.contains(it.key()) || suppressed.contains(it.key()) || sources.size() >= maxSources) continue;
                 Source source;
                 source.devices = it.value();
@@ -594,10 +696,30 @@ void GenericHidInput::run()
                 std::sort(source.claim.interfaces.begin(), source.claim.interfaces.end(), [](const auto &a, const auto &b) { return a.number < b.number; });
                 {
                     QMutexLocker lock(&m_mutex);
+                    if (!m_forwardingEnabled || m_forwardingEpoch != forwardingEpoch) {
+                        lock.unlock();
+                        for (const auto &collection : source.collections) m_backend->close(collection.handle);
+                        continue;
+                    }
                     m_lanes[source.claim.slot].claim = source.claim;
                     markInventoryChangedLocked();
                 }
                 sources.insert(it.key(), source);
+            }
+            QList<DetectedDevice> inventory;
+            for (auto entry : std::as_const(detected)) {
+                if (sources.contains(entry.key)) {
+                    entry.slot = sources[entry.key].claim.slot;
+                    entry.incarnation = sources[entry.key].claim.incarnation;
+                }
+                inventory.append(entry);
+            }
+            std::sort(inventory.begin(), inventory.end(), [](const auto &a, const auto &b) { return a.deviceId < b.deviceId; });
+            QMutexLocker lock(&m_mutex);
+            if (m_forwardingEpoch != forwardingEpoch) for (auto &entry : inventory) entry.incarnation = 0;
+            if (inventory != m_devices) {
+                m_devices = std::move(inventory);
+                markInventoryChangedLocked();
             }
         }
         for (int i = 0; i < 32; ++i) {

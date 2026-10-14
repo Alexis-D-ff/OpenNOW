@@ -7,6 +7,10 @@ Image {
     property string glyph: "monitor"
     property color ink: Theme.label
     readonly property var shapes: {
+    "stick": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9.5" y="2.5" width="5" height="8.5" rx="2.5"/><path d="M12 11v5"/><rect x="4" y="16" width="16" height="5" rx="2.5"/></g></svg>',
+    "throttle": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="15" width="16" height="6" rx="2.5"/><path d="M10.5 15 13 8"/><rect x="11" y="3" width="8" height="5" rx="2.5"/></g></svg>',
+    "pedals": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21h16M6 5h4l-1 12H5L6 5ZM14 5h4l1 12h-4L14 5ZM7 8v5M16 8v5"/></g></svg>',
+    "wheel": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.5"/><path d="M3.8 10h5.9M14.3 10h5.9M12 14.5v6"/></g></svg>',
     "heart": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m12 21-8-7.8A5.5 5.5 0 0 1 12 5.6a5.5 5.5 0 0 1 8 7.6Z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     "check": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     "star": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -37,7 +41,7 @@ Image {
     "sliders": "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M4 7h10M18 7h2M4 17h4M12 17h8\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" /><circle cx=\"16\" cy=\"7\" r=\"2.2\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" /><circle cx=\"10\" cy=\"17\" r=\"2.2\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" /></svg>",
     "chevron": "<svg viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"m9 5 7 7-7 7\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
 }
-    source: InputPromptIcons.sourceFor(glyph, ink).toString() !== ""
+    source: !["stick", "throttle", "pedals", "wheel"].includes(glyph) && InputPromptIcons.sourceFor(glyph, ink).toString() !== ""
         ? InputPromptIcons.sourceFor(glyph, ink)
         : "data:image/svg+xml;utf8," + encodeURIComponent(
         String(shapes[glyph] || shapes.monitor).replace("<svg ",

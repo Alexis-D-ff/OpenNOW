@@ -164,6 +164,20 @@ enum Admission {
     Refused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericAdmission {
+    Pending,
+    Admitted,
+    Declined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericAdmissionStatus {
+    pub slot: u8,
+    pub incarnation: u64,
+    pub admission: GenericAdmission,
+}
+
 #[derive(Debug)]
 struct Source {
     device: GenericDevice,
@@ -254,6 +268,7 @@ enum Request {
 
 #[derive(Debug)]
 pub struct GenericSession {
+    generation: u64,
     sources: BTreeMap<u8, Source>,
     requests: BTreeMap<u8, Request>,
     used_device_ids: BTreeSet<u8>,
@@ -267,6 +282,7 @@ pub struct GenericSession {
 impl Default for GenericSession {
     fn default() -> Self {
         Self {
+            generation: 0,
             sources: BTreeMap::new(),
             requests: BTreeMap::new(),
             used_device_ids: BTreeSet::new(),
@@ -280,8 +296,26 @@ impl Default for GenericSession {
 }
 
 impl GenericSession {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            ..Self::default()
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn admission(&self, device: &GenericDevice) -> GenericAdmission {
+        match self.sources.get(&device.slot) {
+            Some(source) if source.device == *device => match source.admission {
+                Admission::Admitted(_) => GenericAdmission::Admitted,
+                Admission::Refused => GenericAdmission::Declined,
+                _ => GenericAdmission::Pending,
+            },
+            _ => GenericAdmission::Pending,
+        }
     }
 
     fn attach(&mut self, slot: u8) -> Option<GenericOutbound> {
@@ -699,7 +733,7 @@ pub(crate) mod tests {
 
     #[test]
     fn admission_requires_a_sent_attach_and_verified_response() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let outgoing = session.reconcile(&[device(0, 1)], true);
         assert!(session.report(report(0, 1)).is_none());
         session.handle_response(10, 1, 0, 20);
@@ -717,7 +751,7 @@ pub(crate) mod tests {
     #[test]
     fn control_one_admits_regardless_of_the_opaque_response_dword() {
         for opaque in [0, 0xf, u32::MAX] {
-            let mut session = GenericSession::new();
+            let mut session = GenericSession::new(1);
             let outgoing = session.reconcile(&[device(0, 1)], true);
             session.sent(&outgoing[0]);
             session.handle_response(10, 1, opaque, 20);
@@ -730,7 +764,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pause_releases_only_forwarded_reports_and_resume_uses_next_poll() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 21);
         let outgoing = session.report(report(0, 1)).unwrap();
         assert!(session.set_capture(false).is_empty());
@@ -764,7 +798,7 @@ pub(crate) mod tests {
             number: 3,
             descriptor: numbered,
         });
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[source], 22);
         for (interface, bytes) in [
             (2, vec![1, 0xff, 0x11, 0x33]),
@@ -805,7 +839,7 @@ pub(crate) mod tests {
 
     #[test]
     fn descriptor_mismatched_report_is_forwarded_but_release_detaches() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 22);
         let mut input = report(0, 1);
         input.bytes = vec![1];
@@ -821,7 +855,7 @@ pub(crate) mod tests {
     fn invalid_descriptor_passes_through_then_detaches_and_reattaches() {
         let mut source = device(0, 1);
         source.interfaces[0].descriptor.clear();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[source], 21);
         let outgoing = session.report(report(0, 1)).unwrap();
         session.sent(&outgoing);
@@ -845,7 +879,7 @@ pub(crate) mod tests {
     fn fallback_resume_may_reuse_server_id_for_the_same_source_incarnation() {
         let mut source = device(0, 1);
         source.interfaces[0].descriptor.clear();
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[source.clone()], 22);
         let paused = session.set_capture(false);
         assert_eq!(paused, vec![GenericOutbound::Detach { device_id: 22 }]);
@@ -860,7 +894,7 @@ pub(crate) mod tests {
 
     #[test]
     fn removal_releases_before_detach_and_old_incarnations_do_not_resurrect() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 21);
         let outgoing = session.report(report(0, 1)).unwrap();
         session.sent(&outgoing);
@@ -883,13 +917,13 @@ pub(crate) mod tests {
         let ended = session.retire_all();
         assert_eq!(ended, vec![GenericOutbound::Detach { device_id: 22 }]);
         assert!(session.report(report(0, 2)).is_none());
-        let mut restarted = GenericSession::new();
+        let mut restarted = GenericSession::new(1);
         assert_eq!(attach(&mut restarted, &[device(0, 2)], 22), 10);
     }
 
     #[test]
     fn late_response_to_retired_pending_attach_only_schedules_cleanup() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let outgoing = session.reconcile(&[device(0, 1)], true);
         session.sent(&outgoing[0]);
         assert!(session.reconcile(&[], false).is_empty());
@@ -903,7 +937,7 @@ pub(crate) mod tests {
 
     #[test]
     fn retired_server_ids_cannot_route_stale_output_to_a_replacement() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 22);
         let outgoing = session.reconcile(&[device(0, 2)], true);
         session.sent(&outgoing[1]);
@@ -918,7 +952,7 @@ pub(crate) mod tests {
 
     #[test]
     fn queued_detach_then_fresh_attach_allows_assigned_id_reuse_on_reconnect() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 10);
         let stale_output = session.output(10, 2, 0, &[1]).unwrap();
         let outgoing = session.reconcile(&[device(0, 2)], true);
@@ -948,7 +982,7 @@ pub(crate) mod tests {
 
     #[test]
     fn deferred_pending_cleanup_cannot_detach_a_newly_admitted_replacement() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let first = session.reconcile(&[device(0, 1)], true);
         session.sent(&first[0]);
         let second = session.reconcile(&[device(0, 2)], true);
@@ -976,7 +1010,7 @@ pub(crate) mod tests {
 
     #[test]
     fn acknowledgement_for_attach_queued_before_cleanup_requires_a_fresh_retry() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let first = session.reconcile(&[device(0, 1)], true);
         session.sent(&first[0]);
         let second = session.reconcile(&[device(0, 2)], true);
@@ -1002,7 +1036,7 @@ pub(crate) mod tests {
     #[test]
     fn refusal_invalid_ids_and_duplicate_server_ids_are_fail_closed() {
         for (control, id) in [(0, 22), (1, 9), (1, 255)] {
-            let mut session = GenericSession::new();
+            let mut session = GenericSession::new(1);
             let outgoing = session.reconcile(&[device(0, 1)], true);
             session.sent(&outgoing[0]);
             session.handle_response(10, control, 0, id);
@@ -1011,7 +1045,7 @@ pub(crate) mod tests {
             assert!(session.reconcile(&[device(0, 1)], true).is_empty());
             assert!(session.report(report(0, 1)).is_none());
         }
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         let outgoing = session.reconcile(&[device(0, 1), device(1, 2)], true);
         for entry in &outgoing {
             session.sent(entry);
@@ -1039,7 +1073,7 @@ pub(crate) mod tests {
 
     #[test]
     fn fault_is_sticky_until_inventory_incarnation_changes() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 22);
         let outgoing = session.report(report(0, 1)).unwrap();
         session.sent(&outgoing);
@@ -1060,7 +1094,7 @@ pub(crate) mod tests {
 
     #[test]
     fn outputs_require_admission_capture_interface_and_valid_get_length() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 7)], 22);
         for operation in 0..=4 {
             let bytes = if matches!(operation, 2 | 3) {
@@ -1084,7 +1118,7 @@ pub(crate) mod tests {
 
     #[test]
     fn empty_error_control_replies_pass_through_without_becoming_release_state() {
-        let mut session = GenericSession::new();
+        let mut session = GenericSession::new(1);
         attach(&mut session, &[device(0, 1)], 22);
         for operation in 0..=5 {
             let mut input = report(0, 1);

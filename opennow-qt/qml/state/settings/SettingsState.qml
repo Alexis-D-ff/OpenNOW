@@ -19,6 +19,7 @@ QtObject {
     signal errorReported(string message)
     property var settings: ({})
     property var confirmedSettings: ({})
+    readonly property bool forwardFlightControls: confirmedSettings.forwardFlightControls !== false
     property var awdlController: MacAwdl
     property Binding awdlPreferenceBinding: Binding {
         target: root.awdlController
@@ -242,7 +243,8 @@ QtObject {
 
     function ownsConfirmedSetting(key) {
         return ["appLanguage", "gameLanguage", "keyboardLayout", "colorQuality", "codec",
-            "nativeVideoBackend", "decoderPreference", "enableHdr", "webrtcCompatibilityMode"].includes(key)
+            "nativeVideoBackend", "decoderPreference", "enableHdr", "webrtcCompatibilityMode",
+            "forwardFlightControls"].includes(key)
     }
 
     function beginSettingWrite(key, value, previousWrite, source) {

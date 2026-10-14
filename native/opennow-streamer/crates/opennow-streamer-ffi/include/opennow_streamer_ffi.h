@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define OPENNOW_STREAMER_FFI_ABI_VERSION 14u
+#define OPENNOW_STREAMER_FFI_ABI_VERSION 15u
 #define OPENNOW_STREAMER_GENERIC_HID_VERSION 1u
 #define OPENNOW_STREAMER_EVENT_SESSION_TIMER "session-timer"
 #define OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR "text-input-error"
@@ -81,6 +81,26 @@ typedef struct OpenNowGenericHidOutput {
     size_t byte_count;
     uint8_t bytes[256];
 } OpenNowGenericHidOutput;
+
+typedef enum OpenNowGenericHidAdmissionState {
+    OPENNOW_GENERIC_HID_PENDING = 0,
+    OPENNOW_GENERIC_HID_ADMITTED = 1,
+    OPENNOW_GENERIC_HID_DECLINED = 2
+} OpenNowGenericHidAdmissionState;
+
+typedef struct OpenNowGenericHidAdmission {
+    uint8_t slot;
+    uint8_t admission;
+    uint8_t reserved[6];
+    uint64_t incarnation;
+} OpenNowGenericHidAdmission;
+
+typedef struct OpenNowGenericHidAdmissions {
+    uint32_t version;
+    size_t struct_size;
+    size_t count;
+    OpenNowGenericHidAdmission devices[8];
+} OpenNowGenericHidAdmissions;
 
 typedef struct OpenNowStreamerVulkanDeviceInfo {
     uint32_t version;
@@ -338,6 +358,10 @@ OpenNowStreamerStatus opennow_streamer_submit_generic_hid_report(
 OpenNowStreamerStatus opennow_streamer_take_generic_hid_output(
     const OpenNowStreamer *handle,
     OpenNowGenericHidOutput *output);
+
+OpenNowStreamerStatus opennow_streamer_get_generic_hid_admissions(
+    const OpenNowStreamer *handle,
+    OpenNowGenericHidAdmissions *admissions);
 
 OpenNowStreamerStatus opennow_streamer_submit_local_action(
     const OpenNowStreamer *handle,

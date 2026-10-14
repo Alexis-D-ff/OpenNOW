@@ -211,6 +211,7 @@ struct NativeStreamRuntime::Private {
     std::atomic_bool genericHidInventoryPresent{false};
     std::atomic_bool genericHidCaptureActive{false};
     QTimer *genericHidOutputTimer = nullptr;
+    std::array<std::optional<std::pair<quint64, GenericHidAdmission>>, 8> genericHidAdmissions;
     bool inputAuthorizationPending = false;
     bool serverCursorComposited = true;
     bool defaultRelativeMouse = false;
@@ -247,7 +248,8 @@ NativeStreamRuntime::NativeStreamRuntime(QObject *parent,
                               &opennow_streamer_submit_text,
                               &opennow_streamer_replace_generic_hid_inventory,
                               &opennow_streamer_submit_generic_hid_report,
-                              &opennow_streamer_take_generic_hid_output}, parent, vulkanDevice, windowsAdapterLuid)
+                              &opennow_streamer_take_generic_hid_output,
+                              &opennow_streamer_get_generic_hid_admissions}, parent, vulkanDevice, windowsAdapterLuid)
 {
 }
 
@@ -259,12 +261,14 @@ NativeStreamRuntime::NativeStreamRuntime(Api api, QObject *parent,
 {
     d->vulkanDevice = vulkanDevice;
     d->windowsAdapterLuid = windowsAdapterLuid;
-    if (d->api.takeGenericHidOutput) {
+    if (d->api.takeGenericHidOutput || d->api.getGenericHidAdmissions) {
         auto *timer = new QTimer(this);
         d->genericHidOutputTimer = timer;
         timer->setInterval(8);
         connect(timer, &QTimer::timeout, this, [this] {
             const QPointer<NativeStreamRuntime> guard(this);
+            pollGenericHidAdmissions();
+            if (!guard || !d->api.takeGenericHidOutput) return;
             for (int index = 0; index < 32; ++index) {
                 OpenNowGenericHidOutput output{};
                 output.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
@@ -289,6 +293,8 @@ NativeStreamRuntime::NativeStreamRuntime(Api api, QObject *parent,
         });
         connect(this, &NativeStreamRuntime::runningChanged,
                 this, &NativeStreamRuntime::updateGenericHidOutputPolling);
+        connect(this, &NativeStreamRuntime::inputAllowedChanged,
+                this, &NativeStreamRuntime::updateGenericHidOutputPolling);
     }
 }
 
@@ -301,10 +307,44 @@ void NativeStreamRuntime::updateGenericHidOutputPolling()
     }
     auto *timer = d->genericHidOutputTimer;
     if (!timer) return;
-    if (running() && d->genericHidInventoryPresent.load() && d->genericHidCaptureActive.load()) {
+    if (running() && inputAllowed() && d->genericHidInventoryPresent.load()) {
         if (!timer->isActive()) timer->start();
     } else {
         timer->stop();
+    }
+}
+
+void NativeStreamRuntime::pollGenericHidAdmissions()
+{
+    if (!d->api.getGenericHidAdmissions || !d->streamSessionActive || !inputAllowed()) return;
+    OpenNowGenericHidAdmissions snapshot{};
+    snapshot.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
+    snapshot.struct_size = sizeof(snapshot);
+    {
+        const std::shared_lock lock(d->handleMutex);
+        if (!d->handle || d->api.getGenericHidAdmissions(d->handle, &snapshot)
+                != OPENNOW_STREAMER_OK) return;
+    }
+    if (snapshot.version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+        || snapshot.struct_size < sizeof(snapshot) || snapshot.count > 8) return;
+    std::array<std::optional<std::pair<quint64, GenericHidAdmission>>, 8> updated;
+    for (std::size_t index = 0; index < snapshot.count; ++index) {
+        const auto &entry = snapshot.devices[index];
+        if (entry.slot >= 8 || entry.incarnation == 0 || entry.admission > 2
+            || updated[entry.slot].has_value()
+            || std::any_of(std::begin(entry.reserved), std::end(entry.reserved),
+                           [](auto byte) { return byte != 0; })) return;
+        const auto admission = entry.admission == OPENNOW_GENERIC_HID_ADMITTED
+            ? GenericHidAdmission::Admitted : entry.admission == OPENNOW_GENERIC_HID_DECLINED
+            ? GenericHidAdmission::Declined : GenericHidAdmission::Pending;
+        updated[entry.slot] = std::make_pair(entry.incarnation, admission);
+    }
+    const auto previous = std::exchange(d->genericHidAdmissions, updated);
+    const QPointer<NativeStreamRuntime> guard(this);
+    for (quint8 slot = 0; slot < 8; ++slot) {
+        if (!updated[slot] || updated[slot] == previous[slot]) continue;
+        emit genericHidAdmissionChanged(slot, updated[slot]->first, updated[slot]->second);
+        if (!guard) return;
     }
 }
 
@@ -344,6 +384,10 @@ bool NativeStreamRuntime::streaming() const { return d->streaming; }
 
 void NativeStreamRuntime::setStreaming(bool streaming)
 {
+    if (!streaming) {
+        d->genericHidAdmissions = {};
+        emit genericHidAdmissionsReset();
+    }
     if (d->streaming == streaming) return;
     d->streaming = streaming;
     emit streamingChanged();
