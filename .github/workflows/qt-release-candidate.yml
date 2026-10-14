@@ -779,11 +779,24 @@ jobs:
             build/release-artifacts/SHA256SUMS
           if-no-files-found: error
 
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    uses: ./.github/workflows/qt-flatpak.yml
+    with:
+      arch: ${{ matrix.arch }}
+      version: ${{ inputs.version }}
+      update_public_key: ${{ inputs.update_public_key }}
+
   inventory:
     name: isolated-update-signing-and-inventory
     runs-on: blacksmith-2vcpu-ubuntu-2404
     environment: qt-update-signing
-    needs: [preflight, linux, windows, macos]
+    needs: [preflight, linux, windows, macos, flatpak]
     timeout-minutes: 30
     steps:
       - name: Verify signing tools
@@ -813,6 +826,7 @@ jobs:
             printf 'OpenNOW-Qt-%s-Linux-%s.AppImage\nOpenNOW-Qt-%s-Linux-%s.deb\n' \
               "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch"
             printf 'OpenNOW-Qt-%s-Linux-%s.AppImage.zsync\n' "$RELEASE_VERSION" "$arch"
+            printf 'OpenNOW-Qt-%s-Linux-%s.flatpak\n' "$RELEASE_VERSION" "$arch"
             printf 'OpenNOW-Qt-%s-Windows-%s.msi\nOpenNOW-Qt-%s-Windows-%s.zip\nOpenNOW-Qt-%s-Windows-%s-setup.exe\n' \
               "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch"
           done
@@ -821,8 +835,8 @@ jobs:
           actual=$(find candidate -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort)
           [[ "$actual" == "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ]]
           assets=$(find candidate -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' \
-            -o -name '*.AppImage.zsync' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) | wc -l)
-          [[ "$assets" -eq 14 ]]
+            -o -name '*.AppImage.zsync' -o -name '*.flatpak' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) | wc -l)
+          [[ "$assets" -eq 16 ]]
 
           signing_dir=$(mktemp -d "$RUNNER_TEMP/opennow-update-signing.XXXXXX")
           trap 'rm -rf "$signing_dir"' EXIT
@@ -859,7 +873,7 @@ jobs:
               > "$temporary"
             mv "$temporary" "$manifest"
           done < <(find candidate -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' \
-            -o -name '*.AppImage.zsync' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) -print0)
+            -o -name '*.AppImage.zsync' -o -name '*.flatpak' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) -print0)
 
           manifests=$(find candidate -type f -name '*.manifest.json' | wc -l)
           [[ "$manifests" -eq "$assets" ]]
