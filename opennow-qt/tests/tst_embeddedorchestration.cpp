@@ -526,6 +526,20 @@ private slots:
         )JS"));
         QVERIFY2(!left.isError(), qPrintable(left.toString()));
         QCOMPARE(left.toString(), QStringLiteral("home,library,1"));
+        const auto streamSwitch = engine.evaluate(QStringLiteral(R"JS(
+            reloadCatalogForSession = function() {};
+            refreshAccountServices = function() {};
+            resetRegionPing = function() {};
+            AppController.route = 'stream';
+            activeSession = null;
+            accountSwitchRequestId = '';
+            switchAccount('old', '');
+            onResponseReceived(accountSwitchRequestId,
+                {session:{user:{userId:'old',displayName:'Old'},provider:{idpId:'alliance'}},persistence:'secure-store'});
+            AppController.route
+        )JS"));
+        QVERIFY2(!streamSwitch.isError(), qPrintable(streamSwitch.toString()));
+        QCOMPARE(streamSwitch.toString(), QStringLiteral("home"));
     }
 
     void exhaustedTransportNegotiationDoesNotReclaimTheSeat_data()

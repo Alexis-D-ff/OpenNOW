@@ -3924,6 +3924,9 @@ QtObject {
                     AppController.navigate("stream")
                 else if (root.authSession && pickerRoute)
                     root.leaveAccountPicker()
+                else if (root.authSession && !root.activeSession
+                         && ["stream", "inserting", "joining"].indexOf(AppController.route) >= 0)
+                    AppController.navigateFromLastPrimary("home")
                 else if (AppController.route === "profile-pin")
                     AppController.navigate("accounts")
             } else if (requestId === root.accountRemoveRequestId) {
