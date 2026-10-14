@@ -1643,6 +1643,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "opennow-awdl-helper"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "opennow-streamer"
 version = "0.2.0"
 dependencies = [

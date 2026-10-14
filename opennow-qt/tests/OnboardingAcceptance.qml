@@ -6,8 +6,12 @@ QtObject {
     property QtObject network: QtObject {
         property int state: MacAwdlController.Unsupported
         property bool busy: false
+        property bool enabled: false
+        property bool leased: false
         property string error: ""
         function refresh() {}
+        function install() { throw new Error("Unsupported AWDL helper installation") }
+        function uninstall() { throw new Error("Unsupported AWDL helper uninstallation") }
     }
     property QtObject client: QtObject {
         property var requests: []

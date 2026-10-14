@@ -10,8 +10,8 @@ FocusScope {
     objectName: "desktopOnboardingScreen"
     property var store: ShellStore
     property int stepIndex: 0
-    readonly property bool networkRequired: store.onboardingAwdlController.state !== MacAwdlController.Unsupported
-    readonly property var steps: networkRequired ? ["mode", "picture", "network", "boost", "ready"]
+    readonly property bool networkAvailable: store.onboardingAwdlController.state !== MacAwdlController.Unsupported
+    readonly property var steps: networkAvailable ? ["mode", "picture", "network", "boost", "ready"]
         : ["mode", "picture", "boost", "ready"]
     readonly property int stepCount: steps.length
     readonly property string step: steps[Math.min(stepIndex, stepCount - 1)]
@@ -29,12 +29,12 @@ FocusScope {
     readonly property var stepNames: ({mode: qsTr("Mode"), picture: qsTr("Picture"), network: qsTr("Network"),
         boost: qsTr("Boost"), ready: qsTr("Ready")})
     readonly property var titles: ({mode: qsTr("Desk or couch?"), picture: qsTr("How should it look?"),
-        network: qsTr("One quick network check."), boost: qsTr("Try an experimental boost?"),
+        network: qsTr("An optional network helper."), boost: qsTr("Try an experimental boost?"),
         ready: displayName !== "" ? qsTr("You're set, %1.").arg(displayName) : qsTr("You're set.")})
     readonly property var introductions: ({
         mode: qsTr("Pick the shell you'll open most. Both share one library and one set of settings."),
         picture: qsTr("Start with what your display and membership allow. You can fine-tune any time."),
-        network: qsTr("This Mac needs Apple Wireless Direct Link turned off before setup can finish."),
+        network: qsTr("Optional AWDL suppression is available in desktop Settings > Network. It stays off by default."),
         boost: qsTr("Both run on your GPU after the stream is decoded. They start off, so skipping is safe."),
         ready: qsTr("Here's what you picked. Finish to save it and open your library.")})
     readonly property var boostKeys: ["frameGeneration", "upscaling", "upscalingSharpness", "upscalingDenoise"]
@@ -55,11 +55,6 @@ FocusScope {
     Connections {
         target: root.store
         function onSettingsChanged() { root.updateUiScale() }
-        function onOnboardingRequirementsMissing() {
-            const network = root.steps.indexOf("network")
-            if (network >= 0)
-                root.goToStep(network)
-        }
     }
 
     function goToStep(index) {
@@ -70,8 +65,6 @@ FocusScope {
 
     function next() {
         if (saving)
-            return
-        if (step === "network" && !store.verifyOnboardingRequirements())
             return
         if (stepIndex < stepCount - 1) {
             goToStep(stepIndex + 1)
@@ -494,9 +487,8 @@ FocusScope {
                             leftPadding: DesktopTokens.px(22); rightPadding: DesktopTokens.px(root.compact ? 22 : 8)
                             width: Math.min(Math.max(implicitWidth, DesktopTokens.px(152)), pageBody.width)
                             text: root.saving ? qsTr("Saving…") : root.step === "ready" ? qsTr("Finish and open library")
-                                : root.step === "network" && !root.store.onboardingAwdlReady ? qsTr("Disable AWDL to continue")
                                 : qsTr("Continue")
-                            enabled: !root.saving && (root.step !== "network" || root.store.onboardingAwdlReady)
+                            enabled: !root.saving
                             onClicked: root.next()
                         }
                     }
@@ -624,8 +616,7 @@ FocusScope {
                         {glyph:"monitor",label:qsTr("Picture"),step:"picture",value:qsTr("%1 · %2 FPS · %3 · %4 Mbps").arg(String(root.settings.resolution || "1920x1080").replace("x"," × "))
                             .arg(Number(root.settings.fps ?? 60) === 0 ? qsTr("Auto") : root.settings.fps ?? 60)
                             .arg(String(root.settings.codec || "auto").toUpperCase()).arg(root.settings.maxBitrateMbps ?? 75)},
-                        ...(root.networkRequired ? [{glyph:"globe",label:qsTr("Network"),step:"network",value:root.store.onboardingAwdlReady
-                            ? qsTr("AWDL down · ready for setup") : qsTr("AWDL must be disabled")}] : []),
+                        ...(root.networkAvailable ? [{glyph:"globe",label:qsTr("Network"),step:"network",value:qsTr("Optional · configure in Settings")}] : []),
                         {glyph:"bolt",label:qsTr("Boost"),step:"boost",value:(root.settings.frameGeneration === "2x" ? qsTr("Frame generation 2× · Experimental") : qsTr("Frame generation off"))
                             + (Qt.platform.os === "osx" ? (root.settings.upscaling === "metalfx" ? qsTr(" · MetalFX · clarity %1 · noise reduction %2").arg(root.settings.upscalingSharpness ?? 10).arg(root.settings.upscalingDenoise ?? 0) : qsTr(" · upscaling off")) : (root.settings.upscaling === "fsr1" ? qsTr(" · FSR 1 · clarity %1").arg(root.settings.upscalingSharpness ?? 10) : qsTr(" · upscaling off")))}
                     ]

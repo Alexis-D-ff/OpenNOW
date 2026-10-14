@@ -54,6 +54,10 @@ else()
         DESTINATION "${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS")
     install(PROGRAMS "${OPENNOW_STREAMER_BIN_ARTIFACT}"
         DESTINATION "${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS")
+    install(PROGRAMS "${OPENNOW_AWDL_HELPER_ARTIFACT}"
+        DESTINATION "${OPENNOW_EXECUTABLE_NAME}.app/Contents/Helpers")
+    install(FILES packaging/opennow-awdl.plist
+        DESTINATION "${OPENNOW_EXECUTABLE_NAME}.app/Contents/Resources")
 endif()
 
 if(APPLE)
@@ -92,7 +96,8 @@ if(APPLE)
         "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS/opennow-core"
         "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS/opennow-acceptance-verify"
         "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS/opennow-update-helper"
-        "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS/opennow-streamer")
+        "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/MacOS/opennow-streamer"
+        "-executable=${OPENNOW_EXECUTABLE_NAME}.app/Contents/Helpers/opennow-awdl-helper")
     if(OPENNOW_MACOS_ADHOC_SIGN)
         list(APPEND OPENNOW_QT_DEPLOY_TOOL_ARGS "-codesign=-")
     endif()

@@ -2,6 +2,19 @@ import QtQuick
 import OpenNOW
 
 QtObject {
+    property QtObject awdl: QtObject {
+        property int state: MacAwdlController.NotInstalled
+        property bool busy: false
+        property bool enabled: false
+        property bool leased: false
+        property string error: ""
+        property int installs: 0
+        property int removals: 0
+        property int refreshes: 0
+        function install() { ++installs; busy = true }
+        function uninstall() { ++removals; busy = true }
+        function refresh() { ++refreshes }
+    }
     property QtObject client: QtObject {
         property string state: "stopped"
         property string lastError: ""
@@ -29,6 +42,61 @@ QtObject {
         return null
     }
     function lastWrite() { return client.calls[client.calls.length - 1] }
+    function verifyAwdlSettings(desktop) {
+        const page = find(desktop, "desktopNetworkSettings")
+        const owner = ShellStore.settingsOwnerState
+        check(page !== null, "the desktop network page is missing")
+        page.awdlController = awdl
+        owner.awdlController = awdl
+        owner.confirmedSettings = ({})
+        const toggle = find(page, "suppressAwdlWhileStreamingToggle")
+        const status = find(page, "awdlHelperStatus")
+        const action = find(page, "awdlHelperInstallButton")
+        check(toggle && status && action, "AWDL controls are missing")
+        check(!toggle.checked && !awdl.enabled && !toggle.enabled && status.description === qsTr("Not installed"),
+            "AWDL must default off and require the helper")
+        action.clicked()
+        check(awdl.installs === 1 && awdl.busy && !action.enabled && !toggle.enabled && !awdl.enabled,
+            "installation needs an explicit action and must not enable suppression")
+        awdl.busy = false
+        awdl.state = MacAwdlController.Installed
+        check(toggle.enabled && status.description === qsTr("Ready"), "installed helper is not ready")
+        toggle.clicked()
+        let write = lastWrite()
+        check(write.params.key === "suppressAwdlWhileStreaming" && write.params.value === true && !awdl.enabled,
+            "an unconfirmed preference must not acquire an AWDL lease")
+        client.requestFailed(write.id, "settings_write_failed", "Fixture denied AWDL persistence")
+        check(!toggle.checked && !awdl.enabled, "failed persistence must keep AWDL off")
+        toggle.clicked()
+        write = lastWrite()
+        client.eventReceived("settings.changed", {key:"suppressAwdlWhileStreaming", value:true})
+        check(!awdl.enabled, "a pending preference event must not enable AWDL before acknowledgement")
+        client.responseReceived(write.id, {key:"suppressAwdlWhileStreaming", value:true})
+        check(toggle.checked && awdl.enabled, "saved AWDL preference did not reach the controller")
+        awdl.leased = true
+        check(status.description === qsTr("Active"), "active AWDL lease is not shown")
+        awdl.error = "Fixture helper disconnected"
+        check(status.description === qsTr("Error") && find(page, "awdlHelperError").visible,
+            "helper errors must override installed or active status")
+        awdl.leased = false
+        find(page, "awdlHelperRefreshButton").clicked()
+        check(awdl.refreshes === 1, "refresh did not reach the helper controller")
+        awdl.error = ""
+        action.clicked()
+        check(awdl.removals === 1 && awdl.busy, "remove did not request administrator authorization")
+        awdl.busy = false
+        awdl.state = MacAwdlController.NotInstalled
+        check(toggle.checked && toggle.enabled && status.description === qsTr("Not installed"),
+            "a missing helper must still allow opting out of an existing preference")
+        toggle.clicked()
+        write = lastWrite()
+        client.responseReceived(write.id, {key:"suppressAwdlWhileStreaming", value:false})
+        check(!toggle.checked && !awdl.enabled && !toggle.enabled && !awdl.leased,
+            "saved opt-out must work without the helper and prevent a new opt-in")
+        awdl.state = MacAwdlController.Unsupported
+        check(!status.visible, "unsupported platforms must hide AWDL settings")
+        awdl.state = MacAwdlController.Installed
+    }
     function run(parent) {
         client.state = "ready"
         ShellStore.settings = ({})
@@ -121,6 +189,7 @@ QtObject {
         client.responseReceived(write.id, {key:"networkTest", value:false})
         check(!toggle.checked, "the desktop toggle reflects console changes")
         consolePage.destroy()
+        verifyAwdlSettings(desktop)
         return true
     }
 }

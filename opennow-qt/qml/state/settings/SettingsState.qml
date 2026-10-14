@@ -19,6 +19,12 @@ QtObject {
     signal errorReported(string message)
     property var settings: ({})
     property var confirmedSettings: ({})
+    property var awdlController: MacAwdl
+    property Binding awdlPreferenceBinding: Binding {
+        target: root.awdlController
+        property: "enabled"
+        value: root.confirmedSettings.suppressAwdlWhileStreaming === true
+    }
     property string providerIdpId: ""
     property string providerCode: ""
     readonly property string selectedRegion: {

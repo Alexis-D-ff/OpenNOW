@@ -102,9 +102,7 @@ QtObject {
     readonly property string selectedRegion: settingsOwner.selectedRegion
     property alias keyboardLayoutItems: settingsOwner.keyboardLayoutItems
     property var onboardingAwdlController: MacAwdl
-    readonly property bool onboardingAwdlReady: !onboardingAwdlController.busy
-        && [MacAwdlController.Unsupported, MacAwdlController.Unavailable, MacAwdlController.Disabled]
-            .indexOf(onboardingAwdlController.state) >= 0
+    readonly property bool onboardingAwdlReady: true
     property OnboardingState onboardingOwnerState: OnboardingState {
         id: onboardingOwner
         coreClient: CoreClient
@@ -140,14 +138,7 @@ QtObject {
     signal onboardingRequirementsMissing()
 
     function checkOnboardingRequirements() {
-        onboardingAwdlController.refresh()
-        if (onboardingAwdlReady)
-            return ""
-        if (onboardingAwdlController.busy)
-            return qsTr("Wait for macOS authorization to finish before continuing setup.")
-        if (onboardingAwdlController.state === MacAwdlController.Unknown)
-            return qsTr("AWDL status could not be verified. Refresh its status in the network check before continuing setup.")
-        return qsTr("Disable AWDL in the network check before continuing setup on this Mac.")
+        return ""
     }
 
     function verifyOnboardingRequirements() {

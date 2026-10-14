@@ -54,6 +54,7 @@ pub use opennow_streamer_transport::{EncodedMediaFrame, MediaConsumer};
 #[derive(Clone)]
 pub struct EventSender {
     inner: EventSenderInner,
+    start_id: Option<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -66,16 +67,38 @@ impl EventSender {
     fn unbounded(sender: Sender<Value>) -> Self {
         Self {
             inner: EventSenderInner::Unbounded(sender),
+            start_id: None,
         }
     }
 
     pub fn bounded(sender: SyncSender<Value>) -> Self {
         Self {
             inner: EventSenderInner::Bounded(sender),
+            start_id: None,
         }
     }
 
+    fn for_session(&self, start_id: &str) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            start_id: Some(Arc::from(start_id)),
+        }
+    }
+
+    fn scope_lifecycle(&self, mut value: Value) -> Value {
+        if !matches!(value["type"].as_str(), Some("status" | "error"))
+            || value.get("startId").is_some()
+        {
+            return value;
+        }
+        if let Some(start_id) = &self.start_id {
+            value["startId"] = Value::String(start_id.to_string());
+        }
+        value
+    }
+
     fn send(&self, value: Value) -> Result<(), ()> {
+        let value = self.scope_lifecycle(value);
         match &self.inner {
             EventSenderInner::Unbounded(sender) => sender.send(value).map_err(|_| ()),
             EventSenderInner::Bounded(sender) => match sender.try_send(value) {
@@ -86,6 +109,7 @@ impl EventSender {
     }
 
     fn send_terminal(&self, value: Value) -> Result<(), ()> {
+        let value = self.scope_lifecycle(value);
         match &self.inner {
             EventSenderInner::Unbounded(sender) => sender.send(value).map_err(|_| ()),
             EventSenderInner::Bounded(sender) => sender.send(value).map_err(|_| ()),
@@ -697,6 +721,7 @@ impl Engine {
         if let Some(session) = self.webrtc_session.take() {
             session.stop();
         }
+        self.events = self.events.for_session(&command.id);
         if context
             .settings
             .get("transportMode")
@@ -3249,6 +3274,49 @@ mod tests {
 
     fn command(value: Value) -> Command {
         serde_json::from_value(value).expect("command")
+    }
+
+    #[test]
+    fn lifecycle_events_keep_the_session_that_created_the_sender() {
+        let (sender, receiver) = mpsc::channel();
+        let base = EventSender::unbounded(sender);
+        let old = base.for_session("old-start");
+        let current = old.for_session("new-start");
+        old.send(event("status", json!({"status":"streaming"})))
+            .unwrap();
+        current
+            .send(event("status", json!({"status":"streaming"})))
+            .unwrap();
+        old.send_terminal(event("error", json!({"message":"old session ended"})))
+            .unwrap();
+        current
+            .send(event(
+                "status",
+                json!({"status":"paused","startId":"sender-authored"}),
+            ))
+            .unwrap();
+        current
+            .send(event("telemetry", json!({"videoFramesReceived":1})))
+            .unwrap();
+        assert_eq!(receiver.recv().unwrap()["startId"], "old-start");
+        assert_eq!(receiver.recv().unwrap()["startId"], "new-start");
+        assert_eq!(receiver.recv().unwrap()["startId"], "old-start");
+        assert_eq!(receiver.recv().unwrap()["startId"], "sender-authored");
+        assert!(receiver.recv().unwrap().get("startId").is_none());
+    }
+
+    #[test]
+    fn bounded_lifecycle_sender_scopes_normal_and_terminal_delivery() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let sender = EventSender::bounded(sender).for_session("bounded-start");
+        sender
+            .send(event("status", json!({"status":"streaming"})))
+            .unwrap();
+        sender
+            .send_terminal(event("status", json!({"status":"stopped"})))
+            .unwrap();
+        assert_eq!(receiver.recv().unwrap()["startId"], "bounded-start");
+        assert_eq!(receiver.recv().unwrap()["startId"], "bounded-start");
     }
 
     #[test]

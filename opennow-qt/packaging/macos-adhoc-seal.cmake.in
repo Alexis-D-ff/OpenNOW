@@ -1,5 +1,13 @@
 set(bundle "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@OPENNOW_EXECUTABLE_NAME@.app")
 execute_process(
+    COMMAND /usr/bin/codesign --force --sign - --identifier "io.github.opencloudgaming.OpenNOW.awdl-helper"
+        "${bundle}/Contents/Helpers/opennow-awdl-helper"
+    RESULT_VARIABLE helper_sign_result
+    ERROR_VARIABLE helper_sign_error)
+if(NOT helper_sign_result EQUAL 0)
+    message(FATAL_ERROR "Could not sign the macOS AWDL helper: ${helper_sign_error}")
+endif()
+execute_process(
     COMMAND /usr/bin/codesign --force --sign - --identifier "@OPENNOW_MACOS_BUNDLE_IDENTIFIER@" "${bundle}"
     RESULT_VARIABLE sign_result
     ERROR_VARIABLE sign_error)
