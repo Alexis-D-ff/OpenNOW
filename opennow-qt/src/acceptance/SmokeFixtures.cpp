@@ -232,6 +232,93 @@ int AcceptanceSession::prepareWindow()
                     {u"https://east.example.invalid"_s,94}});
             }
         }
+        const auto accountsIndex = m_arguments.indexOf(u"--smoke-accounts"_s);
+        if (accountsIndex >= 0) {
+            // Placeholder "Who's playing?" accounts for visual acceptance only;
+            // the core is not asked to save, switch or remove anything.
+            bool countOk = false;
+            const int count = accountsIndex + 1 < m_arguments.size()
+                ? m_arguments.at(accountsIndex + 1).toInt(&countOk) : 0;
+            if (!countOk || count < 1 || count > 12) return EXIT_FAILURE;
+            auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
+            if (!store) return EXIT_FAILURE;
+            struct Fixture { const char16_t *name; const char16_t *tier; const char16_t *provider; bool alliance; bool pin; };
+            static constexpr Fixture fixtures[] = {
+                {u"Zortos", u"ULTIMATE", u"NVIDIA", false, false},
+                {u"Mila", u"PERFORMANCE", u"NVIDIA", false, false},
+                {u"jun.kr", u"ULTIMATE", u"LG U+", true, false},
+                {u"Noah", u"FREE", u"NVIDIA", false, true},
+                {u"Theodora Van Der Berghe-Castellanos", u"PERFORMANCE", u"bro.game", true, false},
+                {u"ming.tw", u"ULTIMATE", u"NVIDIA", false, false},
+                {u"sam", u"PERFORMANCE", u"NVIDIA", false, false},
+                {u"QA test", u"FREE", u"NVIDIA", false, false},
+                {u"Robin", u"FREE", u"NVIDIA", false, false},
+                {u"Kai", u"ULTIMATE", u"NVIDIA", false, false},
+                {u"Ari", u"PERFORMANCE", u"NVIDIA", false, false},
+                {u"Lou", u"FREE", u"NVIDIA", false, false}};
+            const auto stateIndex = m_arguments.indexOf(u"--smoke-account-state"_s);
+            const auto state = stateIndex >= 0 && stateIndex + 1 < m_arguments.size()
+                ? m_arguments.at(stateIndex + 1) : QString();
+            QVariantList accounts;
+            for (int index = 0; index < count; ++index) {
+                const auto &fixture = fixtures[index];
+                const auto name = QString::fromUtf16(fixture.name);
+                accounts.append(QVariantMap{
+                    {u"userId"_s, u"fixture-user-%1"_s.arg(index + 1)}, {u"displayName"_s, name},
+                    {u"email"_s, u"%1@example.invalid"_s.arg(name.section(u' ', 0, 0).toLower())},
+                    {u"membershipTier"_s, QString::fromUtf16(fixture.tier)},
+                    {u"providerName"_s, QString::fromUtf16(fixture.provider)},
+                    {u"alliance"_s, fixture.alliance}, {u"hasPin"_s, fixture.pin},
+                    {u"needsSignIn"_s, state == u"expired"_s && index == 1}});
+            }
+            const auto active = accounts.first().toMap();
+            store->setProperty("savedAccounts", accounts);
+            store->setProperty("accountsLoaded", true);
+            store->setProperty("launchAccountPickerConsidered", true);
+            store->setProperty("authRestorePending", false);
+            store->setProperty("authState", u"signed-in"_s);
+            store->setProperty("authSession", QVariantMap{
+                {u"user"_s, QVariantMap{{u"userId"_s, active.value(u"userId"_s)},
+                    {u"displayName"_s, active.value(u"displayName"_s)}, {u"email"_s, active.value(u"email"_s)},
+                    {u"membershipTier"_s, active.value(u"membershipTier"_s)}}},
+                {u"provider"_s, QVariantMap{{u"idpId"_s, u"nvidia-fixture"_s}, {u"displayName"_s, u"NVIDIA"_s}}}});
+            store->setProperty("sessionPersistence", u"os-credential-store"_s);
+            const auto target = accounts.size() > 1 ? accounts.at(1).toMap() : active;
+            if (state == u"switching"_s) {
+                store->setProperty("accountSwitchRequestId", u"smoke-account-switch"_s);
+                store->setProperty("accountSwitchTargetUserId", target.value(u"userId"_s));
+            }
+            if (state == u"switcher"_s) {
+                auto *switcher = window ? window->findChild<QObject *>(u"desktopAccountSwitcher"_s) : nullptr;
+                if (!switcher || !switcher->parent()) return EXIT_FAILURE;
+                switcher->parent()->setProperty("accountSwitcherOpen", true);
+                switcher->setProperty("currentIndex", 1);
+            }
+            if (state == u"switch-confirm"_s) {
+                store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"smoke-account-session"_s},
+                    {u"ownerScope"_s, QVariantMap{{u"userId"_s, active.value(u"userId"_s)}}}});
+                store->setProperty("selectedGame", QVariantMap{{u"title"_s, u"Cyberpunk 2077"_s}});
+                store->setProperty("accountSwitchConfirmTarget", target);
+                m_controller.showOverlay(u"account-switch-confirm"_s);
+            }
+            if (auto *picker = window ? window->findChild<QObject *>(u"desktopAccountPicker"_s) : nullptr) {
+                if (state == u"expired"_s || state == u"switching"_s || state == u"remove"_s)
+                    picker->setProperty("currentIndex", 1);
+                if (state == u"manage"_s || state == u"remove"_s)
+                    picker->setProperty("manageMode", true);
+                if (state == u"remove"_s) {
+                    picker->setProperty("confirmTarget", target);
+                    picker->setProperty("confirmKind", u"remove"_s);
+                }
+                if (state == u"pin"_s && accounts.size() > 3) {
+                    picker->setProperty("currentIndex", 3);
+                    picker->setProperty("pinAccount", accounts.at(3));
+                    picker->setProperty("pinEntry", u"12"_s);
+                }
+            } else if (m_controller.route() == u"accounts"_s) {
+                return EXIT_FAILURE;
+            }
+        }
         if (m_arguments.contains(u"--smoke-resolution-open"_s)
                 || m_arguments.contains(u"--smoke-resolution-fits-monitor"_s)) {
             auto *picker = window ? window->findChild<QObject *>(u"renewResolutionPicker"_s) : nullptr;

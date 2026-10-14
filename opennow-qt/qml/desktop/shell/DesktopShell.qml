@@ -19,6 +19,18 @@ FocusScope {
     signal routeRequested(string route)
     signal consoleModeRequested()
     signal commandPaletteRequested()
+    signal accountSwitcherClosed()
+    property bool accountSwitcherAllowed: true
+    property bool accountSwitcherOpen: false
+    onAccountSwitcherAllowedChanged: if (!accountSwitcherAllowed) accountSwitcherOpen = false
+    onAccountSwitcherOpenChanged: if (!accountSwitcherOpen) accountSwitcherClosed()
+
+    function openAccountSwitcher() {
+        if (!accountSwitcherAllowed || !ShellStore.signedIn)
+            return
+        sidebar.closeOverlay()
+        accountSwitcherOpen = true
+    }
 
     anchors.fill: parent
     focus: true
@@ -209,6 +221,24 @@ FocusScope {
             sidebar.closeOverlay()
             collectionDialog.open()
         }
+        onAccountSwitcherRequested: root.openAccountSwitcher()
+    }
+
+    Shortcut {
+        objectName: "accountSwitcherShortcut"
+        sequence: "Ctrl+Shift+A"
+        context: Qt.WindowShortcut
+        autoRepeat: false
+        enabled: root.accountSwitcherAllowed && ShellStore.signedIn && root.visible
+            && root.route !== "settings-shortcuts"
+        onActivated: root.accountSwitcherOpen ? root.accountSwitcherOpen = false : root.openAccountSwitcher()
+    }
+
+    DesktopAccountSwitcher {
+        anchors.fill: parent
+        z: 60
+        opened: root.accountSwitcherOpen
+        onCloseRequested: root.accountSwitcherOpen = false
     }
 
     DesktopCollectionDialog {

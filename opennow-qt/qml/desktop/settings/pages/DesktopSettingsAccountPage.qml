@@ -19,8 +19,15 @@ Column {
         width: parent.width; paperStyle: true
         DesktopSettingsRow {
             width: parent.width; paperStyle: true; glyph: "person"; title: qsTr("Profiles")
-            description: qsTr("Manage saved account profiles"); showDivider: false
-            DesktopSettingsButton { text: qsTr("Manage"); onClicked: AppController.navigate("accounts") }
+            description: ShellStore.savedAccounts.length === 1 ? qsTr("1 account on this PC")
+                : qsTr("%1 accounts on this PC").arg(ShellStore.savedAccounts.length)
+            DesktopSettingsButton { objectName: "accountSettingsManage"; text: qsTr("Manage"); onClicked: AppController.navigate("accounts") }
+        }
+        DesktopSettingsRow {
+            objectName: "accountStartAsLastUsed"
+            width: parent.width; paperStyle: true; glyph: "person"; title: qsTr("Skip “Who’s playing?”")
+            description: qsTr("Skip this screen and start as the last-used account"); showDivider: false
+            DesktopSettingsToggle { checked: page.settingsScreen.boolSetting("startAsLastUsedAccount",false); onValueChangedByUser: value => page.settingsScreen.setSetting("startAsLastUsedAccount",value) }
         }
     }
     Loader { width: parent.width; sourceComponent: page.storesPageComponent }

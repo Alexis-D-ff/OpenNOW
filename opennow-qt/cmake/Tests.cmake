@@ -536,6 +536,24 @@ if(BUILD_TESTING)
     endforeach()
     qt_add_resources(opennow-qt "store-paging-acceptance"
         PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
+    add_test(NAME qml-account-shortcuts
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-paper-design --smoke-accounts 4 --smoke-account-shortcuts --reduced-motion)
+    set_tests_properties(qml-account-shortcuts PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+    foreach(account_state IN ITEMS launch expired switching pin manage remove many console)
+        if(account_state STREQUAL "many")
+            set(account_args --desktop --smoke-accounts 8)
+        elseif(account_state STREQUAL "console")
+            set(account_args --console --smoke-accounts 4)
+        else()
+            set(account_args --desktop --smoke-accounts 4 --smoke-account-state ${account_state})
+        endif()
+        add_test(NAME qml-account-picker-${account_state}
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --route accounts
+                --smoke-paper-design ${account_args} --reduced-motion
+                --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-${account_state}.png)
+        set_tests_properties(qml-account-picker-${account_state} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+    endforeach()
     add_test(NAME qml-console-settings
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --console
             --route settings-video --smoke-console-settings --reduced-motion)

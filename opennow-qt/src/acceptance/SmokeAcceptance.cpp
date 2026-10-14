@@ -740,6 +740,43 @@ int AcceptanceSession::startSmokeWorkload()
             ? nullptr : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
         startMotionAcceptance(window, &m_controller, &m_qmlWarningOccurred,
                               m_arguments.contains(u"--smoke-motion-fullscreen"_s));
+    } else if (m_arguments.contains(u"--smoke-account-shortcuts"_s)) {
+        auto *window = m_engine.rootObjects().isEmpty()
+            ? nullptr : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+        if (!window) return EXIT_FAILURE;
+        QTimer::singleShot(200, this, [this, window] {
+            const auto enabledSequences = [window] {
+                QStringList enabled;
+                for (int index = 1; index <= 9; ++index) {
+                    auto *shortcut = window->findChild<QObject *>(u"accountSwitchShortcut%1"_s.arg(index));
+                    if (!shortcut) return QStringList{u"missing"_s};
+                    if (shortcut->property("enabled").toBool())
+                        enabled.append(shortcut->property("sequence").toString());
+                }
+                return enabled;
+            };
+            const QStringList savedAccounts{u"Ctrl+1"_s, u"Ctrl+2"_s, u"Ctrl+3"_s, u"Ctrl+4"_s};
+            auto *switcherShortcut = window->findChild<QObject *>(u"accountSwitcherShortcut"_s);
+            auto *switcher = window->findChild<QObject *>(u"desktopAccountSwitcher"_s);
+            bool passed = !m_qmlWarningOccurred && switcherShortcut && switcher
+                && enabledSequences() == savedAccounts && switcherShortcut->property("enabled").toBool()
+                && QMetaObject::invokeMethod(switcherShortcut, "activated", Qt::DirectConnection)
+                && switcher->property("opened").toBool();
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QGuiApplication::sendEvent(window, &press);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_Escape, Qt::NoModifier);
+            QGuiApplication::sendEvent(window, &release);
+            passed = passed && !switcher->property("opened").toBool();
+            m_controller.navigate(u"settings-shortcuts"_s);
+            passed = passed && enabledSequences().isEmpty() && !switcherShortcut->property("enabled").toBool();
+            m_controller.navigate(u"home"_s);
+            m_controller.showOverlay(u"account-switch-confirm"_s);
+            passed = passed && enabledSequences().isEmpty() && !switcherShortcut->property("enabled").toBool();
+            m_controller.showOverlay(QString());
+            passed = passed && enabledSequences() == savedAccounts && !m_qmlWarningOccurred;
+            if (!passed) qCritical("Account shortcuts escaped their safe routes or the switcher did not open and close");
+            m_application.exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
+        });
     } else if (m_smokeFullscreenStatsShortcut) {
         auto *window = m_engine.rootObjects().isEmpty()
             ? nullptr : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
