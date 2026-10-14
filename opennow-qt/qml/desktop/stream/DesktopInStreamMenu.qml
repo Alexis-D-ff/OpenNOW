@@ -348,7 +348,7 @@ FocusScope {
         FocusScope {
             id: mainPage
             objectName: "streamMenuMainPage"
-            x: pageMotion.progress * drawer.width
+            x: -pageMotion.progress * drawer.width
             width: drawer.width
             height: drawer.height
             visible: pageMotion.progress < 1
@@ -681,7 +681,7 @@ FocusScope {
 
         DesktopStreamControllersPage {
             id: controllersPage
-            x: -(1 - pageMotion.progress) * drawer.width
+            x: (1 - pageMotion.progress) * drawer.width
             width: drawer.width
             height: drawer.height
             visible: pageMotion.progress > 0

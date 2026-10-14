@@ -318,41 +318,42 @@ FocusScope {
         y: 20
         width: parent.width - 44
         height: 44
+        DesktopStreamDrawerButton {
+            id: backButton
+            objectName: "streamControllersBack"
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: 40; height: 40; radius: 12
+            text: qsTr("Back")
+            description: qsTr("Back to the menu")
+            onClicked: root.backRequested()
+            Text {
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: -1
+                text: "‹"
+                color: DesktopTokens.textHigh
+                font.family: DesktopTokens.bodyFont; font.pixelSize: 24; font.weight: Font.Bold
+            }
+        }
         Text {
+            anchors.left: backButton.right
+            anchors.leftMargin: 12
             anchors.verticalCenter: parent.verticalCenter
             text: qsTr("Controllers")
             color: DesktopTokens.text
             font.family: DesktopTokens.displayFont; font.pixelSize: 22; font.weight: Font.Black
         }
-        Row {
+        KeyboardGlyph {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 10
-            KeyboardGlyph {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: !root.controllerHints
-                shortcut: "Esc"; keySize: 20; ink: DesktopTokens.textMuted
-            }
-            ControllerGlyph {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.controllerHints
-                glyph: "B"; label: ""; glyphSize: 20; spacing: 0; glyphColor: DesktopTokens.danger
-            }
-            DesktopStreamDrawerButton {
-                id: backButton
-                objectName: "streamControllersBack"
-                width: 40; height: 40; radius: 12
-                text: qsTr("Back")
-                description: qsTr("Back to the menu")
-                onClicked: root.backRequested()
-                Text {
-                    anchors.centerIn: parent
-                    anchors.horizontalCenterOffset: 1
-                    text: "›"
-                    color: DesktopTokens.textHigh
-                    font.family: DesktopTokens.bodyFont; font.pixelSize: 24; font.weight: Font.Bold
-                }
-            }
+            visible: !root.controllerHints
+            shortcut: "Esc"; keySize: 20; ink: DesktopTokens.textMuted
+        }
+        ControllerGlyph {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.controllerHints
+            glyph: "B"; label: ""; glyphSize: 20; spacing: 0; glyphColor: DesktopTokens.danger
         }
     }
 
