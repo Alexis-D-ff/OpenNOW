@@ -40,12 +40,14 @@ mod nvst_rtsp;
 mod queue_drops;
 #[cfg(test)]
 mod recording_tests;
+mod telemetry;
 mod webrtc;
 
 use microphone::MicrophoneController;
 
 use nvst_rtsp::{ActiveNvstRtspSession, prepare_owned_nvst};
 use queue_drops::QueueDropReports;
+use telemetry::{TELEMETRY_INTERVAL, media_telemetry};
 
 pub use opennow_streamer_transport::{EncodedMediaFrame, MediaConsumer};
 
@@ -2620,30 +2622,20 @@ fn flush_nvst_telemetry<R: NvstSessionResources>(
     state: &mut NvstMediaFeedbackState,
 ) {
     let elapsed = state.telemetry_window_started.elapsed();
-    if elapsed < Duration::from_secs(1) {
+    if elapsed < TELEMETRY_INTERVAL {
         return;
     }
-    let elapsed_seconds = elapsed.as_secs_f64();
-    let frames_per_second = state.telemetry_frames as f64 / elapsed_seconds;
-    let bitrate_mbps = state.telemetry_bytes as f64 * 8.0 / elapsed_seconds / 1_000_000.0;
-    let socket_bytes = resources.socket_receive_bytes();
-    let receive_bitrate_mbps = socket_bytes.and_then(|bytes| {
-        bytes
-            .checked_sub(state.previous_socket_receive_bytes)
-            .map(|delta| delta as f64 * 8.0 / elapsed_seconds / 1_000_000.0)
-    });
-    if let Some(bytes) = socket_bytes {
-        state.previous_socket_receive_bytes = bytes;
-    }
-    state.peak_bitrate_mbps = state.peak_bitrate_mbps.max(bitrate_mbps);
+    let mut payload = media_telemetry(
+        elapsed,
+        state.telemetry_frames,
+        state.telemetry_bytes,
+        resources.socket_receive_bytes(),
+        &mut state.previous_socket_receive_bytes,
+        &mut state.peak_bitrate_mbps,
+    );
     let network = resources.network_metrics();
-    let _ = output.send(event(
-        "telemetry",
+    payload.as_object_mut().unwrap().extend(
         json!({
-            "framesPerSecond": frames_per_second,
-            "bitrateMbps": bitrate_mbps,
-            "receiveBitrateMbps": receive_bitrate_mbps,
-            "peakBitrateMbps": state.peak_bitrate_mbps,
             "pingMs": resources.ping_ms(),
             "jitterMs": network.map(|metrics| metrics.0),
             "packetLossPercent": network.map(|metrics| metrics.1),
@@ -2656,8 +2648,12 @@ fn flush_nvst_telemetry<R: NvstSessionResources>(
             "decodeProgressStage": decode_progress_stage_name(state.decode_progress.stage()),
             "transportFrameProgressStalled": state.transport_frame_progress_stalled,
             "startId": state.start_id,
-        }),
-    ));
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let _ = output.send(event("telemetry", payload));
     state.telemetry_window_started = Instant::now();
     state.telemetry_frames = 0;
     state.telemetry_bytes = 0;

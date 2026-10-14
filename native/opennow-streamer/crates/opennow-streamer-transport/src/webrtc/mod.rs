@@ -10,7 +10,7 @@ use opennow_streamer_protocol::Session;
 use serde::{Deserialize, Serialize};
 use str0m::change::SdpOffer;
 use str0m::format::{Codec, PayloadParams};
-use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use thiserror::Error;
@@ -19,10 +19,13 @@ use crate::{EncodedMediaFrame, MediaConsumer, install_crypto};
 
 mod diagnostics;
 mod input;
+mod stats;
 #[cfg(test)]
 mod tests;
 
 use input::{InputChannelState, InputChannels};
+use stats::Stats;
+pub use stats::TransportStats;
 
 const COMMAND_CAPACITY: usize = 64;
 const MAX_INPUT_BYTES: usize = 4096;
@@ -132,6 +135,7 @@ pub enum TransportEvent {
     InputReady(u16),
     InputUnavailable(String),
     Log(String),
+    Stats(TransportStats),
 }
 
 enum TransportCommand {
@@ -322,7 +326,8 @@ pub fn negotiate(
         .set_reordering_size_audio(32)
         .set_reordering_size_video(NACK_REPAIRABLE_FRAMES)
         .set_send_buffer_audio(1)
-        .set_send_buffer_video(1);
+        .set_send_buffer_video(1)
+        .set_stats_interval(Some(Duration::from_secs(1)));
     match codec {
         NegotiatedVideoCodec::H264 => {
             for (payload, profile) in [
@@ -465,16 +470,17 @@ pub fn negotiate(
                         "multiple incoming video tracks are unsupported".to_owned(),
                     ));
                 }
-                if !section
+                let Some(clock_rate) = section
                     .rtp_params()
                     .iter()
-                    .any(|params| codec.matches(params))
-                {
+                    .find(|params| codec.matches(params))
+                    .map(|params| params.spec().clock_rate)
+                else {
                     return Err(TransportError::Offer(format!(
                         "peer did not negotiate {codec:?} video"
                     )));
-                }
-                video_mid = Some(mid);
+                };
+                video_mid = Some((mid, clock_rate));
             }
             MediaKind::Audio => {
                 if audio_mid.is_some() {
@@ -495,7 +501,7 @@ pub fn negotiate(
             }
         }
     }
-    let video_mid = video_mid
+    let (video_mid, video_clock_rate) = video_mid
         .ok_or_else(|| TransportError::Offer(format!("peer did not negotiate {codec:?} video")))?;
     let answer_sdp = answer.to_string();
     opennow_streamer_protocol::log::log_line(
@@ -534,6 +540,7 @@ pub fn negotiate(
                 events,
                 media_consumer,
                 video_codec: codec,
+                stats: Stats::new(video_mid, video_clock_rate),
                 channels,
                 input: InputChannelState::default(),
                 input_ready,
@@ -787,6 +794,7 @@ struct TransportWorker {
     events: SyncSender<TransportEvent>,
     media_consumer: MediaConsumer,
     video_codec: NegotiatedVideoCodec,
+    stats: Stats,
     channels: InputChannels,
     input: InputChannelState,
     input_ready: Arc<AtomicBool>,
@@ -920,6 +928,15 @@ impl TransportWorker {
 
     fn event(&mut self, event: Event) -> Result<(), String> {
         match event {
+            Event::PeerStats(stats) => {
+                let stats = self.stats.peer(stats);
+                self.emit(TransportEvent::Stats(stats))?;
+            }
+            Event::MediaIngressStats(stats) => {
+                if let Some(stats) = self.stats.media(stats) {
+                    self.emit(TransportEvent::Stats(stats))?;
+                }
+            }
             Event::Connected => {
                 self.connected_at = Some(Instant::now());
                 self.trace_connection("connected");
