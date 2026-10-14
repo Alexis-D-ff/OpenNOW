@@ -4050,6 +4050,8 @@
     "s_drawer_next": "Next",
     "s_drawer_no_controller_connected": "No controller connected",
     "s_drawer_only_this_pad_is_player_1": "Only this pad is Player 1",
+    "s_drawer_other_pads_are_ignored_turn_this_off": "Other pads are ignored. Turn this off to use them.",
+    "s_drawer_player_1_pad_disconnected": "Player 1 pad disconnected",
     "s_drawer_opennow_reads_up_to_four_pads_a": "OpenNOW reads up to four pads. A fifth pad is ignored until one disconnects.",
     "s_drawer_opens_over_the_game": "Opens over the game",
     "s_drawer_out_n_in_game": "Out %1% · in-game",

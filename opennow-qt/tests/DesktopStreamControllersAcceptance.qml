@@ -262,6 +262,19 @@ QtObject {
             check(input.inputControllerId === xboxOne.instanceId, "the Player 1 switch selects this pad only")
             need("controllerPlayerOne").clicked()
             check(input.inputControllerId === 0, "the Player 1 switch releases the other pads")
+            page.selectedInstanceId = dualSense.instanceId
+            need("controllerPlayerOne").clicked()
+            check(input.inputControllerId === dualSense.instanceId, "Player 1 locks to the DualSense")
+            input.basePads = [xboxOne, xboxTwin, genericPad]
+            check(need("controllerPlayerOne").visible && need("controllerPlayerOne").playerOne
+                && need("controllerPlayerOne").text === qsTr("Player 1 pad disconnected"),
+                "a lock on a disconnected pad stays visible instead of reading off")
+            const before = JSON.stringify(profiles())
+            page.writePad(null, {vibrationIntensity: 40})
+            check(JSON.stringify(profiles()) === before, "a commit after the selected pad dropped writes nothing")
+            need("controllerPlayerOne").clicked()
+            check(input.inputControllerId === 0, "turning the stale lock off releases the remaining pads")
+            check(need("controllerPlayerOne").text === qsTr("Only this pad is Player 1"), "the row returns to normal")
             check(streamAlive(), "edge states never touch the stream")
             ShellStore.settings = Object.assign({}, ShellStore.settings, {controllerProfiles: {}})
             AppController.showOverlay("")

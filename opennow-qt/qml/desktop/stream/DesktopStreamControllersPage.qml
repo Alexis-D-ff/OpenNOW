@@ -27,6 +27,8 @@ FocusScope {
         .some(field => root.selectedProfile[field] !== undefined)
     readonly property var sharedWith: selectedPad
         ? pads.filter(pad => pad.profileKey === selectedPad.profileKey && pad.instanceId !== selectedPad.instanceId) : []
+    readonly property bool playerOneMissing: Number(ControllerInput.inputControllerId) !== 0
+        && !pads.some(pad => Number(pad.instanceId) === Number(ControllerInput.inputControllerId))
     readonly property int globalLeft: Number(ShellStore.settings.controllerLeftStickDeadzone ?? 5)
     readonly property int globalRight: Number(ShellStore.settings.controllerRightStickDeadzone ?? 5)
     readonly property int globalVibration: Number(ShellStore.settings.controllerVibrationIntensity ?? 100)
@@ -59,6 +61,7 @@ FocusScope {
         return JSON.parse(JSON.stringify(profiles))
     }
     function writePad(pad, changes) {
+        if (!pad) return
         const updated = profileCopy()
         const profile = Object.assign({}, updated[pad.profileKey] || {}, changes)
         profile.name = String(pad.name || "")
@@ -86,7 +89,7 @@ FocusScope {
         ShellStore.setSetting("controllerProfiles", updated)
     }
     function setPlayerOne(enabled) {
-        if (!selectedPad) return
+        if (enabled && !selectedPad) return
         ControllerInput.inputControllerId = enabled ? Number(selectedPad.instanceId) : 0
     }
 
@@ -720,12 +723,13 @@ FocusScope {
                 id: playerOneRow
                 objectName: "controllerPlayerOne"
                 visible: root.selectedPad !== null
-                readonly property bool playerOne: root.selectedPad !== null
-                    && Number(ControllerInput.inputControllerId) === Number(root.selectedPad.instanceId)
+                readonly property bool playerOne: root.playerOneMissing || (root.selectedPad !== null
+                    && Number(ControllerInput.inputControllerId) === Number(root.selectedPad.instanceId))
                 width: parent.width
                 height: 58
-                text: qsTr("Only this pad is Player 1")
-                description: qsTr("Ignores the other pads until the app restarts")
+                text: root.playerOneMissing ? qsTr("Player 1 pad disconnected") : qsTr("Only this pad is Player 1")
+                description: root.playerOneMissing ? qsTr("Other pads are ignored. Turn this off to use them.")
+                    : qsTr("Ignores the other pads until the app restarts")
                 Accessible.checkable: true
                 Accessible.checked: playerOne
                 onClicked: root.setPlayerOne(!playerOne)
