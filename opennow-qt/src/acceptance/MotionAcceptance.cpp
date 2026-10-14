@@ -381,7 +381,7 @@ void startMotionAcceptance(QQuickWindow *window, AppController *controller,
             if (tick == 53) {
                 if (!require(motion->property("progress").toDouble() == 1, "stream menu failed to reopen")) return;
                 // Invoke the real resume action, including its close completion.
-                if (!require(QMetaObject::invokeMethod(motion->parent(), "runAction", Q_ARG(QVariant, QVariant(0))),
+                if (!require(QMetaObject::invokeMethod(motion->parent(), "runAction", Q_ARG(QVariant, QVariant(QStringLiteral("resume")))),
                              "resume action unavailable")) return;
             }
             if (tick == 62) {

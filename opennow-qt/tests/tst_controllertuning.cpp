@@ -1,5 +1,6 @@
 #include "input/ControllerInput.h"
 
+#include <QKeyEvent>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -8,7 +9,7 @@
 class TuningPad final
 {
 public:
-    TuningPad()
+    explicit TuningPad(const char *name = "OpenNOW controller tuning test")
     {
         SDL_VirtualJoystickDesc descriptor{};
         SDL_INIT_INTERFACE(&descriptor);
@@ -17,7 +18,7 @@ public:
         descriptor.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
         descriptor.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
         descriptor.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
-        descriptor.name = "OpenNOW controller tuning test";
+        descriptor.name = name;
         descriptor.userdata = this;
         descriptor.Rumble = [](void *context, Uint16 low, Uint16 high) -> bool {
             auto *pad = static_cast<TuningPad *>(context);
@@ -36,11 +37,42 @@ public:
         return SDL_SetJoystickVirtualAxis(SDL_GetJoystickFromID(id), axis, value);
     }
 
+    bool button(SDL_GamepadButton button, bool pressed)
+    {
+        return SDL_SetJoystickVirtualButton(SDL_GetJoystickFromID(id), button, pressed);
+    }
+
     SDL_JoystickID id = 0;
     Uint16 lowFrequency = 0;
     Uint16 highFrequency = 0;
     int rumbleCalls = 0;
 };
+
+class SyntheticKeyCounter final : public QObject
+{
+public:
+    QList<int> pressed;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::KeyPress) {
+            const auto *key = static_cast<QKeyEvent *>(event);
+            if (key->nativeScanCode() == ControllerInput::syntheticControllerScanCode)
+                pressed.append(key->key());
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+static QVariantMap metadataFor(const ControllerInput &input, SDL_JoystickID id)
+{
+    for (const auto &entry : input.availableControllers()) {
+        const auto map = entry.toMap();
+        if (map.value(QStringLiteral("instanceId")).toULongLong() == id) return map;
+    }
+    return {};
+}
 
 class ControllerTuningTest final : public QObject
 {
@@ -90,6 +122,162 @@ private slots:
             QVERIFY(qAbs(snapshots.last().at(index).toInt() - expectedX) <= 1);
             QVERIFY(qAbs(snapshots.last().at(index + 1).toInt() - expectedY) <= 1);
         }
+    }
+
+    void profileKeyPrefersSerialThenGuid()
+    {
+        SDL_GUID first{};
+        SDL_GUID second{};
+        first.data[0] = 0x03;
+        second.data[0] = 0x05;
+        QCOMPARE(ControllerInput::profileKey(0x054c, 0x0ce6, " A1B2-C3 ", first),
+                 QStringLiteral("serial:054c:0ce6:A1B2-C3"));
+        QCOMPARE(ControllerInput::profileKey(0x054c, 0x0ce6, "A1B2-C3", second),
+                 QStringLiteral("serial:054c:0ce6:A1B2-C3"));
+        QCOMPARE(ControllerInput::profileKey(0x045e, 0x0b13, nullptr, first),
+                 QStringLiteral("guid:03000000000000000000000000000000"));
+        QCOMPARE(ControllerInput::profileKey(0x045e, 0x0b13, "   ", first),
+                 ControllerInput::profileKey(0x045e, 0x0b13, nullptr, first));
+        QVERIFY(ControllerInput::profileKey(0x045e, 0x0b13, nullptr, first)
+                != ControllerInput::profileKey(0x045e, 0x0b13, nullptr, second));
+        QVERIFY(ControllerInput::profileKey(1, 2, QByteArray(400, 'x').constData(), first).size() <= 160);
+    }
+
+    void identicalPadsWithoutSerialShareOneProfile()
+    {
+        ControllerInput input;
+        TuningPad first("OpenNOW twin pad");
+        TuningPad second("OpenNOW twin pad");
+        TuningPad other("OpenNOW other pad");
+        QVERIFY(first.id && second.id && other.id);
+        QTRY_COMPARE(input.controllerCount(), 3);
+        const auto firstKey = metadataFor(input, first.id).value(QStringLiteral("profileKey")).toString();
+        QVERIFY(firstKey.startsWith(QStringLiteral("guid:")));
+        QVERIFY(!metadataFor(input, first.id).value(QStringLiteral("hasSerial")).toBool());
+        QCOMPARE(metadataFor(input, second.id).value(QStringLiteral("profileKey")).toString(), firstKey);
+        QVERIFY(metadataFor(input, other.id).value(QStringLiteral("profileKey")).toString() != firstKey);
+        input.setControllerProfiles({{firstKey, QVariantMap{{QStringLiteral("leftStickDeadzone"), 31}}}});
+        QCOMPARE(metadataFor(input, first.id).value(QStringLiteral("leftStickDeadzone")).toInt(), 31);
+        QCOMPARE(metadataFor(input, second.id).value(QStringLiteral("leftStickDeadzone")).toInt(), 31);
+        QCOMPARE(metadataFor(input, other.id).value(QStringLiteral("leftStickDeadzone")).toInt(), 5);
+    }
+
+    void profileFieldsFallBackToGlobalDefaults()
+    {
+        ControllerInput input;
+        TuningPad pad;
+        QVERIFY(pad.id);
+        QTRY_COMPARE(input.controllerCount(), 1);
+        const auto key = metadataFor(input, pad.id).value(QStringLiteral("profileKey")).toString();
+        input.setLeftStickDeadzone(20);
+        input.setControllerProfiles({{key, QVariantMap{{QStringLiteral("rightStickDeadzone"), 30.0},
+                                                       {QStringLiteral("name"), QStringLiteral("Pad")}}}});
+        auto metadata = metadataFor(input, pad.id);
+        QCOMPARE(metadata.value(QStringLiteral("leftStickDeadzone")).toInt(), 20);
+        QCOMPARE(metadata.value(QStringLiteral("rightStickDeadzone")).toInt(), 30);
+        QCOMPARE(metadata.value(QStringLiteral("vibrationIntensity")).toInt(), 100);
+        input.setLeftStickDeadzone(12);
+        input.setRightStickDeadzone(44);
+        input.setVibrationIntensity(60);
+        metadata = metadataFor(input, pad.id);
+        QCOMPARE(metadata.value(QStringLiteral("leftStickDeadzone")).toInt(), 12);
+        QCOMPARE(metadata.value(QStringLiteral("rightStickDeadzone")).toInt(), 30);
+        QCOMPARE(metadata.value(QStringLiteral("vibrationIntensity")).toInt(), 60);
+        QCOMPARE(input.rightStickDeadzone(), 44);
+        input.setControllerProfiles({{key, QVariantMap{{QStringLiteral("rightStickDeadzone"), 999},
+                                                       {QStringLiteral("vibrationIntensity"), QStringLiteral("loud")}}}});
+        metadata = metadataFor(input, pad.id);
+        QCOMPARE(metadata.value(QStringLiteral("rightStickDeadzone")).toInt(), 50);
+        QCOMPARE(metadata.value(QStringLiteral("vibrationIntensity")).toInt(), 60);
+        input.setControllerProfiles({});
+        QCOMPARE(metadataFor(input, pad.id).value(QStringLiteral("rightStickDeadzone")).toInt(), 44);
+    }
+
+    void deadzoneAppliesPerPad()
+    {
+        ControllerInput input;
+        TuningPad tuned("OpenNOW tuned pad");
+        TuningPad plain("OpenNOW plain pad");
+        QVERIFY(tuned.id && plain.id);
+        QTRY_COMPARE(input.controllerCount(), 2);
+        const auto key = metadataFor(input, tuned.id).value(QStringLiteral("profileKey")).toString();
+        const auto tunedSlot = metadataFor(input, tuned.id).value(QStringLiteral("slot")).toInt() - 1;
+        const auto plainSlot = metadataFor(input, plain.id).value(QStringLiteral("slot")).toInt() - 1;
+        input.setControllerProfiles({{key, QVariantMap{{QStringLiteral("leftStickDeadzone"), 40}}}});
+        QVERIFY(tuned.axis(SDL_GAMEPAD_AXIS_LEFTX, 8192));
+        QVERIFY(plain.axis(SDL_GAMEPAD_AXIS_LEFTX, 8192));
+        SDL_UpdateJoysticks();
+        QSignalSpy snapshots(&input, &ControllerInput::gamepadSnapshot);
+        input.setShellCaptureEnabled(false);
+        const auto latestLeftX = [&snapshots](int slot) {
+            for (auto index = snapshots.size() - 1; index >= 0; --index) {
+                if (snapshots.at(index).at(0).toInt() == slot) return snapshots.at(index).at(5).toInt();
+            }
+            return -1;
+        };
+        QCOMPARE(latestLeftX(tunedSlot), 0);
+        QVERIFY(latestLeftX(plainSlot) > 0);
+        input.setControllerProfiles({});
+        QVERIFY(latestLeftX(tunedSlot) > 0);
+        const auto sample = input.stickSample(tuned.id);
+        QVERIFY(sample.value(QStringLiteral("leftX")).toDouble() > 0.24);
+        QVERIFY(sample.value(QStringLiteral("leftOutX")).toDouble() > 0);
+        QVERIFY(input.stickSample(0).isEmpty());
+    }
+
+    void leftStickNeverMovesFocusWhileNavigationIsOff()
+    {
+        ControllerInput input;
+        TuningPad pad;
+        QVERIFY(pad.id);
+        QTRY_COMPARE(input.controllerCount(), 1);
+        QVERIFY(input.shellCaptureEnabled());
+        SyntheticKeyCounter keys;
+        qApp->installEventFilter(&keys);
+        input.setLeftStickNavigationEnabled(false);
+        QVERIFY(pad.axis(SDL_GAMEPAD_AXIS_LEFTY, 30000));
+        SDL_UpdateJoysticks();
+        QTest::qWait(400);
+        QVERIFY2(!keys.pressed.contains(Qt::Key_Down), "left stick moved focus on the controller page");
+        QVERIFY(input.stickSample(pad.id).value(QStringLiteral("leftY")).toDouble() > 0.9);
+        QVERIFY(pad.button(SDL_GAMEPAD_BUTTON_DPAD_DOWN, true));
+        SDL_UpdateJoysticks();
+        QTRY_VERIFY(keys.pressed.contains(Qt::Key_Down));
+        QVERIFY(pad.button(SDL_GAMEPAD_BUTTON_DPAD_DOWN, false));
+        QVERIFY(pad.axis(SDL_GAMEPAD_AXIS_LEFTY, 0));
+        SDL_UpdateJoysticks();
+        QTest::qWait(60);
+        keys.pressed.clear();
+        input.setLeftStickNavigationEnabled(true);
+        QVERIFY(pad.axis(SDL_GAMEPAD_AXIS_LEFTY, 30000));
+        SDL_UpdateJoysticks();
+        QTRY_VERIFY(keys.pressed.contains(Qt::Key_Down));
+        qApp->removeEventFilter(&keys);
+    }
+
+    void vibrationAppliesPerPadAndTestRumbleWorksInTheMenu()
+    {
+        ControllerInput input;
+        TuningPad pad;
+        QVERIFY(pad.id);
+        QTRY_COMPARE(input.controllerCount(), 1);
+        const auto key = metadataFor(input, pad.id).value(QStringLiteral("profileKey")).toString();
+        input.setControllerProfiles({{key, QVariantMap{{QStringLiteral("vibrationIntensity"), 50}}}});
+        QVERIFY(input.shellCaptureEnabled());
+        QVERIFY(input.testRumble(pad.id));
+        QCOMPARE(pad.lowFrequency, 0x3000);
+        QCOMPARE(pad.highFrequency, 0x5000);
+        input.stopRumble();
+        input.setShellCaptureEnabled(false);
+        input.playRumble(0, 20000, 40000, 1000);
+        QCOMPARE(pad.lowFrequency, 10000);
+        QCOMPARE(pad.highFrequency, 20000);
+        input.setControllerProfiles({{key, QVariantMap{{QStringLiteral("vibrationIntensity"), 0}}}});
+        QCOMPARE(pad.lowFrequency, 0);
+        QVERIFY(!input.testRumble(pad.id));
+        input.playRumble(0, 20000, 40000, 1000);
+        QCOMPARE(pad.lowFrequency, 0);
+        QVERIFY(!input.testRumble(0));
     }
 
     void independentSettingsApplyWithoutNewAxisEvents()

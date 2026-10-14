@@ -535,7 +535,7 @@ if(BUILD_TESTING)
         set_tests_properties(qml-push-invalidation-${width} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     qt_add_resources(opennow-qt "store-paging-acceptance"
-        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
+        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/DesktopAntiAfkAcceptance.qml tests/DesktopStreamControllersAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
     add_test(NAME qml-account-shortcuts
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
             --smoke-paper-design --smoke-accounts 4 --smoke-account-shortcuts --reduced-motion)
@@ -554,6 +554,29 @@ if(BUILD_TESTING)
                 --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-${account_state}.png)
         set_tests_properties(qml-account-picker-${account_state} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
     endforeach()
+    add_test(NAME qml-account-switch-confirm-light
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 2 --smoke-account-state switch-confirm --smoke-light-theme
+            --smoke-account-chrome-check --smoke-width 1440 --smoke-height 900 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switch-confirm-light.png)
+    add_test(NAME qml-account-picker-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route accounts
+            --smoke-accounts 8 --smoke-settings-scale 1.25 --smoke-account-chrome-check
+            --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-fit-960.png)
+    add_test(NAME qml-account-switcher-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 8 --smoke-account-state switcher --smoke-settings-scale 1.25
+            --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switcher-fit-960.png)
+    add_test(NAME qml-account-picker-error-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route accounts
+            --smoke-accounts 8 --smoke-account-state switch-error --smoke-settings-scale 1.25
+            --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-error-960.png)
+    set_tests_properties(qml-account-switch-confirm-light qml-account-picker-fit-960 qml-account-switcher-fit-960
+        qml-account-picker-error-960
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     add_test(NAME qml-console-settings
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --console
             --route settings-video --smoke-console-settings --reduced-motion)
@@ -570,6 +593,14 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route settings-audio --smoke-microphone --reduced-motion)
     set_tests_properties(qml-microphone PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    add_test(NAME qml-desktop-anti-afk
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-desktop-anti-afk --reduced-motion)
+    set_tests_properties(qml-desktop-anti-afk PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    add_test(NAME qml-desktop-stream-controllers
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-stream-controllers --reduced-motion)
+    set_tests_properties(qml-desktop-stream-controllers PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     foreach(surface desktop console)
         set(microphone_settings_route settings-audio)
         set(microphone_overlay desktop-stream-menu)
