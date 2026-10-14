@@ -35,6 +35,20 @@ static QRectF sceneRect(QQuickItem *item)
     return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
 }
 
+static QQuickItem *findVisualChild(QQuickItem *item, const QString &name)
+{
+    if (!item)
+        return nullptr;
+    if (item->objectName() == name)
+        return item;
+    const auto children = item->childItems();
+    for (auto *child : children) {
+        if (auto *found = findVisualChild(child, name))
+            return found;
+    }
+    return nullptr;
+}
+
 static bool accountChromeFits(QQuickWindow *window)
 {
     if (!window)
@@ -67,13 +81,16 @@ static bool accountChromeFits(QQuickWindow *window)
             qCritical("Account picker chrome leaves the window");
             return false;
         }
-        if (auto *tile = picker->findChild<QQuickItem *>(u"accountTile0"_s); tile && tile->isVisible()) {
-            const auto tileRect = sceneRect(tile);
-            const auto visible = qMin(tileRect.bottom(), gridRect.bottom()) - qMax(tileRect.top(), gridRect.top());
-            if (visible < 80) {
-                qCritical("Account picker tile row is sliced");
-                return false;
-            }
+        auto *tile = findVisualChild(grid, u"accountTile0"_s);
+        if (!tile || !tile->isVisible()) {
+            qCritical("Account picker tile row is missing");
+            return false;
+        }
+        const auto tileRect = sceneRect(tile);
+        const auto visible = qMin(tileRect.bottom(), gridRect.bottom()) - qMax(tileRect.top(), gridRect.top());
+        if (visible < 110) {
+            qCritical("Account picker tile row is sliced");
+            return false;
         }
         if (auto *error = picker->findChild<QQuickItem *>(u"accountActionError"_s);
                 error && !error->property("text").toString().isEmpty()) {
