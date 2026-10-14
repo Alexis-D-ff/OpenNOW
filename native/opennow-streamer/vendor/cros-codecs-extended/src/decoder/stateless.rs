@@ -95,6 +95,8 @@ pub enum DecodeError {
     CheckEvents,
     #[error("error while parsing frame: {0}")]
     ParseFrameError(String),
+    #[error("{0}")]
+    ReferenceLost(String),
     #[error(transparent)]
     DecoderError(#[from] anyhow::Error),
     #[error(transparent)]

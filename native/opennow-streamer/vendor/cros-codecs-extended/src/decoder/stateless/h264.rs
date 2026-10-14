@@ -949,7 +949,7 @@ where
         sps: &Sps,
         frame_num: u32,
         timestamp: u64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DecodeError> {
         if self.codec.dpb.is_empty() {
             return Ok(());
         }
@@ -957,10 +957,10 @@ where
         debug!("frame_num gap detected.");
 
         if !sps.gaps_in_frame_num_value_allowed_flag {
-            return Err(anyhow!(
+            return Err(DecodeError::ReferenceLost(format!(
                 "Invalid frame_num: {}. Assuming unintentional loss of pictures",
                 frame_num
-            ));
+            )));
         }
 
         let mut unused_short_term_frame_num =
@@ -980,10 +980,10 @@ where
             if self.codec.dpb.interlaced() {
                 let (first_field, second_field) = PictureData::split_frame(pic);
 
-                self.codec.dpb.store_picture(first_field, None)?;
-                self.codec.dpb.store_picture(second_field, None)?;
+                self.codec.dpb.store_picture(first_field, None).map_err(anyhow::Error::from)?;
+                self.codec.dpb.store_picture(second_field, None).map_err(anyhow::Error::from)?;
             } else {
-                self.codec.dpb.store_picture(pic.into_rc(), None)?;
+                self.codec.dpb.store_picture(pic.into_rc(), None).map_err(anyhow::Error::from)?;
             }
 
             unused_short_term_frame_num += 1;
