@@ -1,6 +1,101 @@
 use super::*;
 
 #[test]
+fn accepted_frames_emit_webrtc_telemetry_with_optional_transport_stats() {
+    let now = Instant::now();
+    let (events, receiver) = mpsc::channel();
+    let worker = worker(EventSender::unbounded(events));
+    let mut telemetry = Telemetry::new(now);
+    for index in 0..60 {
+        telemetry.observe(&MediaFeedback::VideoFrameAccepted {
+            frame_index: Some(index),
+            timestamp: u64::from(index) * 1_500,
+            bytes: 100_000,
+            keyframe: index == 0,
+        });
+    }
+    worker.flush_telemetry(&mut telemetry, now + Duration::from_millis(999));
+    assert!(receiver.try_recv().is_err());
+    worker.flush_telemetry(&mut telemetry, now + Duration::from_secs(1));
+    let first = receiver.try_recv().unwrap();
+    assert_eq!(first["type"], "telemetry");
+    assert_eq!(first["transport"], "webrtc");
+    assert_eq!(first["startId"], "fixture");
+    assert_eq!(first["framesPerSecond"], 60.0);
+    assert_eq!(first["bitrateMbps"], 48.0);
+    assert_eq!(first["peakBitrateMbps"], 48.0);
+    for key in [
+        "receiveBitrateMbps",
+        "pingMs",
+        "jitterMs",
+        "packetLossPercent",
+        "decodeTimings",
+    ] {
+        assert!(first[key].is_null(), "{key} must remain unavailable");
+    }
+    telemetry.transport = transport::TransportStats {
+        socket_receive_bytes: Some(1_000_000),
+        ping_ms: Some(12.0),
+        jitter_ms: Some(2.5),
+        packet_loss_percent: Some(0.5),
+    };
+    telemetry.observe(&MediaFeedback::DecodeTimings(DecodeTimingsReport {
+        epoch: 7,
+        outputs_total: 60,
+        call: Some(DecodeStageTimings {
+            p50_us: 1_500,
+            p95_us: 1_500,
+            max_us: 1_500,
+        }),
+        residence: Some(DecodeStageTimings {
+            p50_us: 2_000,
+            p95_us: 2_000,
+            max_us: 2_000,
+        }),
+        call_window_samples: 60,
+        residence_window_samples: 60,
+        submissions_total: 60,
+        output_calls_total: 60,
+        last_submission_at: Some(now),
+        last_output_at: Some(now),
+        in_flight: 0,
+        oldest_in_flight_at: None,
+        epoch_started_at: Some(now),
+        unmatched_outputs: 0,
+        unmatched_submissions: 0,
+    }));
+    assert!(receiver.try_recv().is_err());
+    worker.flush_telemetry(&mut telemetry, now + Duration::from_secs(2));
+    let second = receiver.try_recv().unwrap();
+    assert_eq!(second["framesPerSecond"], 0.0);
+    assert_eq!(second["bitrateMbps"], 0.0);
+    assert_eq!(second["peakBitrateMbps"], 48.0);
+    assert_eq!(second["receiveBitrateMbps"], 8.0);
+    assert_eq!(second["pingMs"], 12.0);
+    assert_eq!(second["jitterMs"], 2.5);
+    assert_eq!(second["packetLossPercent"], 0.5);
+    assert_eq!(second["decodeTimings"]["epoch"], 7);
+    assert_eq!(second["decodeTimings"]["outputsTotal"], 60);
+    assert_eq!(second["decodeTimeMs"], 1.5);
+    assert_eq!(second["decoderResidenceMs"], 2.0);
+    telemetry.transport.socket_receive_bytes = Some(1_500_000);
+    worker.flush_telemetry(&mut telemetry, now + Duration::from_secs(3));
+    assert_eq!(receiver.try_recv().unwrap()["receiveBitrateMbps"], 4.0);
+    telemetry.transport = transport::TransportStats::default();
+    worker.flush_telemetry(&mut telemetry, now + Duration::from_secs(4));
+    let missing = receiver.try_recv().unwrap();
+    for key in [
+        "receiveBitrateMbps",
+        "pingMs",
+        "jitterMs",
+        "packetLossPercent",
+    ] {
+        assert!(missing[key].is_null());
+    }
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
 fn video_progress_requires_presentation_and_does_not_accept_audio_as_progress() {
     let now = Instant::now();
     let mut progress = Progress::new(now, None);
@@ -703,6 +798,76 @@ fn nullable_finalized_fps_uses_settings_without_changing_the_webrtc_stream() {
             engine.stop("fixture stop");
         }
     }
+}
+
+#[test]
+fn engine_webrtc_session_emits_frame_and_network_telemetry() {
+    let video = include_bytes!(
+        "../../../opennow-streamer-platform-windows/fixtures/probe/hevc-p010-sdr.hevc"
+    )
+    .to_vec();
+    let peer = PeerFixture::start_with_stream(
+        video,
+        false,
+        MediaStreamConfig {
+            codec: MediaVideoCodec::H265,
+            color_quality: MediaColorQuality::TenBit420,
+            width: 2560,
+            height: 1600,
+            fps: 60,
+            hdr: false,
+            ..MediaStreamConfig::default()
+        },
+    );
+    let (output, events) = mpsc::channel();
+    let (consumer, received) = mpsc::sync_channel(8);
+    let (feedback, feedback_receiver) = mpsc::channel();
+    let mut engine = Engine::with_media_consumer(output, consumer);
+    engine.media_feedback = Some(feedback_receiver);
+    let (responses, _) = engine.handle(start_command(&peer, "telemetry-fixture"));
+    assert_eq!(responses[0]["transport"], "webrtc", "{responses:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "session telemetry did not arrive"
+        );
+        if let Ok(frame) = received.recv_timeout(Duration::from_millis(20)) {
+            if frame.codec == "H265" {
+                feedback
+                    .send(MediaFeedback::VideoFrameAccepted {
+                        frame_index: frame.frame_index,
+                        timestamp: frame.rtp_timestamp,
+                        bytes: frame.payload.len().try_into().unwrap(),
+                        keyframe: frame.keyframe,
+                    })
+                    .unwrap();
+            }
+        }
+        if let Some(event) = events.try_iter().find(|event| {
+            event["type"] == "telemetry"
+                && event["framesPerSecond"]
+                    .as_f64()
+                    .is_some_and(|fps| fps > 0.0)
+                && event["receiveBitrateMbps"]
+                    .as_f64()
+                    .is_some_and(|rate| rate > 0.0)
+                && event["pingMs"].is_number()
+                && event["jitterMs"].is_number()
+                && event["packetLossPercent"].is_number()
+        }) {
+            assert_eq!(event["transport"], "webrtc");
+            assert_eq!(event["startId"], "telemetry-fixture");
+            assert!(event["bitrateMbps"].as_f64().unwrap() > 0.0);
+            assert!(
+                event["peakBitrateMbps"].as_f64().unwrap()
+                    >= event["bitrateMbps"].as_f64().unwrap()
+            );
+            assert_eq!(event["packetLossPercent"], 0.0);
+            break;
+        }
+    }
+    engine.stop("fixture stop");
 }
 
 #[test]

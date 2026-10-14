@@ -457,6 +457,7 @@ impl Worker {
         let mut input_origin = Instant::now();
         let mut input_state = input::InputState::default();
         let mut drops = QueueDropReports::new();
+        let mut telemetry = Telemetry::new(Instant::now());
         let result = (|| -> Result<(), Failure> {
             while self.active() {
                 let iteration_started = Instant::now();
@@ -472,13 +473,22 @@ impl Worker {
                     }
                     TransportEvent::InputUnavailable(message) => return Err(Failure { code:"webrtc-input-unavailable", message }),
                     TransportEvent::Log(message) => self.emit("log", json!({"level":"info","message":message})),
+                    TransportEvent::Stats(stats) => telemetry.transport = stats,
                 }
                 }
                 if let Some(feedback) = &self.feedback {
                     for feedback in feedback.try_iter().take(128) {
-                        self.feedback(feedback, &control, &video_mid, &mut progress, &mut drops)?;
+                        self.feedback(
+                            feedback,
+                            &control,
+                            &video_mid,
+                            &mut progress,
+                            &mut drops,
+                            &mut telemetry,
+                        )?;
                     }
                 }
+                self.flush_telemetry(&mut telemetry, Instant::now());
                 progress.observe_published(
                     self.runtime
                         .as_ref()
@@ -619,15 +629,14 @@ impl Worker {
         video_mid: &str,
         progress: &mut Progress,
         drops: &mut QueueDropReports,
+        telemetry: &mut Telemetry,
     ) -> Result<(), Failure> {
         progress.observe_feedback(&feedback, Instant::now());
+        telemetry.observe(&feedback);
         match feedback {
-            MediaFeedback::VideoFrameAccepted { .. } => {}
+            MediaFeedback::VideoFrameAccepted { .. } | MediaFeedback::DecodeTimings(_) => {}
             MediaFeedback::PlaybackStarted { backend } => {
                 self.emit("status", json!({"event":"first-frame","backend":backend,"status":"streaming","message":"WebRTC presented the first video frame"}));
-            }
-            MediaFeedback::DecodeTimings(timings) => {
-                self.emit("telemetry", json!({"decodeTimings":decode_timings_event(Some(timings)),"transport":"webrtc"}));
             }
             MediaFeedback::RequestKeyframe { mid, .. } => control.request_keyframe(mid).map_err(Failure::transport)?,
             MediaFeedback::DecoderError { message, .. } => {
@@ -646,6 +655,80 @@ impl Worker {
             MediaFeedback::QueueDropped { media, count } => drops.record(media, count),
         }
         Ok(())
+    }
+
+    fn flush_telemetry(&self, telemetry: &mut Telemetry, now: Instant) {
+        if let Some(payload) = telemetry.sample(now) {
+            self.emit("telemetry", payload);
+        }
+    }
+}
+
+struct Telemetry {
+    window_started: Instant,
+    frames: u64,
+    bytes: u64,
+    previous_socket_bytes: u64,
+    peak_bitrate_mbps: f64,
+    transport: transport::TransportStats,
+    decode_timings: Option<DecodeTimingsReport>,
+}
+
+impl Telemetry {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started: now,
+            frames: 0,
+            bytes: 0,
+            previous_socket_bytes: 0,
+            peak_bitrate_mbps: 0.0,
+            transport: transport::TransportStats::default(),
+            decode_timings: None,
+        }
+    }
+
+    fn observe(&mut self, feedback: &MediaFeedback) {
+        match feedback {
+            MediaFeedback::VideoFrameAccepted { bytes, .. } => {
+                self.frames = self.frames.saturating_add(1);
+                self.bytes = self.bytes.saturating_add(u64::from(*bytes));
+            }
+            MediaFeedback::DecodeTimings(timings) => self.decode_timings = Some(*timings),
+            _ => {}
+        }
+    }
+
+    fn sample(&mut self, now: Instant) -> Option<Value> {
+        let elapsed = now.saturating_duration_since(self.window_started);
+        if elapsed < TELEMETRY_INTERVAL {
+            return None;
+        }
+        let mut payload = media_telemetry(
+            elapsed,
+            self.frames,
+            self.bytes,
+            self.transport.socket_receive_bytes,
+            &mut self.previous_socket_bytes,
+            &mut self.peak_bitrate_mbps,
+        );
+        payload["pingMs"] = json!(self.transport.ping_ms);
+        payload["jitterMs"] = json!(self.transport.jitter_ms);
+        payload["packetLossPercent"] = json!(self.transport.packet_loss_percent);
+        payload["decodeTimings"] = decode_timings_event(self.decode_timings);
+        payload["decodeTimeMs"] = json!(
+            self.decode_timings
+                .and_then(|timings| timings.call)
+                .map(|stage| stage.p50_us as f64 / 1_000.0)
+        );
+        payload["decoderResidenceMs"] = json!(
+            self.decode_timings
+                .and_then(|timings| timings.residence)
+                .map(|stage| stage.p50_us as f64 / 1_000.0)
+        );
+        self.window_started = now;
+        self.frames = 0;
+        self.bytes = 0;
+        Some(payload)
     }
 }
 

@@ -2,6 +2,126 @@ use super::*;
 use str0m::change::SdpAnswer;
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime};
+use str0m::stats::{CandidatePairStats, CandidateStats, MediaIngressStats, PeerStats};
+
+fn peer_stats(now: Instant) -> PeerStats {
+    PeerStats {
+        peer_bytes_rx: 1_000_000,
+        peer_bytes_tx: 0,
+        bytes_rx: 900_000,
+        bytes_tx: 0,
+        timestamp: now,
+        bwe_tx: None,
+        egress_loss_fraction: None,
+        ingress_loss_fraction: Some(0.025),
+        rtt: Some(Duration::from_millis(99)),
+        selected_candidate_pair: Some(CandidatePairStats {
+            protocol: Protocol::Udp,
+            local: CandidateStats {
+                addr: "127.0.0.1:1000".parse().unwrap(),
+            },
+            remote: CandidateStats {
+                addr: "127.0.0.1:2000".parse().unwrap(),
+            },
+            current_round_trip_time: Some(Duration::from_millis(12)),
+            total_round_trip_time: Duration::from_millis(12),
+            responses_received: 1,
+        }),
+    }
+}
+
+#[test]
+fn transport_stats_translate_video_jitter_and_ingress_loss_without_inventing_rtt() {
+    let now = Instant::now();
+    let video = Mid::from("video");
+    let mut stats = Stats::new(video, Frequency::NINETY_KHZ);
+    let translated = stats.peer(peer_stats(now));
+    assert_eq!(translated.socket_receive_bytes, Some(1_000_000));
+    assert_eq!(translated.ping_ms, Some(12.0));
+    assert!((translated.packet_loss_percent.unwrap() - 2.5).abs() < 0.000_001);
+    assert!(translated.jitter_ms.is_none());
+    let mut media = MediaIngressStats {
+        mid: video,
+        rid: None,
+        bytes: 900_000,
+        packets: 100,
+        firs: 0,
+        plis: 0,
+        nacks: 0,
+        jitter: 225,
+        rtt: Some(Duration::from_millis(99)),
+        loss: None,
+        timestamp: now,
+        remote: None,
+    };
+    assert_eq!(stats.media(media.clone()).unwrap().jitter_ms, Some(2.5));
+    media.mid = Mid::from("audio");
+    media.jitter = 48_000;
+    assert!(stats.media(media.clone()).is_none());
+    let mut peer = peer_stats(now + Duration::from_secs(1));
+    peer.selected_candidate_pair
+        .as_mut()
+        .unwrap()
+        .current_round_trip_time = Some(Duration::from_millis(50));
+    assert_eq!(stats.peer(peer.clone()).ping_ms, Some(12.0));
+    peer.timestamp = now + Duration::from_secs(5);
+    assert!(stats.peer(peer.clone()).ping_ms.is_none());
+    peer.selected_candidate_pair
+        .as_mut()
+        .unwrap()
+        .responses_received = 2;
+    assert_eq!(stats.peer(peer.clone()).ping_ms, Some(50.0));
+    peer.selected_candidate_pair
+        .as_mut()
+        .unwrap()
+        .responses_received = 3;
+    peer.selected_candidate_pair
+        .as_mut()
+        .unwrap()
+        .current_round_trip_time = None;
+    assert!(stats.peer(peer.clone()).ping_ms.is_none());
+    peer.selected_candidate_pair = None;
+    peer.ingress_loss_fraction = None;
+    let translated = stats.peer(peer);
+    assert!(translated.ping_ms.is_none());
+    assert!(translated.packet_loss_percent.is_none());
+    let mut alternate_clock = Stats::new(video, Frequency::FORTY_EIGHT_KHZ);
+    media.mid = video;
+    media.jitter = 120;
+    assert_eq!(
+        alternate_clock.media(media.clone()).unwrap().jitter_ms,
+        Some(2.5)
+    );
+    media.loss = Some(0.125);
+    let video_only = alternate_clock.media(media.clone()).unwrap();
+    assert_eq!(video_only.packet_loss_percent, Some(12.5));
+    assert!(video_only.ping_ms.is_none());
+    assert!(video_only.socket_receive_bytes.is_none());
+    let mut no_twcc = peer_stats(now);
+    no_twcc.ingress_loss_fraction = None;
+    assert_eq!(
+        alternate_clock.peer(no_twcc.clone()).packet_loss_percent,
+        Some(12.5)
+    );
+    media.loss = Some(0.0);
+    assert_eq!(
+        alternate_clock
+            .media(media.clone())
+            .unwrap()
+            .packet_loss_percent,
+        Some(0.0)
+    );
+    media.loss = None;
+    assert!(
+        alternate_clock
+            .media(media.clone())
+            .unwrap()
+            .packet_loss_percent
+            .is_none()
+    );
+    media.jitter = 0;
+    assert_eq!(alternate_clock.media(media).unwrap().jitter_ms, Some(0.0));
+}
 
 struct Peer {
     rtc: Rtc,
@@ -16,6 +136,7 @@ struct Peer {
     connected: bool,
     input_ready: bool,
     received: Vec<Vec<u8>>,
+    stats: Option<TransportStats>,
     keyframe_requests: usize,
     input_channel: Option<ChannelId>,
     client_address: SocketAddr,
@@ -182,6 +303,7 @@ impl Peer {
             connected: false,
             input_ready: false,
             received: Vec::new(),
+            stats: None,
             keyframe_requests: 0,
             input_channel: None,
             client_address: parse_candidate(&negotiated.local_candidate.candidate, None)
@@ -292,6 +414,7 @@ impl Peer {
             for event in self.events.try_iter() {
                 match event {
                     TransportEvent::Connected => self.connected = true,
+                    TransportEvent::Stats(stats) => self.stats = Some(stats),
                     TransportEvent::InputReady(version) => {
                         assert_eq!(version, 3);
                         self.input_ready = true;
@@ -391,6 +514,26 @@ fn refuses_unresolved_hostname_without_dns() {
         resolve_host("192-0-2-10.example.com").unwrap(),
         "192.0.2.10".parse::<IpAddr>().unwrap()
     );
+}
+
+#[test]
+fn local_hevc_main10_peer_produces_transport_stats() {
+    let mut peer = Peer::connect_with_codec(4, None, None, false, NegotiatedVideoCodec::H265Main10);
+    let video = [0, 0, 0, 1, 0x26, 0x01, 0xaf];
+    peer.write(true, 90_123, &video);
+    assert_eq!(peer.frame().codec, "H265");
+    peer.until(|peer| {
+        peer.stats.is_some_and(|stats| {
+            stats.ping_ms.is_some()
+                && stats.jitter_ms.is_some()
+                && stats.packet_loss_percent.is_some()
+                && stats.socket_receive_bytes.is_some_and(|bytes| bytes > 0)
+        })
+    });
+    let stats = peer.stats.unwrap();
+    assert_eq!(stats.packet_loss_percent, Some(0.0));
+    assert!(stats.ping_ms.unwrap() >= 0.0);
+    assert!(stats.jitter_ms.unwrap() >= 0.0);
 }
 
 #[test]
