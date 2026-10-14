@@ -17,6 +17,16 @@ constexpr qint64 repeatDelayMs = 280;
 constexpr qint64 repeatIntervalMs = 85;
 constexpr qint64 gamepadKeepaliveMs = 100;
 constexpr quint32 guideLocalAction = 1;
+constexpr quint32 testRumbleDurationMs = 280;
+constexpr int maximumSerialChars = 120;
+
+int profileField(const QVariantMap &profile, QLatin1StringView name, int fallback, int maximum)
+{
+    const auto value = profile.value(name);
+    bool ok = false;
+    const auto number = value.toDouble(&ok);
+    return ok && std::isfinite(number) ? std::clamp(static_cast<int>(number), 0, maximum) : fallback;
+}
 }
 
 ControllerInput::ControllerInput(QObject *parent)
@@ -157,6 +167,11 @@ void ControllerInput::refreshControllerMetadata()
             {QStringLiteral("powerState"), powerState},
             {QStringLiteral("batteryPercent"), batteryPercent},
             {QStringLiteral("charging"), power == SDL_POWERSTATE_CHARGING},
+            {QStringLiteral("profileKey"), slot.profileKey},
+            {QStringLiteral("hasSerial"), slot.hasSerial},
+            {QStringLiteral("leftStickDeadzone"), slot.leftDeadzone},
+            {QStringLiteral("rightStickDeadzone"), slot.rightDeadzone},
+            {QStringLiteral("vibrationIntensity"), slot.vibration},
         };
         available.push_back(metadata);
         if (acceptsController(slot.instanceId)) {
@@ -193,7 +208,7 @@ void ControllerInput::setLeftStickDeadzone(int percent)
     percent = std::clamp(percent, 0, 50);
     if (m_leftStickDeadzone == percent) return;
     m_leftStickDeadzone = percent;
-    if (!m_shellCaptureEnabled) publishConnectedInputs();
+    applySlotTuning();
     emit leftStickDeadzoneChanged();
 }
 
@@ -202,7 +217,7 @@ void ControllerInput::setRightStickDeadzone(int percent)
     percent = std::clamp(percent, 0, 50);
     if (m_rightStickDeadzone == percent) return;
     m_rightStickDeadzone = percent;
-    if (!m_shellCaptureEnabled) publishConnectedInputs();
+    applySlotTuning();
     emit rightStickDeadzoneChanged();
 }
 
@@ -210,28 +225,119 @@ void ControllerInput::setVibrationIntensity(int percent)
 {
     percent = std::clamp(percent, 0, 100);
     if (m_vibrationIntensity == percent) return;
-    stopRumble();
     m_vibrationIntensity = percent;
+    applySlotTuning();
     emit vibrationIntensityChanged();
+}
+
+void ControllerInput::setControllerProfiles(const QVariantMap &profiles)
+{
+    if (m_controllerProfiles == profiles) return;
+    m_controllerProfiles = profiles;
+    applySlotTuning();
+    emit controllerProfilesChanged();
+}
+
+void ControllerInput::applySlotTuning()
+{
+    bool sticksChanged = false;
+    bool vibrationChanged = false;
+    for (auto &slot : m_slots) {
+        if (!slot.gamepad) continue;
+        const auto left = slot.leftDeadzone;
+        const auto right = slot.rightDeadzone;
+        const auto vibration = slot.vibration;
+        tuneSlot(slot);
+        sticksChanged |= left != slot.leftDeadzone || right != slot.rightDeadzone;
+        vibrationChanged |= vibration != slot.vibration;
+    }
+    if (vibrationChanged) stopRumble();
+    if (sticksChanged && !m_shellCaptureEnabled) publishConnectedInputs();
+    if (sticksChanged || vibrationChanged) refreshControllerMetadata();
+}
+
+void ControllerInput::tuneSlot(GamepadSlot &slot) const
+{
+    const auto profile = m_controllerProfiles.value(slot.profileKey).toMap();
+    slot.leftDeadzone = profileField(profile, QLatin1StringView("leftStickDeadzone"), m_leftStickDeadzone, 50);
+    slot.rightDeadzone = profileField(profile, QLatin1StringView("rightStickDeadzone"), m_rightStickDeadzone, 50);
+    slot.vibration = profileField(profile, QLatin1StringView("vibrationIntensity"), m_vibrationIntensity, 100);
+}
+
+QString ControllerInput::profileKey(quint16 vendor, quint16 product, const char *serial, SDL_GUID guid)
+{
+    const auto trimmedSerial = serial ? QString::fromUtf8(serial).trimmed() : QString();
+    if (!trimmedSerial.isEmpty()) {
+        return QStringLiteral("serial:%1:%2:%3")
+            .arg(vendor, 4, 16, QLatin1Char('0'))
+            .arg(product, 4, 16, QLatin1Char('0'))
+            .arg(trimmedSerial.left(maximumSerialChars));
+    }
+    char text[33] = {};
+    SDL_GUIDToString(guid, text, sizeof(text));
+    return QStringLiteral("guid:") + QString::fromLatin1(text);
+}
+
+void ControllerInput::setLeftStickNavigationEnabled(bool enabled)
+{
+    if (m_leftStickNavigationEnabled == enabled) return;
+    m_leftStickNavigationEnabled = enabled;
+    resetDirections();
+    emit leftStickNavigationEnabledChanged();
+}
+
+QVariantMap ControllerInput::stickSample(quint32 instanceId) const
+{
+    const auto slotIndex = m_gamepadSlots.value(instanceId, -1);
+    if (slotIndex < 0) return {};
+    const auto &slot = m_slots[static_cast<std::size_t>(slotIndex)];
+    if (!slot.gamepad) return {};
+    const auto axis = [&slot](SDL_GamepadAxis which) { return SDL_GetGamepadAxis(slot.gamepad, which); };
+    const auto leftX = axis(SDL_GAMEPAD_AXIS_LEFTX);
+    const auto leftY = axis(SDL_GAMEPAD_AXIS_LEFTY);
+    const auto rightX = axis(SDL_GAMEPAD_AXIS_RIGHTX);
+    const auto rightY = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    const auto left = radialDeadzone(leftX, leftY, slot.leftDeadzone);
+    const auto right = radialDeadzone(rightX, rightY, slot.rightDeadzone);
+    const auto unit = [](qint16 value) { return std::clamp(value / 32767.0, -1.0, 1.0); };
+    return {
+        {QStringLiteral("leftX"), unit(leftX)}, {QStringLiteral("leftY"), unit(leftY)},
+        {QStringLiteral("rightX"), unit(rightX)}, {QStringLiteral("rightY"), unit(rightY)},
+        {QStringLiteral("leftOutX"), unit(left.first)}, {QStringLiteral("leftOutY"), unit(left.second)},
+        {QStringLiteral("rightOutX"), unit(right.first)}, {QStringLiteral("rightOutY"), unit(right.second)},
+    };
+}
+
+bool ControllerInput::testRumble(quint32 instanceId)
+{
+    const auto slotIndex = m_gamepadSlots.value(instanceId, -1);
+    if (slotIndex < 0) return false;
+    auto &slot = m_slots[static_cast<std::size_t>(slotIndex)];
+    if (!slot.gamepad || slot.vibration == 0
+        || !SDL_GetBooleanProperty(SDL_GetGamepadProperties(slot.gamepad),
+                                   SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false))
+        return false;
+    return SDL_RumbleGamepad(slot.gamepad, static_cast<quint16>(0x6000 * slot.vibration / 100),
+                             static_cast<quint16>(0xA000 * slot.vibration / 100), testRumbleDurationMs);
 }
 
 void ControllerInput::playRumble(quint8 controllerId, quint16 lowFrequency,
                                quint16 highFrequency, quint32 durationMs,
                                quint64 sourceIncarnation)
 {
-    if (m_shellCaptureEnabled || m_inputSuspended || m_vibrationIntensity == 0) return;
+    if (m_shellCaptureEnabled || m_inputSuspended) return;
     const auto slotIndex = m_inputControllerId
         ? (controllerId == 0 ? m_gamepadSlots.value(m_inputControllerId, -1) : -1)
         : static_cast<int>(controllerId);
     if (slotIndex < 0 || slotIndex >= static_cast<int>(m_slots.size())) return;
     auto &slot = m_slots[static_cast<std::size_t>(slotIndex)];
-    if (!slot.gamepad || !acceptsController(slot.instanceId)) return;
+    if (!slot.gamepad || !acceptsController(slot.instanceId) || slot.vibration == 0) return;
     if (sourceIncarnation != 0 && slot.incarnation != sourceIncarnation) return;
     const auto properties = SDL_GetGamepadProperties(slot.gamepad);
     if (!SDL_GetBooleanProperty(properties, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false)) return;
     if (!SDL_RumbleGamepad(slot.gamepad,
-                     static_cast<quint16>(quint32(lowFrequency) * m_vibrationIntensity / 100),
-                     static_cast<quint16>(quint32(highFrequency) * m_vibrationIntensity / 100),
+                     static_cast<quint16>(quint32(lowFrequency) * slot.vibration / 100),
+                     static_cast<quint16>(quint32(highFrequency) * slot.vibration / 100),
                      std::min(durationMs, quint32(65'535))) && !slot.rumbleFailureReported) {
         slot.rumbleFailureReported = true;
         qWarning("Controller vibration failed for player %u: %s",
@@ -380,6 +486,10 @@ void ControllerInput::openController(SDL_JoystickID id)
     freeSlot->incarnation = m_nextIncarnation++;
     freeSlot->vendor = SDL_GetGamepadVendor(gamepad);
     freeSlot->product = SDL_GetGamepadProduct(gamepad);
+    const auto *serial = SDL_GetGamepadSerial(gamepad);
+    freeSlot->hasSerial = serial && !QString::fromUtf8(serial).trimmed().isEmpty();
+    freeSlot->profileKey = profileKey(freeSlot->vendor, freeSlot->product, serial, SDL_GetGamepadGUIDForID(id));
+    tuneSlot(*freeSlot);
     if (isSonySlot(slot)) {
         for (auto &contact : freeSlot->contacts) {
             contact.x = sonyContactCenter;
@@ -483,6 +593,7 @@ void ControllerInput::handleAxis(const SDL_GamepadAxisEvent &event)
     auto &right = slot.directions[1];
     auto &up = slot.directions[2];
     auto &down = slot.directions[3];
+    if (!m_leftStickNavigationEnabled) return;
     if (event.axis == SDL_GAMEPAD_AXIS_LEFTX) {
         activated |= updateDirection(left, value < (left.active ? -axisReleaseThreshold : -axisPressThreshold));
         activated |= updateDirection(right, value > (right.active ? axisReleaseThreshold : axisPressThreshold));
@@ -524,9 +635,9 @@ void ControllerInput::publishGamepad(int slotIndex, bool neutral)
     const auto &slot = m_slots[static_cast<std::size_t>(slotIndex)];
     if (!slot.gamepad || !acceptsController(slot.instanceId)) return;
     const auto left = neutral ? QPair<qint16, qint16>{}
-        : radialDeadzone(slot.rawLeftX, slot.rawLeftY, m_leftStickDeadzone);
+        : radialDeadzone(slot.rawLeftX, slot.rawLeftY, slot.leftDeadzone);
     const auto right = neutral ? QPair<qint16, qint16>{}
-        : radialDeadzone(slot.rawRightX, slot.rawRightY, m_rightStickDeadzone);
+        : radialDeadzone(slot.rawRightX, slot.rawRightY, slot.rightDeadzone);
     emit gamepadSnapshot(static_cast<quint8>(effectiveSlot(slotIndex)), gamepadBitmap(),
                          neutral ? 0 : slot.buttons,
                          neutral ? 0 : slot.leftTrigger, neutral ? 0 : slot.rightTrigger,
@@ -586,9 +697,9 @@ void ControllerInput::publishSonySnapshot(int slotIndex, bool neutral)
     if (m_shellCaptureEnabled) return;
     const auto cleared = neutral || m_inputSuspended;
     const auto left = cleared ? QPair<qint16, qint16>{}
-        : radialDeadzone(slot.rawLeftX, slot.rawLeftY, m_leftStickDeadzone);
+        : radialDeadzone(slot.rawLeftX, slot.rawLeftY, slot.leftDeadzone);
     const auto right = cleared ? QPair<qint16, qint16>{}
-        : radialDeadzone(slot.rawRightX, slot.rawRightY, m_rightStickDeadzone);
+        : radialDeadzone(slot.rawRightX, slot.rawRightY, slot.rightDeadzone);
     SonySnapshot snapshot;
     snapshot.slot = static_cast<quint8>(effectiveSlot(slotIndex));
     snapshot.incarnation = slot.incarnation;
