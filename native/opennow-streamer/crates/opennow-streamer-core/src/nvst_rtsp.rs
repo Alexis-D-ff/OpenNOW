@@ -1120,7 +1120,6 @@ fn prepare_on_endpoint(
     })?;
     let video_qos_offers = video_qos_offers(&describe.body);
     video_qos_offers.validate()?;
-    video_qos_offers.pacing_feedback_mode(&describe.body)?;
     let max_control_report_bytes = qos_messages_size(&describe.body)?;
     let described_ping_version = sdp_attribute(&describe.body, "general.pingVersion")
         .and_then(|value| value.parse::<u8>().ok())
