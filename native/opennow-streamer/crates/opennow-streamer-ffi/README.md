@@ -13,9 +13,40 @@ This crate exposes `opennow-streamer-core::Engine` as a C-compatible in-process 
 - `opennow_streamer_destroy` consumes the handle exactly once, waits for the engine and both callback queues to drain, and then returns. No call may race with destroy. A null handle is rejected; reusing a destroyed pointer is caller-side undefined behavior.
 - Every exported function catches Rust panics before they can unwind through the C ABI. A worker-thread panic closes the command queue.
 
+### Generic flight controls and wheels (ABI 14)
+
+Rebuild Qt and the native library together with ABI 14. The generic-HID exports are
+`opennow_streamer_replace_generic_hid_inventory`,
+`opennow_streamer_submit_generic_hid_report`, and
+`opennow_streamer_take_generic_hid_output`.
+
+Inventory rows use versioned `OpenNowGenericHidInterface` structures. Each row identifies
+one interface of a source slot and carries the source incarnation, VID, PID, revision,
+and a descriptor byte slice. Rows with the same slot must agree on device identity.
+Replacement is atomic. There are at most eight sources and 16 interfaces per source,
+with descriptors of at most 4,096 bytes. Empty descriptors retain explicit detach-on-pause
+fallback behavior. The caller's descriptor memory is copied before the call returns.
+
+`OpenNowGenericHidReport` submits an owned copy of at most 256 bytes. Normal input uses
+operation 0. Output and feature responses use their corresponding operation and an error
+byte. Source incarnations and interfaces are validated before queue admission. Each source
+has a 64-report, 16-KiB bound; overflow faults the source and preserves its release path.
+
+Before calling `opennow_streamer_take_generic_hid_output`, initialize the output's
+`version` to `OPENNOW_STREAMER_GENERIC_HID_VERSION` and `struct_size` to its C size.
+It returns `OK` with one copied command, or `CLOSED` when no command is pending.
+The output queue holds at most 32 commands and 8 KiB. The Qt host executes physical
+HID operations on its input worker, never inside an FFI callback or graphics callback.
+
+Capture closure generates descriptor-derived releases before forwarding stops. Missing
+or unsafe descriptors use detach and reattach instead. Session and device identity checks
+prevent old reports and outputs from reaching a replacement device. See
+[`docs/flight-controls.md`](../../../../docs/flight-controls.md) for wire semantics and
+the physical checks still required.
+
 ### Server timers and termination (ABI 13)
 
-Rebuild Qt and the native library together with ABI 13. Structure layouts and callback
+Rebuild Qt and the native library together with the current ABI 14. Structure layouts and callback
 ownership are unchanged. `event_callback` now delivers generation-scoped
 `session-timer` events with `startId`, `timerType`, `secondsLeft` and `active`.
 Timer type 4 warns of idle expiry; type 5 clears the warning. Successful gameplay

@@ -8,10 +8,14 @@
 #include <QVariantList>
 
 #include <array>
+#include <memory>
 
 #include <SDL3/SDL.h>
 
 #include "input/SdlDeviceClaim.h"
+#include "input/GenericHidWire.h"
+
+class GenericHidInput;
 
 class ControllerInput final : public QObject
 {
@@ -80,6 +84,11 @@ public:
                     quint64 sourceIncarnation = 0);
     void stopRumble();
     [[nodiscard]] QList<SdlDeviceClaim> deviceClaims() const;
+    [[nodiscard]] QList<GenericHidDeviceClaim> genericHidClaims() const;
+
+public slots:
+    void handleGenericHidOutput(const GenericHidReport &report);
+    void stopGenericHidOutput();
 
 signals:
     void controllerCountChanged(int count);
@@ -101,6 +110,8 @@ signals:
                          qint16 leftStickX, qint16 leftStickY,
                          qint16 rightStickX, qint16 rightStickY);
     void deviceClaimsChanged();
+    void genericDeviceClaimsChanged();
+    void genericHidReport(const GenericHidReport &report);
     void sonySnapshot(const ControllerInput::SonySnapshot &snapshot);
     void localActionRequested(quint32 action);
 
@@ -178,6 +189,7 @@ private:
     static quint8 triggerValue(qint16 value);
 
     QTimer m_pollTimer;
+    std::unique_ptr<GenericHidInput> m_genericHid;
     QVariantList m_controllerMetadata;
     QVariantList m_availableControllerMetadata;
     SDL_JoystickID m_inputControllerId = 0;

@@ -1,10 +1,15 @@
 use std::fmt;
 
+pub mod allowlist;
+pub mod descriptor;
 pub mod ds4;
+pub mod generic;
+pub mod generic_runtime;
 pub mod runtime;
 pub mod session;
 
 pub use ds4::{DS4_INTERFACE, DS4_LOW_ID_BASE, DS4_REPORT_BYTES, Ds4ReportState};
+pub use generic_runtime::{GenericIngress, GenericRuntime};
 pub use runtime::{
     EndpointToken, HidRuntime, IngressItem, InventoryUpdate, LaneFault, ReleaseRequest,
     SessionBinding, SourceMode,

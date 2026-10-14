@@ -1068,6 +1068,15 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 8
     )
+    qt_add_executable(opennow-generichidinput-tests tests/tst_generichidinput.cpp)
+    target_link_libraries(opennow-generichidinput-tests PRIVATE
+        Qt6::Test Qt6::Gui opennow-generic-hid)
+    target_sources(opennow-generichidinput-tests PRIVATE
+        src/input/ControllerInput.cpp src/input/ControllerInput.h)
+    add_test(NAME opennow-generichidinput-tests COMMAND opennow-generichidinput-tests -o -,txt)
+    set_tests_properties(opennow-generichidinput-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(opennow-controllerinput-tests
         tests/tst_controllerinput.cpp
         src/input/ControllerInput.cpp
@@ -1143,7 +1152,16 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 30
     )
+    foreach(target opennow-consolelaunchinput-tests opennow-sonychain-tests
+            opennow-controllerinput-tests opennow-controllernavigation-tests
+            opennow-controllertuning-tests opennow-controllersources-tests
+            opennow-controllermetadata-tests)
+        if(TARGET ${target})
+            target_link_libraries(${target} PRIVATE opennow-generic-hid)
+        endif()
+    endforeach()
     set(OPENNOW_CI_UNIT_TEST_TARGETS
+        opennow-generichidinput-tests
         opennow-windowtheme-tests
         opennow-updatefailure-tests
         opennow-queueselector-tests
@@ -1223,6 +1241,7 @@ if(BUILD_TESTING)
             opennow-singleinstance-tests
             opennow-thumbnail-tests
             opennow-controllerinput-tests
+            opennow-generichidinput-tests
             opennow-controllernavigation-tests
             opennow-controllersources-tests
             opennow-controllermetadata-tests
@@ -1284,6 +1303,7 @@ if(BUILD_TESTING)
                 opennow-singleinstance-tests
                 opennow-thumbnail-tests
                 opennow-controllerinput-tests
+                opennow-generichidinput-tests
                 opennow-controllernavigation-tests
                 opennow-controllersources-tests
                 opennow-controllermetadata-tests)

@@ -2,6 +2,7 @@
 
 #include "opennow_streamer_ffi.h"
 #include "input/SdlDeviceClaim.h"
+#include "input/GenericHidWire.h"
 
 #include <QByteArray>
 #include <QJsonObject>
@@ -60,6 +61,12 @@ public:
             const OpenNowStreamer *, const OpenNowSdlDeviceClaim *, std::size_t);
         using SubmitSonySnapshot = OpenNowStreamerStatus (*)(
             const OpenNowStreamer *, const OpenNowSonySnapshot *);
+        using ReplaceGenericHidInventory = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, const OpenNowGenericHidInterface *, std::size_t);
+        using SubmitGenericHidReport = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, const OpenNowGenericHidReport *);
+        using TakeGenericHidOutput = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, OpenNowGenericHidOutput *);
 
         Create create = nullptr;
         Send send = nullptr;
@@ -81,6 +88,9 @@ public:
         SubmitSonySnapshot submitSonySnapshot = nullptr;
         SetLogFile setLogFile = nullptr;
         Send submitText = nullptr;
+        ReplaceGenericHidInventory replaceGenericHidInventory = nullptr;
+        SubmitGenericHidReport submitGenericHidReport = nullptr;
+        TakeGenericHidOutput takeGenericHidOutput = nullptr;
     };
 
     static constexpr int DefaultShutdownTimeoutMs = 1'500;
@@ -155,6 +165,8 @@ public:
                                            bool *rawInputActive);
     OpenNowStreamerStatus replaceSdlDeviceClaims(const QList<SdlDeviceClaim> &claims);
     OpenNowStreamerStatus submitSonySnapshot(const OpenNowSonySnapshot &snapshot);
+    OpenNowStreamerStatus replaceGenericHidInventory(const QList<GenericHidDeviceClaim> &claims);
+    OpenNowStreamerStatus submitGenericHidReport(const GenericHidReport &report);
 
 signals:
     void inputCaptureReset();
@@ -175,6 +187,8 @@ signals:
                                    quint16 highFrequency, quint32 durationMs,
                                    quint64 sourceIncarnation);
     void controllerRumbleStopped();
+    void genericHidOutputRequested(const GenericHidReport &report);
+    void genericHidOutputStopped();
     void callbacksDropped(int count);
 
 private:
@@ -197,6 +211,7 @@ private:
     void invalidatePresentation();
     void publishDecodedDisplaySize(const QSize &size, quint64 generation);
     void resetInputCapture();
+    void updateGenericHidOutputPolling();
     void setStreaming(bool streaming);
 
     std::unique_ptr<Private> d;

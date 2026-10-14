@@ -1,4 +1,5 @@
 #include "input/ControllerInput.h"
+#include "input/GenericHidInput.h"
 
 #include <QCoreApplication>
 #include <QGuiApplication>
@@ -23,15 +24,21 @@ ControllerInput::ControllerInput(QObject *parent)
     : QObject(parent), m_pollTimer(this)
 {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_HIDAPI_ENUMERATE_ONLY_CONTROLLERS, "0");
     qRegisterMetaType<ControllerInput::SonySnapshot>();
+    qRegisterMetaType<GenericHidReport>();
     m_sdlReady = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
     if (!m_sdlReady) {
         qWarning("SDL gamepad initialization failed: %s", SDL_GetError());
-        return;
     }
+    m_genericHid = std::make_unique<GenericHidInput>();
+    connect(m_genericHid.get(), &GenericHidInput::inventoryChanged, this, [this] {
+        updatePollInterval();
+        poll();
+    }, Qt::QueuedConnection);
 
     int count = 0;
-    if (auto *ids = SDL_GetGamepads(&count)) {
+    if (auto *ids = m_sdlReady ? SDL_GetGamepads(&count) : nullptr) {
         for (int index = 0; index < count; ++index) openController(ids[index]);
         SDL_free(ids);
     }
@@ -46,6 +53,9 @@ ControllerInput::ControllerInput(QObject *parent)
 ControllerInput::~ControllerInput()
 {
     m_pollTimer.stop();
+    m_genericHid->stop();
+    emit genericDeviceClaimsChanged();
+    m_genericHid.reset();
     stopRumble();
     publishConnectedInputs(true);
     for (int slot = 0; slot < static_cast<int>(m_slots.size()); ++slot)
@@ -105,9 +115,8 @@ void ControllerInput::setInputControllerId(quint32 id)
 
 void ControllerInput::updatePollInterval()
 {
-    // Keep hotplug discovery alive without waking the GUI 250 times/second
-    // when there is no controller. Gameplay retains its low-latency cadence.
-    const auto interval = controllerCount() == 0 || m_inputSuspended ? 100 : m_shellCaptureEnabled ? 16 : 4;
+    const auto interval = m_genericHid && !m_genericHid->claims().isEmpty() ? 4
+        : controllerCount() == 0 || m_inputSuspended ? 100 : m_shellCaptureEnabled ? 16 : 4;
     m_pollTimer.setTimerType(interval == 4 ? Qt::PreciseTimer : Qt::CoarseTimer);
     if (m_pollTimer.interval() != interval) m_pollTimer.setInterval(interval);
 }
@@ -324,6 +333,15 @@ void ControllerInput::setShellCaptureEnabled(bool enabled)
 
 void ControllerInput::poll()
 {
+    if (m_genericHid) {
+        auto batch = m_genericHid->drain();
+        if (batch.inventoryChanged) {
+            updatePollInterval();
+            emit genericDeviceClaimsChanged();
+        }
+        for (const auto &report : batch.reports) emit genericHidReport(report);
+    }
+    if (!m_sdlReady) return;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -367,6 +385,7 @@ void ControllerInput::poll()
 void ControllerInput::openController(SDL_JoystickID id)
 {
     if (m_gamepadSlots.contains(id)) return;
+    if (m_genericHid && GenericHidInput::allowed(SDL_GetGamepadVendorForID(id), SDL_GetGamepadProductForID(id))) return;
     const auto freeSlot = std::find_if(m_slots.begin(), m_slots.end(),
                                       [](const GamepadSlot &slot) { return !slot.gamepad; });
     if (freeSlot == m_slots.end()) return;
@@ -393,6 +412,21 @@ void ControllerInput::openController(SDL_JoystickID id)
     emit controllerCountChanged(controllerCount());
     updatePollInterval();
     refreshControllerMetadata();
+}
+
+QList<GenericHidDeviceClaim> ControllerInput::genericHidClaims() const
+{
+    return m_genericHid ? m_genericHid->claims() : QList<GenericHidDeviceClaim>{};
+}
+
+void ControllerInput::handleGenericHidOutput(const GenericHidReport &report)
+{
+    if (m_genericHid) m_genericHid->submitOutput(report);
+}
+
+void ControllerInput::stopGenericHidOutput()
+{
+    if (m_genericHid) m_genericHid->clearOutputs();
 }
 
 void ControllerInput::closeController(SDL_JoystickID id)

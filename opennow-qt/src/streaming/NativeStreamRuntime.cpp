@@ -13,6 +13,8 @@
 #include <QPointer>
 #include <QQueue>
 #include <QStandardPaths>
+#include <QTimer>
+#include <QThread>
 
 #include <algorithm>
 #include <array>
@@ -206,6 +208,9 @@ struct NativeStreamRuntime::Private {
     bool displaySizeScheduled = false;
     UpstreamProgressSnapshot upstreamProgressSamples;
     std::atomic_bool inputAllowed{false};
+    std::atomic_bool genericHidInventoryPresent{false};
+    std::atomic_bool genericHidCaptureActive{false};
+    QTimer *genericHidOutputTimer = nullptr;
     bool inputAuthorizationPending = false;
     bool serverCursorComposited = true;
     bool defaultRelativeMouse = false;
@@ -239,7 +244,10 @@ NativeStreamRuntime::NativeStreamRuntime(QObject *parent,
                               &opennow_streamer_replace_sdl_device_claims,
                               &opennow_streamer_submit_sony_snapshot,
                               &opennow_streamer_set_log_file,
-                              &opennow_streamer_submit_text}, parent, vulkanDevice, windowsAdapterLuid)
+                              &opennow_streamer_submit_text,
+                              &opennow_streamer_replace_generic_hid_inventory,
+                              &opennow_streamer_submit_generic_hid_report,
+                              &opennow_streamer_take_generic_hid_output}, parent, vulkanDevice, windowsAdapterLuid)
 {
 }
 
@@ -251,6 +259,53 @@ NativeStreamRuntime::NativeStreamRuntime(Api api, QObject *parent,
 {
     d->vulkanDevice = vulkanDevice;
     d->windowsAdapterLuid = windowsAdapterLuid;
+    if (d->api.takeGenericHidOutput) {
+        auto *timer = new QTimer(this);
+        d->genericHidOutputTimer = timer;
+        timer->setInterval(8);
+        connect(timer, &QTimer::timeout, this, [this] {
+            const QPointer<NativeStreamRuntime> guard(this);
+            for (int index = 0; index < 32; ++index) {
+                OpenNowGenericHidOutput output{};
+                output.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
+                output.struct_size = sizeof(output);
+                {
+                    const std::shared_lock lock(d->handleMutex);
+                    if (!d->handle || !d->genericHidInventoryPresent.load()
+                        || !d->genericHidCaptureActive.load()
+                        || d->api.takeGenericHidOutput(d->handle, &output)
+                                          != OPENNOW_STREAMER_OK) return;
+                }
+                if (output.version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+                    || output.struct_size < sizeof(output) || output.reserved != 0
+                    || output.slot >= 8 || output.incarnation == 0
+                    || output.operation > 4 || output.byte_count > sizeof(output.bytes)) return;
+                emit genericHidOutputRequested(GenericHidReport{
+                    output.slot, output.incarnation, output.interface_number, output.operation,
+                    false, QByteArray(reinterpret_cast<const char *>(output.bytes),
+                                      static_cast<qsizetype>(output.byte_count))});
+                if (!guard) return;
+            }
+        });
+        connect(this, &NativeStreamRuntime::runningChanged,
+                this, &NativeStreamRuntime::updateGenericHidOutputPolling);
+    }
+}
+
+void NativeStreamRuntime::updateGenericHidOutputPolling()
+{
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, &NativeStreamRuntime::updateGenericHidOutputPolling,
+                                  Qt::QueuedConnection);
+        return;
+    }
+    auto *timer = d->genericHidOutputTimer;
+    if (!timer) return;
+    if (running() && d->genericHidInventoryPresent.load() && d->genericHidCaptureActive.load()) {
+        if (!timer->isActive()) timer->start();
+    } else {
+        timer->stop();
+    }
 }
 
 const OpenNowStreamerVulkanDevice *NativeStreamRuntime::vulkanDevice() const
@@ -459,6 +514,8 @@ bool NativeStreamRuntime::start()
         const std::lock_guard lock(d->handleMutex);
         d->callbackState = std::move(callbacks);
         d->handle = handle;
+        d->genericHidInventoryPresent.store(false);
+        d->genericHidCaptureActive.store(false);
     }
     setLastError({});
     emit runningChanged();
@@ -553,6 +610,8 @@ bool NativeStreamRuntime::shutdown(int timeoutMs)
         graphicsActive = d->handle && d->graphicsActive;
         if (!graphicsActive) {
             handle = std::exchange(d->handle, nullptr);
+            d->genericHidInventoryPresent.store(false);
+            d->genericHidCaptureActive.store(false);
             callbacks = std::exchange(d->callbackState, {});
         }
     }
@@ -763,11 +822,18 @@ OpenNowStreamerStatus NativeStreamRuntime::setCaptureActive(
 {
     if (!rawInputActive) return OPENNOW_STREAMER_NULL_POINTER;
     *rawInputActive = false;
-    const std::shared_lock lock(d->handleMutex);
-    return d->handle && d->api.setCaptureActive
-        ? d->api.setCaptureActive(d->handle, active, relativeMouse, windowHandle,
-                                  rawInputActive)
-        : OPENNOW_STREAMER_CLOSED;
+    OpenNowStreamerStatus status;
+    {
+        const std::shared_lock lock(d->handleMutex);
+        status = d->handle && d->api.setCaptureActive
+            ? d->api.setCaptureActive(d->handle, active, relativeMouse, windowHandle,
+                                      rawInputActive)
+            : OPENNOW_STREAMER_CLOSED;
+        d->genericHidCaptureActive.store(active && status == OPENNOW_STREAMER_OK);
+    }
+    updateGenericHidOutputPolling();
+    if (!active) emit genericHidOutputStopped();
+    return status;
 }
 OpenNowStreamerStatus NativeStreamRuntime::replaceSdlDeviceClaims(
     const QList<SdlDeviceClaim> &claims)
@@ -792,6 +858,47 @@ OpenNowStreamerStatus NativeStreamRuntime::submitSonySnapshot(
     const std::shared_lock lock(d->handleMutex);
     if (!d->handle || !d->api.submitSonySnapshot) return OPENNOW_STREAMER_CLOSED;
     return d->api.submitSonySnapshot(d->handle, &snapshot);
+}
+
+OpenNowStreamerStatus NativeStreamRuntime::replaceGenericHidInventory(
+    const QList<GenericHidDeviceClaim> &claims)
+{
+    std::shared_lock lock(d->handleMutex);
+    if (!d->handle || !d->api.replaceGenericHidInventory) return OPENNOW_STREAMER_CLOSED;
+    if (claims.size() > 8) return OPENNOW_STREAMER_INVALID_CONFIG;
+    std::array<OpenNowGenericHidInterface, 128> interfaces{};
+    std::size_t count = 0;
+    for (const auto &claim : claims) {
+        if (claim.interfaces.isEmpty() || claim.interfaces.size() > 16)
+            return OPENNOW_STREAMER_INVALID_CONFIG;
+        for (const auto &interface : claim.interfaces) {
+            if (interface.descriptor.size() > 4096) return OPENNOW_STREAMER_MESSAGE_TOO_LARGE;
+            interfaces[count++] = OpenNowGenericHidInterface{
+                OPENNOW_STREAMER_GENERIC_HID_VERSION, sizeof(OpenNowGenericHidInterface),
+                claim.slot, interface.number, 0, claim.incarnation,
+                claim.vendor, claim.product, claim.revision, 0,
+                reinterpret_cast<const std::uint8_t *>(interface.descriptor.constData()),
+                static_cast<std::size_t>(interface.descriptor.size())};
+        }
+    }
+    const auto status = d->api.replaceGenericHidInventory(d->handle, interfaces.data(), count);
+    if (status == OPENNOW_STREAMER_OK) d->genericHidInventoryPresent.store(count > 0);
+    lock.unlock();
+    updateGenericHidOutputPolling();
+    return status;
+}
+
+OpenNowStreamerStatus NativeStreamRuntime::submitGenericHidReport(const GenericHidReport &report)
+{
+    const std::shared_lock lock(d->handleMutex);
+    if (!d->handle || !d->api.submitGenericHidReport) return OPENNOW_STREAMER_CLOSED;
+    if (report.bytes.size() > 256) return OPENNOW_STREAMER_MESSAGE_TOO_LARGE;
+    const OpenNowGenericHidReport wire{
+        OPENNOW_STREAMER_GENERIC_HID_VERSION, sizeof(OpenNowGenericHidReport),
+        report.slot, report.interfaceNumber, report.operation, static_cast<std::uint8_t>(report.error),
+        report.incarnation, reinterpret_cast<const std::uint8_t *>(report.bytes.constData()),
+        static_cast<std::size_t>(report.bytes.size())};
+    return d->api.submitGenericHidReport(d->handle, &wire);
 }
 
 void NativeStreamRuntime::responseCallback(const std::uint8_t *bytes, std::size_t length,
