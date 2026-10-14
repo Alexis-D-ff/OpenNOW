@@ -24,6 +24,7 @@ pub(crate) struct AudioJitterStats {
     pub invalid: u64,
     pub source_resets: u64,
     pub underflows: u64,
+    pub playout_resyncs: u64,
 }
 
 pub(crate) struct AudioJitterBuffer {
@@ -137,6 +138,7 @@ impl AudioJitterBuffer {
             self.stats.reordered += 1;
         }
         self.packets.insert(index, packet);
+        let queued = self.packets.len();
         while self.packets.len() > MAX_PACKETS
             || self
                 .packets
@@ -149,6 +151,18 @@ impl AudioJitterBuffer {
         {
             self.packets.pop_front();
             self.stats.overflow += 1;
+        }
+        if self.packets.len() < queued {
+            let first = self.packets.front().expect("bounded queue retains audio");
+            if now < self.deadline(first.header.timestamp) {
+                let next = self.packets.get(1).unwrap_or(first);
+                self.anchor = Some((
+                    ssrc,
+                    next.header.timestamp,
+                    now - Duration::from_millis(self.target_ms),
+                ));
+                self.stats.playout_resyncs += 1;
+            }
         }
     }
 
@@ -350,6 +364,94 @@ mod tests {
             assert_eq!(frame.header.sequence_number, 2);
             assert_eq!(frame.header.timestamp, 201 * 48);
         }
+    }
+
+    #[test]
+    fn clock_drift_keeps_playout_moving_across_targets_packet_sizes_and_timestamp_wrap() {
+        let origin = Instant::now();
+        let start_timestamp = u32::MAX - 47_999;
+        for target_ms in [45, 165, 200] {
+            for packet_us in [2_500_u64, 5_000] {
+                for clock_ratio in [9_999_u64, 10_001] {
+                    let mut buffer = AudioJitterBuffer::new(48_000);
+                    let mut last_delivery = None;
+                    let mut delivered = 0;
+                    for index in 0..600_000_000 / packet_us {
+                        let media_us = index * packet_us;
+                        let now = origin + Duration::from_micros(media_us * clock_ratio / 10_000);
+                        let timestamp =
+                            start_timestamp.wrapping_add((media_us * 48_000 / 1_000_000) as u32);
+                        let mut frame = packet(index as u16, timestamp);
+                        frame.received_at_us = media_us;
+                        buffer.push(frame, now);
+                        if index == 0 {
+                            buffer.target_ms = target_ms;
+                        }
+                        while let Some(frame) = buffer.pop(now) {
+                            let media_us = frame.received_at_us;
+                            assert_eq!(frame.header.sequence_number, (media_us / packet_us) as u16);
+                            assert_eq!(
+                                frame.header.timestamp,
+                                start_timestamp
+                                    .wrapping_add((media_us * 48_000 / 1_000_000) as u32)
+                            );
+                            assert_eq!(&*frame.payload, &[frame.header.sequence_number as u8]);
+                            last_delivery = Some(now);
+                            delivered += 1;
+                        }
+                        if let Some(last) = last_delivery {
+                            assert!(
+                                now.duration_since(last)
+                                    <= Duration::from_millis(MAX_TARGET_MS + 5),
+                                "playout stalled: target={target_ms} packet_us={packet_us} clock_ratio={clock_ratio}"
+                            );
+                        }
+                        assert!(buffer.len() <= MAX_PACKETS);
+                    }
+                    assert!(
+                        delivered > 100_000,
+                        "target={target_ms} packet_us={packet_us} clock_ratio={clock_ratio} delivered={delivered} stats={:?}",
+                        buffer.stats
+                    );
+                    assert_eq!(buffer.stats.stale, 0);
+                    assert!(buffer.stats.overflow < 100);
+                    if clock_ratio < 10_000 && target_ms >= 165 {
+                        assert!(buffer.stats.playout_resyncs > 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raising_target_with_early_arrivals_does_not_starve_playout() {
+        let origin = Instant::now();
+        let mut buffer = AudioJitterBuffer::new(48_000);
+        let mut last_delivery = None;
+        let mut delivered = 0;
+        for tick in 0..=10_000_u64 {
+            let now = origin + Duration::from_millis(tick);
+            if tick % 5 == 0 {
+                let timestamp = if tick == 0 { 0 } else { (tick + 50) * 48 };
+                buffer.push(packet((tick / 5) as u16, timestamp as u32), now);
+                if tick == 0 {
+                    buffer.target_ms = 145;
+                }
+            }
+            if tick == 5_000 {
+                buffer.target_ms += UNDERFLOW_INCREASE_MS;
+            }
+            while buffer.pop(now).is_some() {
+                last_delivery = Some(now);
+                delivered += 1;
+            }
+            if let Some(last) = last_delivery {
+                assert!(now.duration_since(last) <= Duration::from_millis(MAX_TARGET_MS + 5));
+            }
+        }
+        assert!(delivered > 1_900);
+        assert_eq!(buffer.stats.underflows, 0);
+        assert_eq!(buffer.stats.playout_resyncs, 1);
     }
 
     #[test]
