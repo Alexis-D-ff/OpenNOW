@@ -32,6 +32,9 @@ QtObject {
     }
 
     property QtObject input: QtObject {
+        property var flightDevices: []
+        property var supportedFlightDevices: []
+        property bool forwardFlightControls: true
         property var basePads: []
         property var controllerProfiles: ({})
         property int leftStickDeadzone: 5

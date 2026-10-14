@@ -57,9 +57,10 @@ use super::nvst_control::{
 use super::nvst_cursor::{CursorCommand, NvstCursorCapture, valid_cursor_channel_message};
 use super::nvst_haptics::NvstHaptics;
 use super::nvst_input::{
-    NvstEncodedInput, NvstInputChannelState, NvstInputChannels, NvstInputCodec, NvstInputWrite,
-    SonyDeviceControl, for_each_sony_output, native_input_type_is_motion, native_input_type_name,
-    native_input_types, next_control_keepalive, server_cursor_messages, sony_device_change_command,
+    GenericHidMessage, NvstEncodedInput, NvstInputChannelState, NvstInputChannels, NvstInputCodec,
+    NvstInputWrite, SonyDeviceControl, for_each_generic_hid_message, for_each_sony_output,
+    generic_hid_command, native_input_type_is_motion, native_input_type_name, native_input_types,
+    next_control_keepalive, server_cursor_messages, sony_device_change_command,
     sony_report_command,
 };
 use super::nvst_input_delivery::{NvstInputDelivery, NvstInputDeliveryError};
@@ -68,6 +69,8 @@ use super::nvst_invalidation::{FrameInvalidation, FrameInvalidationFeedback};
 use super::{
     EncodedMediaFrame, MediaConsumer, TransportError, deliver_media_frame, install_crypto,
 };
+use opennow_streamer_hid::generic::{GenericError, GenericOutbound, GenericSession};
+use opennow_streamer_hid::generic_runtime::{GenericIngress, GenericRuntime};
 use opennow_streamer_hid::{
     DRAIN_PER_ITERATION, EndpointToken, HidOutbound, HidRuntime, HidSession, IngressItem,
     SonyCapability,
@@ -6669,7 +6672,12 @@ impl Drop for EndpointGuard {
 
 const SONY_SHUTDOWN_FLUSH_BUDGET: Duration = Duration::from_millis(50);
 
-fn queue_hid_shutdown(hid_session: &mut HidSession, channels: NvstInputChannels, rtc: &mut Rtc) {
+fn queue_hid_shutdown(
+    hid_session: &mut HidSession,
+    channels: NvstInputChannels,
+    rtc: &mut Rtc,
+) -> bool {
+    let mut queued = true;
     for outbound in hid_session.retire_all() {
         let command = match outbound {
             HidOutbound::Release { low_id, bytes } => sony_report_command(low_id, &bytes),
@@ -6679,7 +6687,562 @@ fn queue_hid_shutdown(hid_session: &mut HidSession, channels: NvstInputChannels,
             HidOutbound::Attach { .. } | HidOutbound::Report { .. } => None,
         };
         if let Some(command) = command {
-            let _ = channels.send_control_teardown(rtc, &command);
+            queued &= channels.send_control_teardown(rtc, &command);
+        }
+    }
+    queued
+}
+
+fn send_generic_hid_actions(
+    session: &mut GenericSession,
+    actions: Vec<GenericOutbound>,
+    mut send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    for action in actions {
+        let teardown = matches!(
+            action,
+            GenericOutbound::Detach { .. } | GenericOutbound::Report { release: true, .. }
+        );
+        let Some(command) = generic_hid_command(&action) else {
+            return false;
+        };
+        if !send(&command, teardown) {
+            return false;
+        }
+        session.sent(&action);
+    }
+    true
+}
+
+fn pump_generic_hid_pending(
+    runtime: &GenericRuntime,
+    session: &mut GenericSession,
+    release_epoch: &mut u64,
+    mut send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    let (capture, current_epoch) = runtime.capture_state();
+    if *release_epoch != current_epoch {
+        let releases = session.set_capture(false);
+        if !send_generic_hid_actions(session, releases, &mut send) {
+            return false;
+        }
+        *release_epoch = current_epoch;
+    }
+    let (inventory, _) = runtime.inventory_snapshot();
+    let actions = session.reconcile(&inventory, capture);
+    if !send_generic_hid_actions(session, actions, &mut send) {
+        return false;
+    }
+    for item in runtime.drain(32) {
+        let actions = match item {
+            GenericIngress::Report(report) => session.report(report).into_iter().collect(),
+            GenericIngress::Fault { slot, incarnation } => session.fault(slot, incarnation),
+            GenericIngress::Release { .. } => Vec::new(),
+        };
+        if !send_generic_hid_actions(session, actions, &mut send) {
+            return false;
+        }
+    }
+    runtime.publish_admissions(session);
+    true
+}
+
+fn store_generic_hid_message(
+    session: &mut GenericSession,
+    runtime: &GenericRuntime,
+    message: GenericHidMessage<'_>,
+    send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    match message {
+        GenericHidMessage::Response {
+            request_id,
+            control,
+            opaque,
+            device_id,
+        } => {
+            session.handle_response(request_id, control, opaque, device_id);
+            runtime.publish_admissions(session);
+        }
+        GenericHidMessage::Output {
+            device_id,
+            interface,
+            operation,
+            bytes,
+        } => {
+            if let Some(output) = session.output(device_id, interface, operation, bytes) {
+                let (slot, incarnation) = (output.slot, output.incarnation);
+                match runtime.push_output(output) {
+                    Ok(())
+                    | Err(
+                        GenericError::Inactive | GenericError::Unbound | GenericError::StaleSource,
+                    ) => {}
+                    Err(_) => {
+                        let actions = session.fault(slot, incarnation);
+                        runtime.publish_admissions(session);
+                        return send_generic_hid_actions(session, actions, send);
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod generic_hid_tests {
+    use super::*;
+    use opennow_streamer_hid::generic::{GenericDevice, GenericInterface, GenericReport};
+
+    fn device(incarnation: u64) -> GenericDevice {
+        GenericDevice {
+            slot: 0,
+            incarnation,
+            vendor: 0x044f,
+            product: 0x0402,
+            revision: 0x0100,
+            interfaces: vec![GenericInterface {
+                number: 2,
+                descriptor: vec![
+                    0x05, 0x01, 0x09, 0x04, 0xa1, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x08, 0x15,
+                    0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30,
+                    0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xc0,
+                ],
+            }],
+        }
+    }
+
+    fn report(axis: u8) -> GenericReport {
+        GenericReport {
+            slot: 0,
+            incarnation: 1,
+            interface: 2,
+            operation: 0,
+            error: false,
+            bytes: vec![0xff, axis],
+        }
+    }
+
+    fn runtime() -> GenericRuntime {
+        let runtime = GenericRuntime::new();
+        runtime.replace_inventory(vec![device(1)]).unwrap();
+        runtime.bind_session(1);
+        runtime.set_capture(true);
+        runtime
+    }
+
+    fn admit(runtime: &GenericRuntime, session: &mut GenericSession) {
+        assert!(pump_generic_hid_pending(
+            runtime,
+            session,
+            &mut 0,
+            |_, teardown| {
+                assert!(!teardown);
+                true
+            }
+        ));
+        session.handle_response(10, 1, 0, 42);
+        assert!(session.output(42, 2, 0, &[1]).is_some());
+    }
+
+    #[test]
+    fn generic_admission_publication_tracks_server_response_and_pause_detach() {
+        use opennow_streamer_hid::generic::GenericAdmission;
+        for control in [0, 1, 2, 255] {
+            let runtime = runtime();
+            let mut source = device(1);
+            source.interfaces[0].descriptor.clear();
+            runtime.replace_inventory(vec![source]).unwrap();
+            let mut session = GenericSession::new(1);
+            let mut release_epoch = 0;
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, _| true
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                GenericHidMessage::Response {
+                    request_id: 10,
+                    control,
+                    opaque: u32::MAX,
+                    device_id: 42,
+                },
+                |_, _| true
+            ));
+            let expected = if control == 1 {
+                GenericAdmission::Admitted
+            } else {
+                GenericAdmission::Declined
+            };
+            assert_eq!(runtime.admissions_snapshot()[0].admission, expected);
+            if control != 1 {
+                continue;
+            }
+            runtime.set_capture(false);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| teardown
+            ));
+            let status = runtime.admissions_snapshot()[0];
+            assert_eq!(status.incarnation, 1);
+            assert_eq!(status.admission, GenericAdmission::Pending);
+            runtime.set_capture(true);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| !teardown
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+        }
+    }
+
+    #[test]
+    fn generic_registration_accepts_only_pending_sent_control_one_and_rejects_stale_ack() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| false
+        ));
+        session.handle_response(10, 1, 0, 42);
+        assert!(session.output(42, 2, 0, &[1]).is_none());
+        for (control, opaque, returned) in [(3, 0, 42), (1, 0, 255), (1, 0, 9)] {
+            let mut session = GenericSession::new(1);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            session.handle_response(99, 1, 0, 42);
+            assert!(session.output(42, 2, 0, &[1]).is_none());
+            session.handle_response(10, control, opaque, returned);
+            assert!(session.output(returned, 2, 0, &[1]).is_none());
+        }
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        let actions = session.retire_all();
+        assert!(send_generic_hid_actions(
+            &mut session,
+            actions,
+            |_, teardown| teardown
+        ));
+        runtime.replace_inventory(vec![device(2)]).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        session.handle_response(10, 1, 0, 43);
+        assert!(session.output(43, 2, 0, &[1]).is_none());
+        session.handle_response(11, 1, 0xf, 44);
+        assert_eq!(session.output(44, 2, 0, &[1]).unwrap().incarnation, 2);
+    }
+
+    #[test]
+    fn generic_release_uses_last_successful_send_and_precedes_collapsed_capture_reports() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        runtime.submit_report(report(0xa5)).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        runtime.submit_report(report(0x55)).unwrap();
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| false
+        ));
+        runtime.set_capture(false);
+        runtime.set_capture(true);
+        runtime.submit_report(report(0x66)).unwrap();
+        let mut sent = vec![];
+        let mut epoch = 0;
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut epoch,
+            |command, teardown| {
+                sent.push((command.to_vec(), teardown));
+                true
+            }
+        ));
+        assert_eq!(epoch, 1);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0].0[12..], &[0, 0xa5]);
+        assert!(sent[0].1);
+        assert_eq!(&sent[1].0[12..], &[0xff, 0x66]);
+        assert!(!sent[1].1);
+        runtime.set_capture(false);
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut epoch,
+            |_, _| false
+        ));
+        assert_eq!(epoch, 1);
+    }
+
+    #[test]
+    fn generic_wire_response_and_empty_get_error_round_trip_without_sony_haptics() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        let response = [0x06, 0x02, 0x0b, 0, 0x1a, 0, 0, 0, 10, 1, 0, 0, 0, 0xf, 42];
+        for_each_generic_hid_message(&response, |message| {
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                message,
+                |_, _| true
+            ));
+        });
+        assert!(session.output(42, 2, 0, &[1]).is_some());
+        let get = [0x06, 0x02, 0x0a, 0, 0x11, 0, 0, 0, 42, 2, 3, 1, 0, 1];
+        for_each_generic_hid_message(&get, |message| {
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                message,
+                |_, _| true
+            ));
+        });
+        let output = runtime.take_output().unwrap();
+        assert_eq!(output.bytes, [1, 0, 1]);
+        runtime
+            .submit_report(GenericReport {
+                slot: output.slot,
+                incarnation: output.incarnation,
+                interface: output.interface,
+                operation: output.operation,
+                error: true,
+                bytes: vec![],
+            })
+            .unwrap();
+        let mut sent = vec![];
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                assert!(!teardown);
+                sent.push(command.to_vec());
+                true
+            }
+        ));
+        assert_eq!(
+            sent,
+            vec![vec![0x0d, 0x02, 8, 0, 0x22, 0x11, 0, 0, 0, 42, 1, 3]]
+        );
+        runtime.submit_report(report(0xa5)).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        runtime.set_capture(false);
+        sent.clear();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                assert!(teardown);
+                sent.push(command.to_vec());
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0][12..], &[0, 0xa5]);
+    }
+
+    #[test]
+    fn generic_drain_is_bounded_and_fault_or_inventory_removal_releases_before_detach() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        for _ in 0..40 {
+            runtime.submit_report(report(0x77)).unwrap();
+        }
+        let mut count = 0;
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| {
+                count += 1;
+                true
+            }
+        ));
+        assert_eq!(count, 32);
+        assert_eq!(runtime.drain(32).len(), 8);
+        for _ in 0..64 {
+            runtime.submit_report(report(0x77)).unwrap();
+        }
+        assert_eq!(
+            runtime.submit_report(report(0x77)),
+            Err(GenericError::Overflow)
+        );
+        let mut sent = vec![];
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                sent.push(command.to_vec());
+                assert!(teardown);
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0][12..], &[0, 0x77]);
+        assert_eq!(&sent[1][12..14], &[42, 3]);
+        assert!(session.output(42, 2, 0, &[1]).is_none());
+        runtime.replace_inventory(vec![device(2)]).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        session.handle_response(11, 1, 0, 43);
+        runtime.replace_inventory(vec![]).unwrap();
+        sent.clear();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                sent.push(command.to_vec());
+                assert!(teardown);
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0][12..14], &[43, 3]);
+    }
+
+    #[test]
+    fn generic_outputs_are_typed_and_overflow_retires_source_or_reports_queue_failure() {
+        for queues_release in [true, false] {
+            let runtime = runtime();
+            let mut session = GenericSession::new(1);
+            admit(&runtime, &mut session);
+            runtime.submit_report(report(0xa5)).unwrap();
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            for _ in 0..32 {
+                assert!(store_generic_hid_message(
+                    &mut session,
+                    &runtime,
+                    GenericHidMessage::Output {
+                        device_id: 42,
+                        interface: 2,
+                        operation: 3,
+                        bytes: &[1, 0, 1],
+                    },
+                    |_, _| panic!("valid output should not send transport response")
+                ));
+            }
+            let mut sent = vec![];
+            assert_eq!(
+                store_generic_hid_message(
+                    &mut session,
+                    &runtime,
+                    GenericHidMessage::Output {
+                        device_id: 42,
+                        interface: 2,
+                        operation: 3,
+                        bytes: &[1, 0, 1],
+                    },
+                    |command, teardown| {
+                        sent.push(command.to_vec());
+                        assert!(teardown);
+                        queues_release
+                    }
+                ),
+                queues_release
+            );
+            assert!(session.output(42, 2, 0, &[1]).is_none());
+            assert_eq!(sent.len(), if queues_release { 2 } else { 1 });
+            let output = runtime.take_output().unwrap();
+            assert_eq!(
+                (
+                    output.slot,
+                    output.incarnation,
+                    output.interface,
+                    output.operation
+                ),
+                (0, 1, 2, 3)
+            );
+            assert_eq!(output.bytes, [1, 0, 1]);
+        }
+    }
+
+    #[test]
+    fn generic_shutdown_queues_release_and_detach_and_invalid_descriptor_uses_detach() {
+        for valid_descriptor in [true, false] {
+            let runtime = runtime();
+            if !valid_descriptor {
+                let mut entry = device(1);
+                entry.interfaces[0].descriptor.clear();
+                runtime.replace_inventory(vec![entry]).unwrap();
+            }
+            let mut session = GenericSession::new(1);
+            admit(&runtime, &mut session);
+            runtime.submit_report(report(0xa5)).unwrap();
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            let mut sent = vec![];
+            let actions = session.retire_all();
+            assert!(send_generic_hid_actions(
+                &mut session,
+                actions,
+                |command, teardown| {
+                    sent.push(command.to_vec());
+                    assert!(teardown);
+                    true
+                }
+            ));
+            assert_eq!(sent.len(), if valid_descriptor { 2 } else { 1 });
+            assert_eq!(&sent.last().unwrap()[12..14], &[42, 3]);
+            runtime.unbind_session(1);
+            assert!(runtime.take_output().is_none());
+            assert!(session.retire_all().is_empty());
         }
     }
 }
@@ -6903,6 +7466,10 @@ fn run_nvst_webrtc_bundle(
         })
     });
     let mut hid_published_mask = 0_u16;
+    let mut generic_session = hid_runtime
+        .as_ref()
+        .map(|runtime| GenericSession::new(runtime.session_generation().unwrap_or(0)));
+    let mut generic_release_epoch = 0;
     let mut input_state = NvstInputChannelState::default();
     let mut input_codec = NvstInputCodec::default();
     let mut input_delivery = NvstInputDelivery::default();
@@ -6936,7 +7503,6 @@ fn run_nvst_webrtc_bundle(
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
-                    rtc.disconnect();
                     forward_optional(
                         &event_sender,
                         receiver.stop(NvstStopCause::UpstreamGateClosed),
@@ -7011,7 +7577,6 @@ fn run_nvst_webrtc_bundle(
                             let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
                                 "text input channel closed",
                             ));
-                            rtc.disconnect();
                             forward_optional(
                                 &event_sender,
                                 receiver.stop(NvstStopCause::InputDeliveryFailed),
@@ -7096,7 +7661,6 @@ fn run_nvst_webrtc_bundle(
                                 channels.send_encoded(&mut rtc, message)
                             },
                         ) {
-                            rtc.disconnect();
                             forward_optional(
                                 &event_sender,
                                 receiver.stop(NvstStopCause::InputDeliveryFailed),
@@ -7122,7 +7686,6 @@ fn run_nvst_webrtc_bundle(
                                 classify_nvst_unready_input(&mut rtc, input_channels, message)
                             },
                         ) {
-                            rtc.disconnect();
                             forward_optional(
                                 &event_sender,
                                 receiver.stop(NvstStopCause::InputDeliveryFailed),
@@ -7145,26 +7708,6 @@ fn run_nvst_webrtc_bundle(
                             liveness.snapshot(Instant::now()),
                         ),
                     );
-                    if let (Some(_), Some(hid_session), Some(channels)) =
-                        (hid_runtime.as_ref(), hid_session.as_mut(), input_channels)
-                    {
-                        queue_hid_shutdown(hid_session, channels, &mut rtc);
-                        forward_rtc_outputs(
-                            &mut rtc,
-                            |output| {
-                                if let Output::Transmit(transmit) = output {
-                                    let _ = socket.send_to(&transmit.contents, bundle_peer);
-                                }
-                            },
-                            SONY_SHUTDOWN_FLUSH_BUDGET,
-                        );
-                    }
-                    if let Some(hid_runtime) = hid_runtime.as_ref()
-                        && let Some(generation) = hid_runtime.session_generation()
-                    {
-                        hid_runtime.unbind_session(generation);
-                    }
-                    rtc.disconnect();
                     forward_optional(&event_sender, receiver.stop(cause));
                     break 'bundle;
                 }
@@ -7195,7 +7738,6 @@ fn run_nvst_webrtc_bundle(
             let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
                 "discrete input delivery failed; stopping to prevent stuck input",
             ));
-            rtc.disconnect();
             forward_optional(
                 &event_sender,
                 receiver.stop(NvstStopCause::InputDeliveryFailed),
@@ -7246,13 +7788,42 @@ fn run_nvst_webrtc_bundle(
                 let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
                     "sony hid output could not be queued; stopping to prevent stuck input",
                 ));
-                rtc.disconnect();
                 forward_optional(
                     &event_sender,
                     receiver.stop(NvstStopCause::HidOutputBlocked),
                 );
                 break 'bundle;
             }
+        }
+        if upstream_allowed
+            && input_state.is_ready()
+            && let (Some(runtime), Some(session), Some(channels)) = (
+                hid_runtime.as_ref(),
+                generic_session.as_mut(),
+                input_channels,
+            )
+            && !pump_generic_hid_pending(
+                &runtime.generic,
+                session,
+                &mut generic_release_epoch,
+                |command, teardown| {
+                    if teardown {
+                        channels.send_control_teardown(&mut rtc, command)
+                    } else {
+                        channels.send_control(&mut rtc, command)
+                    }
+                },
+            )
+        {
+            input_ready.store(false, Ordering::Release);
+            let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
+                "generic hid output could not be queued; stopping to prevent stuck input",
+            ));
+            forward_optional(
+                &event_sender,
+                receiver.stop(NvstStopCause::HidOutputBlocked),
+            );
+            break 'bundle;
         }
         if upstream_allowed
             && !input_timeout_reported
@@ -7697,7 +8268,6 @@ fn run_nvst_webrtc_bundle(
                                     &event_sender,
                                 ) {
                                     input_ready.store(false, Ordering::Release);
-                                    rtc.disconnect();
                                     break 'bundle;
                                 }
                                 feedback.haptics.receive(&data.data);
@@ -7715,6 +8285,37 @@ fn run_nvst_webrtc_bundle(
                                         &feedback.haptics,
                                     );
                                 });
+                            }
+                            if data.id == channels.control_reliable
+                                && let (Some(session), Some(runtime)) =
+                                    (generic_session.as_mut(), hid_runtime.as_ref())
+                            {
+                                let mut queued = true;
+                                for_each_generic_hid_message(&data.data, |message| {
+                                    if queued {
+                                        queued = store_generic_hid_message(
+                                            session,
+                                            &runtime.generic,
+                                            message,
+                                            |command, teardown| {
+                                                if teardown {
+                                                    channels
+                                                        .send_control_teardown(&mut rtc, command)
+                                                } else {
+                                                    channels.send_control(&mut rtc, command)
+                                                }
+                                            },
+                                        );
+                                    }
+                                });
+                                if !queued {
+                                    input_ready.store(false, Ordering::Release);
+                                    forward_optional(
+                                        &event_sender,
+                                        receiver.stop(NvstStopCause::HidOutputBlocked),
+                                    );
+                                    break 'bundle;
+                                }
                             }
                             let cursor_messages = if Some(data.id) == channels.cursor {
                                 Vec::new()
@@ -7867,7 +8468,6 @@ fn run_nvst_webrtc_bundle(
                                     &mut video_delivery_gap,
                                     event,
                                 ) {
-                                    rtc.disconnect();
                                     forward_optional(
                                         &event_sender,
                                         receiver.stop(NvstStopCause::MediaConsumerClosed),
@@ -7912,7 +8512,6 @@ fn run_nvst_webrtc_bundle(
                             let _ = event_sender.send(NvstReceiveEvent::Dropped(
                                 NvstDropReason::MediaConsumerClosed,
                             ));
-                            rtc.disconnect();
                             forward_optional(
                                 &event_sender,
                                 receiver.stop(NvstStopCause::MediaConsumerClosed),
@@ -8027,7 +8626,6 @@ fn run_nvst_webrtc_bundle(
                                     &mut video_delivery_gap,
                                     event,
                                 ) {
-                                    rtc.disconnect();
                                     forward_optional(
                                         &event_sender,
                                         receiver.stop(NvstStopCause::MediaConsumerClosed),
@@ -8101,7 +8699,6 @@ fn run_nvst_webrtc_bundle(
                     &mut video_delivery_gap,
                     event,
                 ) {
-                    rtc.disconnect();
                     forward_optional(
                         &event_sender,
                         receiver.stop(NvstStopCause::MediaConsumerClosed),
@@ -8126,25 +8723,37 @@ fn run_nvst_webrtc_bundle(
             forward_frame_progress(&mut receiver, &event_sender, now);
         }
     }
+    let mut shutdown_queued = true;
     if let Some(hid_runtime) = hid_runtime.as_ref() {
         if let (Some(hid_session), Some(channels)) = (hid_session.as_mut(), input_channels) {
-            for outbound in hid_session.retire_all() {
-                let command = match outbound {
-                    HidOutbound::Release { low_id, bytes } => sony_report_command(low_id, &bytes),
-                    HidOutbound::Removal { low_id } => {
-                        sony_device_change_command(SonyDeviceControl::Removal, low_id)
-                    }
-                    HidOutbound::Attach { .. } | HidOutbound::Report { .. } => None,
-                };
-                if let Some(command) = command {
-                    let _ = channels.send_control_teardown(&mut rtc, &command);
-                }
-            }
+            shutdown_queued &= queue_hid_shutdown(hid_session, channels, &mut rtc);
         }
+        if let (Some(session), Some(channels)) = (generic_session.as_mut(), input_channels) {
+            let actions = session.retire_all();
+            shutdown_queued &= send_generic_hid_actions(session, actions, |command, _| {
+                channels.send_control_teardown(&mut rtc, command)
+            });
+        }
+        forward_rtc_outputs(
+            &mut rtc,
+            |output| {
+                if let Output::Transmit(transmit) = output {
+                    let _ = socket.send_to(&transmit.contents, bundle_peer);
+                }
+            },
+            SONY_SHUTDOWN_FLUSH_BUDGET,
+        );
         if let Some(generation) = hid_runtime.session_generation() {
             hid_runtime.unbind_session(generation);
         }
     }
+    if !shutdown_queued {
+        input_ready.store(false, Ordering::Release);
+        let _ = event_sender.send(NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+            NvstStopCause::HidOutputBlocked,
+        )));
+    }
+    rtc.disconnect();
 }
 
 fn run_nvst_udp_receiver(

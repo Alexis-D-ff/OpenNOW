@@ -15,6 +15,11 @@ FocusScope {
     signal resumeRequested()
 
     readonly property var pads: ControllerInput.availableControllers || []
+    readonly property var flightDevices: ControllerInput.flightDevices || []
+    readonly property int activeFlightCount: flightDevices.filter(device => device.status === "active").length
+    readonly property color flightColor: activeFlightCount === flightDevices.length
+        ? (Theme.lightMode ? DesktopTokens.flightReady : DesktopTokens.flightMint)
+        : (Theme.lightMode ? DesktopTokens.flightWarning : DesktopTokens.ledAmber)
     readonly property var profiles: ShellStore.settings.controllerProfiles || ({})
     property int selectedInstanceId: 0
     property string lostPadName: ""
@@ -42,6 +47,38 @@ FocusScope {
 
     function padLabel(pad) {
         return qsTr("P%1").arg(pad.slot)
+    }
+    function flightType(device) {
+        switch (device.type) {
+        case "throttle": return qsTr("throttle")
+        case "pedals": return qsTr("pedals")
+        case "wheel": return qsTr("wheel")
+        default: return qsTr("flight stick")
+        }
+    }
+    function flightStatus(device) {
+        switch (device.status) {
+        case "active": return qsTr("ACTIVE")
+        case "declined": return qsTr("DECLINED")
+        case "controller": return qsTr("CONTROLLER")
+        case "ignored": return qsTr("IGNORED")
+        default: return qsTr("READY")
+        }
+    }
+    function flightTone(device) {
+        if (device.status === "active") return DesktopTokens.flightReady
+        if (device.status === "declined") return DesktopTokens.flightDeclined
+        if (device.status === "controller") return DesktopTokens.flightWarning
+        return DesktopTokens.textMuted
+    }
+    function flightDetail(device) {
+        let detail = flightType(device)
+        switch (device.status) {
+        case "declined": detail = qsTr("declined by the server, not sent"); break
+        case "controller": detail = qsTr("sent as controller P%1").arg(device.player); break
+        case "ignored": detail = qsTr("not forwarded"); break
+        }
+        return [device.vidPid, detail].filter(value => value).join(" · ")
     }
     function padStatus(pad) {
         if (pad.charging) return pad.batteryPercent >= 0 ? qsTr("Charging · %1%").arg(pad.batteryPercent) : qsTr("Charging")
@@ -397,6 +434,112 @@ FocusScope {
             y: 4
             width: scroll.width - 8
             spacing: 14
+
+            Column {
+                objectName: "streamFlightDevices"
+                visible: root.flightDevices.length > 0
+                width: parent.width
+                spacing: 10
+                Item {
+                    width: parent.width
+                    height: 16
+                    SectionLabel {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - flightCount.width - 12
+                        text: ControllerInput.forwardFlightControls ? qsTr("FLIGHT CONTROLS · SENT AS THE REAL DEVICE")
+                            : qsTr("FLIGHT CONTROLS · FORWARDING OFF")
+                        elide: Text.ElideRight
+                    }
+                    SectionLabel {
+                        id: flightCount
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("%1 OF %2").arg(root.activeFlightCount).arg(root.flightDevices.length)
+                        color: root.flightColor
+                    }
+                }
+                Rectangle {
+                    width: parent.width
+                    height: flightRows.height + 2
+                    radius: 14
+                    color: "#08FFFFFF"
+                    border.width: 1
+                    border.color: "#1FFFFFFF"
+                    Column {
+                        id: flightRows
+                        x: 1; y: 1
+                        width: parent.width - 2
+                        Repeater {
+                            model: root.flightDevices
+                            delegate: Item {
+                                id: flightDevice
+                                required property var modelData
+                                required property int index
+                                width: flightRows.width
+                                height: 56
+                                readonly property color tone: root.flightTone(modelData)
+                                Rectangle { visible: flightDevice.index > 0; width: parent.width; height: 1; color: "#0FFFFFFF" }
+                                Rectangle {
+                                    x: 12; anchors.verticalCenter: parent.verticalCenter
+                                    width: 30; height: 30; radius: 8; color: "#12FFFFFF"
+                                    DesktopSettingsIcon {
+                                        anchors.centerIn: parent; width: 16; height: 16
+                                        glyph: ["throttle", "pedals", "wheel"].includes(flightDevice.modelData.type)
+                                            ? flightDevice.modelData.type : "stick"
+                                        ink: DesktopTokens.textBody
+                                    }
+                                }
+                                Column {
+                                    x: 54; anchors.verticalCenter: parent.verticalCenter
+                                    width: Math.max(0, stateBadge.x - x - 12)
+                                    spacing: 2
+                                    Text {
+                                        width: parent.width
+                                        text: flightDevice.modelData.name
+                                        color: DesktopTokens.textHigh
+                                        font.family: DesktopTokens.bodyFont; font.pixelSize: 13; font.weight: Font.Bold
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: root.flightDetail(flightDevice.modelData)
+                                        color: DesktopTokens.textMuted
+                                        font.family: DesktopTokens.bodyFont; font.pixelSize: 11; font.weight: Font.DemiBold
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                Rectangle {
+                                    id: stateBadge
+                                    anchors.right: parent.right; anchors.rightMargin: 14
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: flightState.implicitWidth + 20; height: 20; radius: 10
+                                    color: Qt.rgba(flightDevice.tone.r, flightDevice.tone.g, flightDevice.tone.b, 0.09)
+                                    border.width: 1
+                                    border.color: Qt.rgba(flightDevice.tone.r, flightDevice.tone.g, flightDevice.tone.b, 0.22)
+                                    SectionLabel {
+                                        id: flightState
+                                        anchors.centerIn: parent
+                                        text: root.flightStatus(flightDevice.modelData)
+                                        color: flightDevice.tone
+                                        font.pixelSize: 8; font.letterSpacing: 0.8
+                                    }
+                                }
+                                Accessible.role: Accessible.ListItem
+                                Accessible.name: modelData.name + " · " + root.flightDetail(modelData) + " · " + root.flightStatus(modelData)
+                            }
+                        }
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: qsTr("The game reads these devices directly, so set dead zones and curves in the game. Turn forwarding off in Settings › Controls.")
+                    color: DesktopTokens.textFaint
+                    font.family: DesktopTokens.bodyFont; font.pixelSize: 11; font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                    lineHeight: 1.2
+                }
+            }
 
             Notice {
                 objectName: "controllerDisconnectedNotice"

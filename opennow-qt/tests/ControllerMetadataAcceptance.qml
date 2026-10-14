@@ -3,6 +3,9 @@ import OpenNOW
 
 QtObject {
     property QtObject input: QtObject {
+        property var flightDevices: []
+        property var supportedFlightDevices: []
+        property bool forwardFlightControls: true
         property var availableControllers: [
             {instanceId: 1, slot: 1, name: "DualSense Wireless Controller", family: "playstation", powerState: "charging", batteryPercent: 65, charging: true},
             {instanceId: 2, slot: 2, name: "Xbox Wireless Controller", family: "xbox", powerState: "onBattery", batteryPercent: 70, charging: false},

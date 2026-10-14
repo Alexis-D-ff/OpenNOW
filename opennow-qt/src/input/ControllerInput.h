@@ -8,10 +8,15 @@
 #include <QVariantList>
 
 #include <array>
+#include <memory>
 
 #include <SDL3/SDL.h>
 
 #include "input/SdlDeviceClaim.h"
+#include "input/GenericHidWire.h"
+
+class GenericHidInput;
+class GenericHidBackend;
 
 class ControllerInput final : public QObject
 {
@@ -19,6 +24,9 @@ class ControllerInput final : public QObject
     Q_PROPERTY(int controllerCount READ controllerCount NOTIFY controllerCountChanged)
     Q_PROPERTY(QVariantList controllers READ controllers NOTIFY controllersChanged)
     Q_PROPERTY(QVariantList availableControllers READ availableControllers NOTIFY availableControllersChanged)
+    Q_PROPERTY(QVariantList flightDevices READ flightDevices NOTIFY flightDevicesChanged)
+    Q_PROPERTY(QVariantList supportedFlightDevices READ supportedFlightDevices CONSTANT)
+    Q_PROPERTY(bool forwardFlightControls READ forwardFlightControls WRITE setForwardFlightControls NOTIFY forwardFlightControlsChanged)
     Q_PROPERTY(quint32 inputControllerId READ inputControllerId WRITE setInputControllerId NOTIFY inputControllerIdChanged)
     Q_PROPERTY(bool shellCaptureEnabled READ shellCaptureEnabled WRITE setShellCaptureEnabled NOTIFY shellCaptureEnabledChanged)
     Q_PROPERTY(bool inputSuspended READ inputSuspended WRITE setInputSuspended NOTIFY inputSuspendedChanged)
@@ -57,12 +65,16 @@ public:
         quint64 observedAtUs = 0;
     };
 
-    explicit ControllerInput(QObject *parent = nullptr);
+    explicit ControllerInput(QObject *parent = nullptr, std::shared_ptr<GenericHidBackend> hidBackend = {});
     ~ControllerInput() override;
 
     [[nodiscard]] int controllerCount() const;
     [[nodiscard]] QVariantList controllers() const;
     [[nodiscard]] QVariantList availableControllers() const;
+    [[nodiscard]] QVariantList flightDevices() const { return m_flightDevices; }
+    [[nodiscard]] bool forwardFlightControls() const { return m_forwardFlightControls; }
+    void setForwardFlightControls(bool enabled);
+    [[nodiscard]] QVariantList supportedFlightDevices() const;
     [[nodiscard]] quint32 inputControllerId() const;
     void setInputControllerId(quint32 id);
     [[nodiscard]] bool shellCaptureEnabled() const;
@@ -89,11 +101,20 @@ public:
                     quint64 sourceIncarnation = 0);
     void stopRumble();
     [[nodiscard]] QList<SdlDeviceClaim> deviceClaims() const;
+    [[nodiscard]] QList<GenericHidDeviceClaim> genericHidClaims() const;
+
+public slots:
+    void setGenericHidAdmission(quint8 slot, quint64 incarnation, GenericHidAdmission admission);
+    void resetGenericHidAdmissions();
+    void handleGenericHidOutput(const GenericHidReport &report);
+    void stopGenericHidOutput();
 
 signals:
     void controllerCountChanged(int count);
     void controllersChanged();
     void availableControllersChanged();
+    void flightDevicesChanged();
+    void forwardFlightControlsChanged();
     void inputControllerIdChanged();
     void shellCaptureEnabledChanged();
     void inputSuspendedChanged();
@@ -112,6 +133,8 @@ signals:
                          qint16 leftStickX, qint16 leftStickY,
                          qint16 rightStickX, qint16 rightStickY);
     void deviceClaimsChanged();
+    void genericDeviceClaimsChanged();
+    void genericHidReport(const GenericHidReport &report);
     void sonySnapshot(const ControllerInput::SonySnapshot &snapshot);
     void localActionRequested(quint32 action);
 
@@ -189,6 +212,7 @@ private:
     void updateShellInputDrain();
     [[nodiscard]] bool isSonySlot(int slotIndex) const;
     void refreshControllerMetadata();
+    void refreshFlightDevices();
     void applySlotTuning();
     void tuneSlot(GamepadSlot &slot) const;
     static quint16 buttonMask(Uint8 button);
@@ -196,8 +220,12 @@ private:
     static quint8 triggerValue(qint16 value);
 
     QTimer m_pollTimer;
+    std::unique_ptr<GenericHidInput> m_genericHid;
     QVariantList m_controllerMetadata;
     QVariantList m_availableControllerMetadata;
+    QVariantList m_flightDevices;
+    QHash<quint64, GenericHidAdmission> m_genericHidAdmissions;
+    bool m_forwardFlightControls = true;
     SDL_JoystickID m_inputControllerId = 0;
     QElapsedTimer m_clock;
     QHash<SDL_JoystickID, int> m_gamepadSlots;

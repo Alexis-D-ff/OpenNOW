@@ -1,3 +1,15 @@
+add_library(opennow-generic-hid STATIC
+    src/input/GenericHidInput.cpp
+    src/input/GenericHidInput.h
+    src/input/GenericHidWire.h)
+target_include_directories(opennow-generic-hid PUBLIC src)
+target_link_libraries(opennow-generic-hid PUBLIC Qt6::Core SDL3::SDL3)
+if(APPLE)
+    target_link_libraries(opennow-generic-hid PRIVATE "-framework IOKit" "-framework CoreFoundation")
+elseif(WIN32)
+    target_link_libraries(opennow-generic-hid PRIVATE setupapi hid)
+endif()
+
 set(OPENNOW_STREAM_RUNTIME_SOURCES
     src/streaming/NativeStreamRuntime.cpp
     src/streaming/NativeStreamRuntime.h
@@ -72,3 +84,4 @@ qt_add_executable(opennow-qt
     ${OPENNOW_STREAM_RUNTIME_SOURCES}
     ${OPENNOW_STREAM_PRESENTATION_SOURCES}
 )
+target_link_libraries(opennow-qt PRIVATE opennow-generic-hid)

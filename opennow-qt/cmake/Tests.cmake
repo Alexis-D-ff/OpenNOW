@@ -597,6 +597,25 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route stream --smoke-desktop-anti-afk --reduced-motion)
     set_tests_properties(qml-desktop-anti-afk PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    qt_add_resources(opennow-qt flight_controls_acceptance
+        PREFIX "/acceptance" BASE tests FILES tests/FlightControlsAcceptance.qml)
+    foreach(flight_state connected light-ready empty supported-expanded forwarding-off badges drawer-home drawer-controllers stats-expanded stream-clear)
+        set(flight_route settings-input)
+        if(flight_state MATCHES "^(drawer-|stats-expanded|stream-clear|badges)")
+            set(flight_route stream)
+        endif()
+        foreach(flight_mode windowed fullscreen)
+            set(flight_args --smoke-test --allow-multiple-instances --desktop
+                --route ${flight_route} --smoke-flight-controls --flight-state ${flight_state} --reduced-motion)
+            if(flight_mode STREQUAL "fullscreen")
+                list(APPEND flight_args --flight-fullscreen)
+            endif()
+            add_test(NAME "qml-flight-controls-${flight_state}-${flight_mode}"
+                COMMAND opennow-qt ${flight_args})
+            set_tests_properties("qml-flight-controls-${flight_state}-${flight_mode}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+        endforeach()
+    endforeach()
     add_test(NAME qml-desktop-stream-controllers
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route stream --smoke-stream-controllers --reduced-motion)
@@ -1099,6 +1118,15 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 8
     )
+    qt_add_executable(opennow-generichidinput-tests tests/tst_generichidinput.cpp)
+    target_link_libraries(opennow-generichidinput-tests PRIVATE
+        Qt6::Test Qt6::Gui opennow-generic-hid)
+    target_sources(opennow-generichidinput-tests PRIVATE
+        src/input/ControllerInput.cpp src/input/ControllerInput.h)
+    add_test(NAME opennow-generichidinput-tests COMMAND opennow-generichidinput-tests -o -,txt)
+    set_tests_properties(opennow-generichidinput-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(opennow-controllerinput-tests
         tests/tst_controllerinput.cpp
         src/input/ControllerInput.cpp
@@ -1174,7 +1202,16 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 30
     )
+    foreach(target opennow-consolelaunchinput-tests opennow-sonychain-tests
+            opennow-controllerinput-tests opennow-controllernavigation-tests
+            opennow-controllertuning-tests opennow-controllersources-tests
+            opennow-controllermetadata-tests)
+        if(TARGET ${target})
+            target_link_libraries(${target} PRIVATE opennow-generic-hid)
+        endif()
+    endforeach()
     set(OPENNOW_CI_UNIT_TEST_TARGETS
+        opennow-generichidinput-tests
         opennow-windowtheme-tests
         opennow-updatefailure-tests
         opennow-queueselector-tests
@@ -1254,6 +1291,7 @@ if(BUILD_TESTING)
             opennow-singleinstance-tests
             opennow-thumbnail-tests
             opennow-controllerinput-tests
+            opennow-generichidinput-tests
             opennow-controllernavigation-tests
             opennow-controllersources-tests
             opennow-controllermetadata-tests
@@ -1315,6 +1353,7 @@ if(BUILD_TESTING)
                 opennow-singleinstance-tests
                 opennow-thumbnail-tests
                 opennow-controllerinput-tests
+                opennow-generichidinput-tests
                 opennow-controllernavigation-tests
                 opennow-controllersources-tests
                 opennow-controllermetadata-tests)

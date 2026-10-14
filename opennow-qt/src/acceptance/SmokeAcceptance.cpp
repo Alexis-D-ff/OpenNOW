@@ -578,6 +578,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-microphone"_s)
                      || m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
                      || m_arguments.contains(u"--smoke-stream-controllers"_s)
+                     || m_arguments.contains(u"--smoke-flight-controls"_s)
                      || m_arguments.contains(u"--smoke-audio-output"_s)
                      || m_arguments.contains(u"--smoke-background-stream"_s)
                      || m_arguments.contains(u"--smoke-recording"_s)
@@ -621,6 +622,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/DesktopAntiAfkAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-stream-controllers"_s)
             ? u"qrc:/acceptance/DesktopStreamControllersAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-flight-controls"_s)
+            ? u"qrc:/acceptance/FlightControlsAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-audio-output"_s)
             ? u"qrc:/acceptance/AudioOutputAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-background-stream"_s)
@@ -657,9 +660,15 @@ int AcceptanceSession::startSmokeWorkload()
         fixture->setParent(&m_engine);
         if (m_arguments.contains(u"--smoke-console-spacing"_s))
             fixture->setProperty("recordingSection", m_arguments.contains(u"--smoke-spacing-recording"_s));
-        if (m_arguments.contains(u"--smoke-stream-controllers"_s)) {
+        if (m_arguments.contains(u"--smoke-stream-controllers"_s)
+                || m_arguments.contains(u"--smoke-flight-controls"_s)) {
             auto *input = fixture->property("input").value<QObject *>();
             if (!input) return EXIT_FAILURE;
+            if (m_arguments.contains(u"--smoke-flight-controls"_s)) {
+                auto *liveInput = m_engine.rootContext()->contextProperty(u"ControllerInput"_s).value<QObject *>();
+                if (!liveInput || !liveInput->property("supportedFlightDevices").isValid()) return EXIT_FAILURE;
+                input->setProperty("supportedFlightDevices", liveInput->property("supportedFlightDevices"));
+            }
             m_engine.rootContext()->setContextProperty(u"ControllerInput"_s, input);
         }
         if (m_arguments.contains(u"--smoke-stream-recovery"_s)
@@ -698,9 +707,35 @@ int AcceptanceSession::startSmokeWorkload()
                     || m_arguments.contains(u"--smoke-store-launch-fullscreen"_s)
                     || m_arguments.contains(u"--smoke-stream-recovery-fullscreen"_s)))
                 window->showFullScreen();
+            if (window && m_arguments.contains(u"--smoke-flight-controls"_s)
+                    && m_arguments.contains(u"--flight-fullscreen"_s))
+                window->showFullScreen();
             QVariant passed;
             const bool ok = window && QMetaObject::invokeMethod(fixture, "run", Q_RETURN_ARG(QVariant, passed),
                 Q_ARG(QVariant, QVariant::fromValue(window->contentItem()))) && passed.toBool() && !m_qmlWarningOccurred;
+            if (ok && m_arguments.contains(u"--smoke-flight-controls"_s)
+                    && fixture->property("flightState").toString() == u"badges"_s) {
+                auto *host = fixture->property("badgeHost").value<QQuickItem *>();
+                const char *inputs[]{"badgeActiveInput", "badgeDeclinedInput", "badgeOffInput"};
+                for (int index = 0; index < 3; ++index) {
+                    auto *context = new QQmlContext(m_engine.rootContext(), fixture);
+                    context->setContextProperty(u"ControllerInput"_s, fixture->property(inputs[index]).value<QObject *>());
+                    QQmlComponent statsComponent(&m_engine);
+                    statsComponent.loadFromModule(u"OpenNOW"_s, u"DesktopStreamStats"_s);
+                    auto *stats = qobject_cast<QQuickItem *>(statsComponent.create(context));
+                    if (!host || !stats) {
+                        qCritical() << statsComponent.errors();
+                        m_application.exit(EXIT_FAILURE);
+                        return;
+                    }
+                    stats->setParent(host);
+                    stats->setParentItem(host);
+                    stats->setObjectName(u"flightBadgeStats%1"_s.arg(index));
+                    stats->setSize(QSizeF(710, 90));
+                    stats->setX(218);
+                    stats->setY(index * 58 + 4);
+                }
+            }
             if (ok && m_arguments.contains(u"--smoke-color-format"_s)) {
                 QTimer::singleShot(150, this, [this, window, fixture] {
                     QVariant notified;
@@ -711,6 +746,7 @@ int AcceptanceSession::startSmokeWorkload()
             }
             if (ok && (m_arguments.contains(u"--smoke-command-search"_s)
                        || m_arguments.contains(u"--smoke-stream-controllers"_s)
+                       || m_arguments.contains(u"--smoke-flight-controls"_s)
                        || m_arguments.contains(u"--smoke-shortcuts"_s)
                        || m_arguments.contains(u"--smoke-console-settings"_s)
                        || m_arguments.contains(u"--bug-report-notice-check"_s)
@@ -736,9 +772,14 @@ int AcceptanceSession::startSmokeWorkload()
                     timer->stop();
                     bool success = advanced && state.toInt() == 1 && !m_qmlWarningOccurred;
                     const auto shot = m_arguments.indexOf(u"--screenshot"_s);
-                    if (success && shot >= 0)
+                    if (success && shot >= 0) {
+                        auto image = window->grabWindow();
+                        if (m_arguments.contains(u"--smoke-flight-controls"_s)
+                                && fixture->property("flightState").toString() == u"badges"_s)
+                            image = image.copy(0, 0, qRound(960 * image.devicePixelRatio()), qRound(218 * image.devicePixelRatio()));
                         success = shot + 1 < m_arguments.size() && QFileInfo(m_arguments.at(shot + 1)).isAbsolute()
-                            && window->grabWindow().save(m_arguments.at(shot + 1));
+                            && image.save(m_arguments.at(shot + 1));
+                    }
                     if (!success) qCritical("Interactive shell acceptance failed");
                     m_application.exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
                 });

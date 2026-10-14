@@ -14,6 +14,10 @@ Column {
     property bool shortcutsOpen: controlsRoot.settingsScreen.selectedSection === 10
     width: controlsRoot.availableWidth; spacing: DesktopTokens.px(12)
     Loader { width: parent.width; sourceComponent: controlsRoot.controllersPageComponent }
+    DesktopSettingsFlightControlsPanel {
+        width: parent.width
+        settingsScreen: controlsRoot.settingsScreen
+    }
     DesktopSettingsPanel {
         width: parent.width; paperStyle: true
         DesktopSettingsSection { text: qsTr("MOUSE & KEYBOARD") }

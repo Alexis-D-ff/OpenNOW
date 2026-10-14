@@ -201,6 +201,29 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
             nativeStreamRuntime.submitSonySnapshot(openNowWireSonySnapshot(snapshot));
         });
     nativeStreamRuntime.replaceSdlDeviceClaims(controllerInput.deviceClaims());
+    QObject::connect(&controllerInput, &ControllerInput::genericDeviceClaimsChanged,
+                     &nativeStreamRuntime, [&controllerInput, &nativeStreamRuntime] {
+                         nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
+                     });
+    QObject::connect(&controllerInput, &ControllerInput::genericHidReport,
+                     &nativeStreamRuntime, [&nativeStreamRuntime](const GenericHidReport &report) {
+                         nativeStreamRuntime.submitGenericHidReport(report);
+                     });
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidOutputRequested,
+                     &controllerInput, &ControllerInput::handleGenericHidOutput);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidOutputStopped,
+                     &controllerInput, &ControllerInput::stopGenericHidOutput);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionChanged,
+                     &controllerInput, &ControllerInput::setGenericHidAdmission);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionsReset,
+                     &controllerInput, &ControllerInput::resetGenericHidAdmissions);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::runningChanged,
+                     &controllerInput, [&controllerInput, &nativeStreamRuntime] {
+                         if (!nativeStreamRuntime.running()) return;
+                         nativeStreamRuntime.replaceSdlDeviceClaims(controllerInput.deviceClaims());
+                         nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
+                     });
+    nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
 #endif
     InputModeTracker inputModeTracker(&controller);
     application.installEventFilter(&inputModeTracker);

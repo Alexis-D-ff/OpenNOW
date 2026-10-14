@@ -17,6 +17,10 @@ Item {
     readonly property var live: ShellStore.streamer || ({})
     readonly property var session: ShellStore.activeSession || ({})
     readonly property var profile: session.negotiatedStreamProfile || session.streamProfile || ShellStore.runtimeStreamProfile || ({})
+    readonly property var flightDevices: ControllerInput.flightDevices || []
+    readonly property var activeFlightDevices: flightDevices.filter(device => device.status === "active")
+    readonly property bool flightVisible: ControllerInput.forwardFlightControls && flightDevices.length > 0
+    readonly property color flightColor: activeFlightDevices.length === flightDevices.length ? DesktopTokens.flightMint : DesktopTokens.ledAmber
     readonly property real overlayScale: Math.max(0.85, Math.min(1.5, Number(ShellStore.settings.statsOverlayScale || 1)))
     readonly property real inset: 24
     readonly property string position: String(ShellStore.settings.statsOverlayPosition || "top-right")
@@ -42,13 +46,15 @@ Item {
     readonly property string toggleShortcut: String(ShellStore.settings.shortcutToggleStats ?? "Ctrl+N")
     readonly property var heroCards: ["Fps", "Ping", "Latency"].map(key => cards.find(card => card.key === key)).filter(card => card !== undefined)
     readonly property var unmeasuredKeys: ["Decode", "Residence", "Latency", "Swap"]
-    readonly property var ledgerCards: cards.filter(card => ["Receive", "Jitter", "Drops", "PacketLoss", "Decode", "Residence", "Swap", "LocalOutputFps"].includes(card.key)
+    readonly property var ledgerCards: cards.filter(card => ["Receive", "Jitter", "Drops", "PacketLoss", "Decode", "Residence", "Swap", "LocalOutputFps", "Flight", "FlightDevice"].includes(card.key)
         && (card.key !== "Drops" || card.field === "videoDropCount" || card.value > 0))
     readonly property var featureBadges: {
         const badges = []
         if (shown("Video") && (profile.enableHdr === true || profile.hdr === true)) badges.push({text:"HDR", ink:"#C6A46A"})
         if (frameGenerationEnabled) badges.push({text:qsTr("FRAME GEN 2×"), ink:"#F5A623"})
         if (shown("Video") && Qt.platform.os === "osx" && ShellStore.settings.upscaling === "metalfx") badges.push({text:"METALFX", ink:"#7FD4FF"})
+        if (flightVisible) badges.push({text:qsTr("FLIGHT") + " " + activeFlightDevices.length
+            + (activeFlightDevices.length === flightDevices.length ? "" : "/" + flightDevices.length), ink:flightColor, glyph:"stick"})
         return badges
     }
     readonly property bool telemetryActive: live.status === "streaming"
@@ -147,12 +153,28 @@ Item {
             cards.push({key:"Drops", label:qsTr("UNCLASSIFIED DROPS"), value:read("otherQueueDropCount"), unit:qsTr("items"), field:"otherQueueDropCount"})
         if (frameGenerationEnabled)
             cards.push({key:"LocalOutputFps", label:qsTr("LOCAL OUTPUT FPS"), value:frameGenerationOutputFps(), unit:"fps", field:"frameGenerationOutputFps"})
+        if (flightVisible) {
+            cards.push({key:"Flight", label:qsTr("FLIGHT"), value:activeFlightDevices.length, unit:"", glyph:"stick", ink:flightColor,
+                textValue:activeFlightDevices.length === flightDevices.length ? String(activeFlightDevices.length)
+                    : activeFlightDevices.length + " / " + flightDevices.length,
+                detail:activeFlightDevices.map(device => device.name.replace(/^(Thrustmaster |Logitech |Saitek )/, "")
+                    .replace(/^HOTAS Warthog /, "Warthog ")).join(" · ")})
+            for (const device of flightDevices.filter(device => device.status !== "active")) {
+                const types = {stick:qsTr("STICK"), throttle:qsTr("THROTTLE"), pedals:qsTr("PEDALS"), wheel:qsTr("WHEEL")}
+                const states = {ready:qsTr("ready"), declined:qsTr("declined"),
+                    controller:qsTr("controller P%1").arg(device.player), ignored:qsTr("ignored")}
+                cards.push({key:"FlightDevice", label:types[device.type] || qsTr("STICK"), unit:"", value:null,
+                    textValue:device.status === "declined" ? qsTr("IDLE") : String(states[device.status] || qsTr("ready")).toUpperCase(),
+                    detail:device.name + " · " + String(states[device.status] || qsTr("ready")),
+                    ink:device.status === "declined" ? "#FF8A80" : device.status === "controller" ? "#F5A623" : "#A3FFFFFF"})
+            }
+        }
         return cards.filter(item => shown(item.key === "Receive" ? "Bitrate" : item.key)
             && (!unmeasuredKeys.includes(item.key) || item.value !== null
                 || (item.key === "Swap" && swapGated)))
     }
     function compactItems() {
-        const items = cards.map(item => ({text:item.label + " " + format(item.value, item.decimals) + " " + item.unit}))
+        const items = cards.map(item => ({text:item.label + " " + metricValue(item) + (item.unit ? " " + item.unit : "")}))
         if (frameGenerationEnabled)
             items.push({text:qsTr("FRAME GENERATION") + " " + frameGenerationState()})
         if (shown("Video")) items.push({text:videoText})
@@ -160,7 +182,8 @@ Item {
         return items
     }
     function report() {
-        const lines = cards.map(item => item.label + ": " + format(item.value, item.decimals) + " " + item.unit)
+        const lines = cards.map(item => item.label + ": " + metricValue(item) + (item.unit ? " " + item.unit : "")
+            + (item.detail ? " · " + item.detail : ""))
         if (frameGenerationEnabled)
             lines.push(qsTr("FRAME GENERATION") + ": " + frameGenerationState())
         if (swapGated)
@@ -171,15 +194,18 @@ Item {
         return qsTr("Stream stats:") + "\n" + lines.join("\n")
     }
     function resetHistory() { history = ({}) }
+    function metricValue(card) { return card.textValue !== undefined ? card.textValue : format(card.value, card.decimals) }
     function sampleHistory() {
         const next = ({})
         for (const card of cards) {
+            if (!card.field) continue
             const values = (history[card.field] || []).slice(-59)
             values.push(sample(card)); next[card.field] = values
         }
         history = next
     }
     function ledgerDetail(card) {
+        if (card.detail !== undefined) return card.detail
         if (card.field === "receiveBitrateMbps") return qsTr("known session peer · UDP datagram bytes")
         if (card.field === "jitterMs") {
             const samples = (history.jitterMs || []).filter(value => value !== null)
@@ -300,9 +326,22 @@ Item {
                 delegate: Rectangle {
                     id: featureBadge
                     required property var modelData
-                    width: badge.implicitWidth + 16; height: 22; radius: 6
+                    width: badgeContents.implicitWidth + 16; height: 22; radius: 6
                     color: Qt.rgba(badge.color.r, badge.color.g, badge.color.b, 0.14)
-                    Mono { id: badge; anchors.centerIn: parent; text: featureBadge.modelData.text; color: featureBadge.modelData.ink; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 0.8 }
+                    Row {
+                        id: badgeContents
+                        anchors.centerIn: parent
+                        spacing: 6
+                        DesktopSettingsIcon {
+                            visible: featureBadge.modelData.glyph !== undefined
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 12; height: 12
+                            sourceSize: Qt.size(24, 24)
+                            glyph: featureBadge.modelData.glyph || "stick"
+                            ink: featureBadge.modelData.ink
+                        }
+                        Mono { id: badge; text: featureBadge.modelData.text; color: featureBadge.modelData.ink; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 0.8 }
+                    }
                 }
             }
             Row {
@@ -401,15 +440,22 @@ Item {
                         width: panelContents.width; height: 33
                         Rule { width: parent.width }
                         RowLayout {
-                            anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16; spacing: 10
+                            anchors.fill: parent; anchors.leftMargin: ledger.modelData.key === "FlightDevice" ? 38 : 16; anchors.rightMargin: 16; spacing: 10
+                            DesktopSettingsIcon {
+                                visible: ledger.modelData.glyph !== undefined
+                                Layout.preferredWidth: 12; Layout.preferredHeight: 12
+                                sourceSize: Qt.size(24, 24)
+                                glyph: ledger.modelData.glyph || "stick"
+                                ink: ledger.modelData.ink || "white"
+                            }
                             Mono { text: ledger.modelData.field === "videoDropCount" ? qsTr("FRAME DROPS") : ledger.modelData.label; font.pixelSize: 10; font.letterSpacing: 0.8; color: "#8CFFFFFF" }
                             Mono { Layout.fillWidth: true; text: root.ledgerDetail(ledger.modelData); font.pixelSize: 10; color: "#73FFFFFF"; font.weight: Font.Medium }
                             Mono {
-                                text: root.format(ledger.modelData.value, ledger.modelData.decimals)
+                                text: root.metricValue(ledger.modelData)
                                     + (ledger.modelData.field === "videoDropCount" ? "" : ledger.modelData.unit === "%" ? "%" : " " + ledger.modelData.unit)
-                                color: root.degraded && ledger.modelData.key === "PacketLoss" ? "#D15A2C"
+                                color: ledger.modelData.ink || (root.degraded && ledger.modelData.key === "PacketLoss" ? "#D15A2C"
                                     : ledger.modelData.key === "Decode" || ledger.modelData.key === "Residence"
-                                        || ledger.modelData.key === "Swap" ? "white" : root.metricColor
+                                        || ledger.modelData.key === "Swap" ? "white" : root.metricColor)
                             }
                         }
                     }

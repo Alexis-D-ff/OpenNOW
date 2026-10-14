@@ -19,6 +19,7 @@ Item {
     property url leadingIcon: ""
     property real leadingIconWidth: DesktopTokens.px(19)
     property color leadingColor: DesktopTokens.raised
+    property color leadingInk: Theme.label
     readonly property bool hasLeading: glyph !== "" || leadingLetter !== "" || leadingIcon.toString() !== ""
     default property alias trailing: trailingSlot.data
 
@@ -42,7 +43,7 @@ Item {
         DesktopSettingsIcon {
             anchors.centerIn: parent; width: DesktopTokens.px(20); height: width
             visible: root.glyph !== ""; glyph: root.glyph
-            ink: root.expanded ? Theme.focusText : Theme.label
+            ink: root.expanded ? Theme.focusText : root.leadingInk
         }
         Image {
             anchors.centerIn: parent
