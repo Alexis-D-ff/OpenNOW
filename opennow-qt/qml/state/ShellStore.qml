@@ -1285,33 +1285,40 @@ QtObject {
             AppController.navigate("accounts")
     }
 
+    // Session routes belong to the seat's owner. Every way out of the picker
+    // and every completed switch checks this one rule, so nobody lands on an
+    // empty stream for a seat they do not own.
+    function sessionRouteWithoutOwnedSeat(route) {
+        return ["stream", "inserting", "joining"].indexOf(route) >= 0
+            && !(Boolean(activeSession) && sessionOwnerSignedIn())
+    }
+
     function leaveAccountPicker() {
         const back = AppController.backRoute
-        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0)
+        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0
+                || sessionRouteWithoutOwnedSeat(back))
             AppController.navigateFromLastPrimary("home")
         else
             AppController.goBack()
     }
 
     // The one place a completed auth.accounts.switch decides where to land,
-    // whichever entry point started it. Session routes belong to the seat's
-    // owner; anyone else leaves them for Home instead of an empty stream.
+    // whichever entry point started it.
     function settleRouteAfterAccountSwitch() {
         const route = AppController.route
-        const picking = route === "accounts" || route === "profile-pin"
         if (!authSession) {
             if (route === "profile-pin")
                 AppController.navigate("accounts")
             return
         }
-        const ownedSeat = Boolean(activeSession) && sessionOwnerSignedIn()
-        const landing = picking ? AppController.backRoute : route
-        if (ownedSeat && picking)
-            AppController.navigate("stream")
-        else if (!ownedSeat && ["stream", "inserting", "joining"].indexOf(landing) >= 0)
+        if (route === "accounts" || route === "profile-pin") {
+            if (Boolean(activeSession) && sessionOwnerSignedIn())
+                AppController.navigate("stream")
+            else
+                leaveAccountPicker()
+        } else if (sessionRouteWithoutOwnedSeat(route)) {
             AppController.navigateFromLastPrimary("home")
-        else if (picking)
-            leaveAccountPicker()
+        }
     }
 
     // auth.accounts.switch never ends a cloud seat, so picking anyone but the

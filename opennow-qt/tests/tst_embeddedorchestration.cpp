@@ -111,7 +111,7 @@ bool prepareAuthentication(QJSEngine &engine)
              "accountPickerLaunchDecision", "leaveAccountPicker", "accountSwitchEndsSession", "isActiveAccount",
              "chooseAccount", "continueAccountChoice", "chooseAccountAt", "confirmAccountSwitch", "cancelAccountSwitch",
              "continuePendingAccountSwitch", "beginAccountSignIn", "openPin", "sessionOwnerSignedIn",
-             "settleRouteAfterAccountSwitch"}) {
+             "settleRouteAfterAccountSwitch", "sessionRouteWithoutOwnedSeat"}) {
         if (!loadShellFunction(engine, QString::fromLatin1(name))) return false;
     }
     return loadShellFunction(engine, QStringLiteral("onResponseReceived"), 8)
@@ -524,7 +524,9 @@ private slots:
             {QStringLiteral("qml/desktop/shell/DesktopCommandPalette.qml"), QStringLiteral("ShellStore.chooseAccount(action.account, false)")}};
         for (const auto &[file, call] : callers)
             QVERIFY2(source(file).contains(call), qPrintable(file + QStringLiteral(" no longer switches through ShellStore.chooseAccount")));
-        QCOMPARE(source(QStringLiteral("qml/state/ShellStore.qml")).count(QStringLiteral("settleRouteAfterAccountSwitch()")), 2);
+        const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
+        QCOMPARE(shell.count(QStringLiteral("settleRouteAfterAccountSwitch()")), 2);
+        QCOMPARE(shell.count(QStringLiteral("[\"stream\", \"inserting\", \"joining\"]")), 1);
 
         // Every entry point reaches the store through chooseAccount or
         // chooseAccountAt from its own route; one switch completion must land
@@ -578,6 +580,29 @@ private slots:
         )JS"));
         QVERIFY2(!back.isError(), qPrintable(back.toString()));
         QCOMPARE(back.toString(), QStringLiteral("switch,0,seat,stream"));
+
+        // Leaving the picker without switching (Back, or picking the account
+        // that is already active) follows the same rule.
+        QJSEngine backOut;
+        QVERIFY(prepareAuthentication(backOut));
+        const auto exits = backOut.evaluate(QStringLiteral(R"JS(
+            AppController.goBack = function() { this.route = this.backRoute; };
+            savedAccounts = [{userId:'old',displayName:'Old'}];
+            const results = [];
+            for (const ended of [false, true]) {
+                for (const exit of ['back', 'active']) {
+                    activeSession = ended ? null : {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+                    AppController.route = 'accounts';
+                    AppController.backRoute = 'stream';
+                    if (exit === 'back' || chooseAccountAt(0) === 'active')
+                        leaveAccountPicker();
+                    results.push(AppController.route);
+                }
+            }
+            results.join(',')
+        )JS"));
+        QVERIFY2(!exits.isError(), qPrintable(exits.toString()));
+        QCOMPARE(exits.toString(), QStringLiteral("stream,stream,home,home"));
     }
 
     void exhaustedTransportNegotiationDoesNotReclaimTheSeat_data()
