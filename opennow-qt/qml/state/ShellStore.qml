@@ -1287,7 +1287,9 @@ QtObject {
 
     function leaveAccountPicker() {
         const back = AppController.backRoute
-        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0)
+        const ownedSeat = Boolean(activeSession) && sessionOwnerSignedIn()
+        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0
+                || (!ownedSeat && ["stream", "inserting", "joining"].indexOf(back) >= 0))
             AppController.navigateFromLastPrimary("home")
         else
             AppController.goBack()

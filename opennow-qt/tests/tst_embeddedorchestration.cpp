@@ -110,7 +110,7 @@ bool prepareAuthentication(QJSEngine &engine)
              "startDeviceLogin", "cancelDeviceLogin", "switchAccount", "refreshSavedAccounts", "showSavedAccountSelection",
              "accountPickerLaunchDecision", "leaveAccountPicker", "accountSwitchEndsSession", "isActiveAccount",
              "chooseAccount", "continueAccountChoice", "chooseAccountAt", "confirmAccountSwitch", "cancelAccountSwitch",
-             "continuePendingAccountSwitch", "beginAccountSignIn", "openPin"}) {
+             "continuePendingAccountSwitch", "beginAccountSignIn", "openPin", "sessionOwnerSignedIn"}) {
         if (!loadShellFunction(engine, QString::fromLatin1(name))) return false;
     }
     return loadShellFunction(engine, QStringLiteral("onResponseReceived"), 8)
@@ -511,6 +511,21 @@ private slots:
             [chooseAccountAt(0), AppController.overlay].join(',')
         )JS"));
         QCOMPARE(owner.toString(), QStringLiteral("switch,"));
+        const auto left = engine.evaluate(QStringLiteral(R"JS(
+            let backs = 0;
+            AppController.goBack = function() { backs++; this.route = this.backRoute; };
+            AppController.route = 'accounts';
+            AppController.backRoute = 'stream';
+            activeSession = null;
+            leaveAccountPicker();
+            const afterEndedSeat = AppController.route;
+            AppController.route = 'accounts';
+            AppController.backRoute = 'library';
+            leaveAccountPicker();
+            [afterEndedSeat, AppController.route, backs].join(',')
+        )JS"));
+        QVERIFY2(!left.isError(), qPrintable(left.toString()));
+        QCOMPARE(left.toString(), QStringLiteral("home,library,1"));
     }
 
     void exhaustedTransportNegotiationDoesNotReclaimTheSeat_data()
