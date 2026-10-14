@@ -72,6 +72,10 @@ FocusScope {
             ShellStore.toggleMicrophone()
             return
         }
+        if (index === 7) {
+            ShellStore.applyStreamShortcutAction("toggle-anti-afk")
+            return
+        }
         pendingAction = index
         closing = true
         if (reveal.progress === 0) Qt.callLater(root.finishAction)
@@ -99,6 +103,49 @@ FocusScope {
         const minutes = Math.floor((total % 3600) / 60)
         const seconds = total % 60
         return (hours > 0 ? hours + ":" : "") + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0")
+    }
+
+    component SessionToggle: Rectangle {
+        id: sessionToggle
+        property bool selected: false
+        property bool menuFocused: false
+        property bool checkable: false
+        property bool checked: false
+        property string title: ""
+        property string accessibleName: title
+        property string stateText: ""
+        property string description: ""
+        signal hoverEntered()
+        signal activated()
+        width: parent ? parent.width : 0
+        height: 40
+        radius: 10
+        opacity: enabled ? 1 : 0.5
+        color: selected ? "#1FFFFFFF" : "#0FFFFFFF"
+        border.width: selected ? 2 : 1
+        border.color: selected ? DesktopTokens.focus : "#17FFFFFF"
+        Accessible.role: Accessible.Button
+        Accessible.name: accessibleName
+        Accessible.description: description
+        Accessible.checkable: checkable
+        Accessible.checked: checked
+        Accessible.onPressAction: activated()
+        Text {
+            x: 14; anchors.verticalCenter: parent.verticalCenter
+            text: sessionToggle.title
+            color: DesktopTokens.textHigh; font.family: DesktopTokens.bodyFont; font.pixelSize: 11
+        }
+        Text {
+            anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
+            text: sessionToggle.stateText
+            color: sessionToggle.checkable && sessionToggle.checked ? DesktopTokens.green : DesktopTokens.textMuted
+            font.family: DesktopTokens.monoFont; font.pixelSize: 9
+        }
+        ToolTip.visible: sessionToggleHover.hovered || (menuFocused && selected)
+        ToolTip.text: description
+        ToolTip.delay: 600
+        HoverHandler { id: sessionToggleHover; onHoveredChanged: if (hovered) sessionToggle.hoverEntered() }
+        TapHandler { onTapped: sessionToggle.activated() }
     }
 
     MotionProgress {
@@ -132,7 +179,7 @@ FocusScope {
         x: Math.round((root.width - width) / 2)
         y: Math.round((root.height - height) / 2) - 2
         width: Math.min(760, root.width - 32)
-        height: Math.min(460, root.height - 32)
+        height: Math.min(512, root.height - 32)
         radius: 20
         color: Theme.lightMode ? Theme.shell : "#F00A0E15"
         border.width: 1
@@ -401,35 +448,29 @@ FocusScope {
                     HoverHandler { id: statsHover; onHoveredChanged: if (hovered) root.selectedIndex = 5 }
                     TapHandler { onTapped: root.runAction(5) }
                 }
-                Rectangle {
+                SessionToggle {
                     objectName: "streamMicrophoneControl"
-                    width: parent.width
-                    height: 40
-                    radius: 10
+                    selected: root.selectedIndex === 6
+                    menuFocused: root.activeFocus
                     enabled: ShellStore.microphoneCanToggle
-                    opacity: enabled ? 1 : 0.5
-                    color: root.selectedIndex === 6 ? "#1FFFFFFF" : "#0FFFFFFF"
-                    border.width: root.selectedIndex === 6 ? 2 : 1
-                    border.color: root.selectedIndex === 6 ? DesktopTokens.focus : "#17FFFFFF"
-                    Accessible.role: Accessible.Button
-                    Accessible.name: ShellStore.microphoneActionLabel
-                    Accessible.description: ShellStore.microphoneDescription
-                    Accessible.onPressAction: ShellStore.toggleMicrophone()
-                    Text {
-                        x: 14; anchors.verticalCenter: parent.verticalCenter
-                        text: ShellStore.microphoneToggleAvailable ? ShellStore.microphoneActionLabel : qsTr("Microphone")
-                        color: DesktopTokens.textHigh; font.family: DesktopTokens.bodyFont; font.pixelSize: 11
-                    }
-                    Text {
-                        anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
-                        text: ShellStore.microphoneLabel
-                        color: DesktopTokens.textMuted; font.family: DesktopTokens.monoFont; font.pixelSize: 9
-                    }
-                    ToolTip.visible: microphoneHover.hovered || (root.activeFocus && root.selectedIndex === 6)
-                    ToolTip.text: ShellStore.microphoneDescription
-                    ToolTip.delay: 600
-                    HoverHandler { id: microphoneHover; onHoveredChanged: if (hovered) root.selectedIndex = 6 }
-                    TapHandler { onTapped: root.runAction(6) }
+                    title: ShellStore.microphoneToggleAvailable ? ShellStore.microphoneActionLabel : qsTr("Microphone")
+                    accessibleName: ShellStore.microphoneActionLabel
+                    stateText: ShellStore.microphoneLabel
+                    description: ShellStore.microphoneDescription
+                    onHoverEntered: root.selectedIndex = 6
+                    onActivated: root.runAction(6)
+                }
+                SessionToggle {
+                    objectName: "streamAntiAfkControl"
+                    selected: root.selectedIndex === 7
+                    menuFocused: root.activeFocus
+                    checkable: true
+                    checked: ShellStore.antiAfkEnabled
+                    title: qsTr("Anti-AFK")
+                    stateText: ShellStore.antiAfkEnabled ? qsTr("On") : qsTr("Off")
+                    description: qsTr("Sends a short keypress every 4 minutes so GeForce NOW doesn't end the session while you're idle.")
+                    onHoverEntered: root.selectedIndex = 7
+                    onActivated: root.runAction(7)
                 }
             }
         }
@@ -462,10 +503,12 @@ FocusScope {
             root.runAction(0)
             event.accepted = true
         } else if (event.key === Qt.Key_Down) {
-            root.selectedIndex = Math.min(ShellStore.microphoneCanToggle ? 6 : 5, root.selectedIndex + 1)
+            const next = Math.min(7, root.selectedIndex + 1)
+            root.selectedIndex = next === 6 && !ShellStore.microphoneCanToggle ? 7 : next
             event.accepted = true
         } else if (event.key === Qt.Key_Up) {
-            root.selectedIndex = Math.max(0, root.selectedIndex - 1)
+            const previous = Math.max(0, root.selectedIndex - 1)
+            root.selectedIndex = previous === 6 && !ShellStore.microphoneCanToggle ? 5 : previous
             event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
             root.runAction(root.selectedIndex)

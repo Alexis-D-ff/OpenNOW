@@ -477,6 +477,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-push-invalidation"_s)
                      || m_arguments.contains(u"--smoke-bug-reports"_s)
                      || m_arguments.contains(u"--smoke-microphone"_s)
+                     || m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
                      || m_arguments.contains(u"--smoke-audio-output"_s)
                      || m_arguments.contains(u"--smoke-background-stream"_s)
                      || m_arguments.contains(u"--smoke-recording"_s)
@@ -516,6 +517,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/QueueDropsAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-microphone"_s)
             ? u"qrc:/acceptance/MicrophoneAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
+            ? u"qrc:/acceptance/DesktopAntiAfkAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-audio-output"_s)
             ? u"qrc:/acceptance/AudioOutputAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-background-stream"_s)

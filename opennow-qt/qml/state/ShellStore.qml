@@ -365,6 +365,8 @@ QtObject {
     property string sessionReportDropId: ""
     property var streamDropCounts: ({})
     onActiveSessionChanged: {
+        if (!activeSession)
+            antiAfkEnabled = false
         if (!activeSession && pendingAccountSwitch)
             Qt.callLater(continuePendingAccountSwitch)
         const sessionId = String(activeSession && activeSession.sessionId || "")
@@ -2713,6 +2715,16 @@ QtObject {
     function confirmStreamExit() {
         stopStreamingSession()
         AppController.showOverlay("")
+    }
+
+    function antiAfkIndicatorShown(elapsedSeconds) {
+        if (!antiAfkEnabled)
+            return false
+        if (Boolean(settings.showAntiAfkIndicator))
+            return true
+        const interval = Math.max(0, Number(settings.antiAfkReminderEveryMinutes || 0) * 60)
+        const duration = Math.max(1, Number(settings.antiAfkReminderDurationSeconds || 5))
+        return interval > 0 && elapsedSeconds % interval < duration
     }
 
     function applyStreamShortcutAction(action) {

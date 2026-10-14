@@ -2073,6 +2073,76 @@ private slots:
         QVERIFY(item->m_pressedKeys.isEmpty());
     }
 
+    void antiAfkShortcutIsConsumedBeforeGameplayForwarding_data()
+    {
+        QTest::addColumn<QString>("binding");
+        QTest::addColumn<int>("key");
+        QTest::addColumn<int>("modifiers");
+        QTest::addColumn<quint32>("scanCode");
+        QTest::newRow("default") << QStringLiteral("Ctrl+Shift+K") << int(Qt::Key_K)
+                                 << int(Qt::ControlModifier | Qt::ShiftModifier) << quint32(45);
+        QTest::newRow("rebound") << QStringLiteral("Ctrl+Alt+J") << int(Qt::Key_J)
+                                 << int(Qt::ControlModifier | Qt::AltModifier) << quint32(44);
+    }
+
+    void antiAfkShortcutIsConsumedBeforeGameplayForwarding()
+    {
+        QFETCH(QString, binding);
+        QFETCH(int, key);
+        QFETCH(int, modifiers);
+        QFETCH(quint32, scanCode);
+        static QList<QList<quint16>> inputCalls;
+        inputCalls.clear();
+        auto api = CursorSession::api();
+        api.submitKey = [](const OpenNowStreamer *, std::uint16_t key,
+                           std::uint16_t modifiers, bool pressed) {
+            inputCalls.append({key, modifiers, quint16(pressed)});
+            return OPENNOW_STREAMER_OK;
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        StreamVideoItem::setNativeStreamRuntime(&runtime);
+        const auto reset = qScopeGuard([] { StreamVideoItem::setNativeStreamRuntime(nullptr); });
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("anti-afk-shortcut")}}));
+        const QByteArray ready = R"({"id":"anti-afk-shortcut","type":"ok"})";
+        CursorSession::callbacks.response_callback(
+            reinterpret_cast<const std::uint8_t *>(ready.constData()), ready.size(),
+            CursorSession::callbacks.user_data);
+        QTRY_VERIFY(runtime.inputAllowed());
+        QQuickWindow window;
+        window.resize(640, 480);
+        auto *item = new StreamVideoItem(window.contentItem());
+        item->setRenderCallback({});
+        item->setSize(window.size());
+        item->setKeyboardLayout(QStringLiteral("en-US"));
+        item->setShortcutBindings({{QStringLiteral("toggle-anti-afk"), QVariantList{binding}}});
+        QSignalSpy shortcuts(item, &StreamVideoItem::localShortcutRequested);
+        window.show();
+        window.requestActivate();
+        QTRY_VERIFY(window.isActive());
+        item->forceActiveFocus();
+        QTRY_VERIFY(item->captureActive());
+        const auto send = [&](QEvent::Type type, Qt::KeyboardModifiers held) {
+            QKeyEvent event(type, key, held, scanCode, 0, 0);
+            QCoreApplication::sendEvent(&window, &event);
+        };
+
+        send(QEvent::KeyPress, Qt::KeyboardModifiers(modifiers));
+        send(QEvent::KeyRelease, Qt::KeyboardModifiers(modifiers));
+        QCOMPARE(shortcuts.size(), 1);
+        QCOMPARE(shortcuts.first().first().toString(), QStringLiteral("toggle-anti-afk"));
+        QVERIFY(inputCalls.isEmpty());
+        QVERIFY(item->m_pressedKeys.isEmpty());
+        QVERIFY(item->m_pressedShortcuts.isEmpty());
+
+        send(QEvent::KeyPress, Qt::NoModifier);
+        send(QEvent::KeyRelease, Qt::NoModifier);
+        QCOMPARE(shortcuts.size(), 1);
+        QCOMPARE(inputCalls.size(), 2);
+        QCOMPARE(inputCalls.first().first(), quint16(key));
+    }
+
     void altGrPreservesWireModifiersWithoutTriggeringLocalShortcuts()
     {
         QCOMPARE(StreamVideoItem::windowsVirtualKey(Qt::Key_AltGr), quint16(0xa5));

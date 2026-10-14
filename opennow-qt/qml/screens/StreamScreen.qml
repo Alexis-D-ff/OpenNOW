@@ -76,11 +76,6 @@ FocusScope {
     readonly property bool sessionClockVisible: Boolean(ShellStore.settings.sessionCounterEnabled) && videoReady
         && (elapsedSeconds < clockDuration
             || (clockInterval > 0 && elapsedSeconds % clockInterval < clockDuration))
-    readonly property int antiAfkReminderDuration: Math.max(1, Number(ShellStore.settings.antiAfkReminderDurationSeconds || 5))
-    readonly property int antiAfkReminderInterval: Math.max(0, Number(ShellStore.settings.antiAfkReminderEveryMinutes || 0) * 60)
-    readonly property bool antiAfkReminderVisible: ShellStore.antiAfkEnabled && videoReady
-        && !Boolean(ShellStore.settings.showAntiAfkIndicator) && antiAfkReminderInterval > 0
-        && elapsedSeconds % antiAfkReminderInterval < antiAfkReminderDuration
 
     function elapsed(value) {
         const hours = Math.floor(value / 3600)
@@ -425,8 +420,7 @@ FocusScope {
     GlassPanel {
         MotionProgress {
             id: afkMotion
-            shown: root.videoReady && ShellStore.antiAfkEnabled
-                && (Boolean(ShellStore.settings.showAntiAfkIndicator) || root.antiAfkReminderVisible)
+            shown: root.videoReady && ShellStore.antiAfkIndicatorShown(root.elapsedSeconds)
         }
         visible: afkMotion.present
         layer.enabled: HdrOutput.chromeRequired
