@@ -20,6 +20,10 @@ QtObject {
         property int leftStickDeadzone: 5
         property int rightStickDeadzone: 5
         property int vibrationIntensity: 100
+        property var controllerProfiles: ({})
+        property bool leftStickNavigationEnabled: true
+        function stickSample(instanceId) { return ({}) }
+        function testRumble(instanceId) { return false }
         signal controllerActivity()
         signal shellInputSkipRequested()
         signal controllerActivityDetailed(string device, string control, int value)

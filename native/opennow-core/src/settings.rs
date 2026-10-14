@@ -24,6 +24,14 @@ const SHORTCUT_KEYS: [&str; 9] = [
     "shortcutSaveClip",
 ];
 const RESERVED_SHORTCUTS: [&str; 2] = ["Ctrl+G", "Shift+F3"];
+const MAXIMUM_CONTROLLER_PROFILES: usize = 32;
+const MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS: usize = 160;
+const MAXIMUM_CONTROLLER_PROFILE_NAME_CHARS: usize = 80;
+const CONTROLLER_PROFILE_TUNING: [(&str, i64); 3] = [
+    ("leftStickDeadzone", 50),
+    ("rightStickDeadzone", 50),
+    ("vibrationIntensity", 100),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LoadPolicy {
@@ -984,6 +992,58 @@ fn normalize_bounded_strings(values: &mut Map<String, Value>) {
         .take(500)
         .collect();
     values.insert("homeTileSizes".to_owned(), Value::Object(tile_sizes));
+
+    values.insert(
+        "controllerProfiles".to_owned(),
+        Value::Object(normalize_controller_profiles(&values["controllerProfiles"])),
+    );
+}
+
+fn normalize_controller_profiles(value: &Value) -> Map<String, Value> {
+    let mut profiles: Vec<(String, Map<String, Value>, i64)> = value
+        .as_object()
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter_map(|(key, profile)| {
+            let key = key.trim();
+            if key.is_empty() || key.chars().count() > MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS {
+                return None;
+            }
+            let profile = profile.as_object()?;
+            let mut normalized = Map::new();
+            for (field, maximum) in CONTROLLER_PROFILE_TUNING {
+                if let Some(value) = profile.get(field).and_then(Value::as_i64) {
+                    normalized.insert(field.to_owned(), json!(value.clamp(0, maximum)));
+                }
+            }
+            if normalized.is_empty() {
+                return None;
+            }
+            if let Some(name) = profile.get("name").and_then(Value::as_str) {
+                let name: String = name
+                    .trim()
+                    .chars()
+                    .take(MAXIMUM_CONTROLLER_PROFILE_NAME_CHARS)
+                    .collect();
+                if !name.is_empty() {
+                    normalized.insert("name".to_owned(), Value::String(name));
+                }
+            }
+            let last_seen = profile
+                .get("lastSeen")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0);
+            normalized.insert("lastSeen".to_owned(), json!(last_seen));
+            Some((key.to_owned(), normalized, last_seen))
+        })
+        .collect();
+    profiles.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    profiles
+        .into_iter()
+        .take(MAXIMUM_CONTROLLER_PROFILES)
+        .map(|(key, profile, _)| (key, Value::Object(profile)))
+        .collect()
 }
 
 fn normalize_nested_settings(values: &mut Map<String, Value>) {
@@ -1122,7 +1182,7 @@ fn defaults() -> Map<String, Value> {
         "showTileLabels":true,
         "controllerMode":true, "controllerModePromptDismissed":false,
         "controllerLeftStickDeadzone":5, "controllerRightStickDeadzone":5,
-        "controllerVibrationIntensity":100,
+        "controllerVibrationIntensity":100, "controllerProfiles":{},
         "reducedMotion":false, "uiSoundsEnabled":true,
         "launchInConsoleMode":false, "startAsLastUsedAccount":false,
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
@@ -3098,6 +3158,122 @@ mod tests {
                 json!(12)
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn controller_profiles_keep_optional_fields_and_fall_back_to_globals() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profiles-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["controllerProfiles"], json!({}));
+        store.set("controllerLeftStickDeadzone", json!(9)).unwrap();
+        let saved = store
+            .set(
+                "controllerProfiles",
+                json!({
+                    "serial:054c:0ce6:abc": {"name": "  DualSense  ", "leftStickDeadzone": 12, "lastSeen": 20},
+                    "guid:030000005e040000e002000000006800": {"vibrationIntensity": 140, "rightStickDeadzone": -3},
+                    "guid:only-a-name": {"name": "No tuning"},
+                    "": {"leftStickDeadzone": 1},
+                    "guid:bad": "not an object",
+                    "guid:wrong-type": {"leftStickDeadzone": "high", "vibrationIntensity": 0.5}
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            json!({
+                "serial:054c:0ce6:abc": {"name": "DualSense", "leftStickDeadzone": 12, "lastSeen": 20},
+                "guid:030000005e040000e002000000006800": {"vibrationIntensity": 100, "rightStickDeadzone": 0, "lastSeen": 0}
+            })
+        );
+        let profile = &saved["serial:054c:0ce6:abc"];
+        assert!(profile.get("rightStickDeadzone").is_none());
+        assert!(profile.get("vibrationIntensity").is_none());
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(9));
+        assert_eq!(store.all()["controllerRightStickDeadzone"], json!(5));
+        assert_eq!(store.all()["controllerVibrationIntensity"], json!(100));
+        let reloaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(reloaded.all()["controllerProfiles"], saved);
+        for invalid in [json!(null), json!([]), json!("profiles"), json!(7)] {
+            assert_eq!(store.set("controllerProfiles", invalid).unwrap(), json!({}));
+        }
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(9));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn controller_profiles_are_bounded_by_most_recent_use() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profile-cap-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        let profiles: Map<String, Value> = (0..40)
+            .map(|index| {
+                (
+                    format!("guid:{index:02}"),
+                    json!({"leftStickDeadzone": 10, "lastSeen": index}),
+                )
+            })
+            .collect();
+        let long_key = "k".repeat(MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS + 1);
+        let mut with_long_key = profiles.clone();
+        with_long_key.insert(
+            long_key.clone(),
+            json!({"leftStickDeadzone": 1, "lastSeen": 99}),
+        );
+        let saved = store
+            .set("controllerProfiles", Value::Object(with_long_key))
+            .unwrap();
+        let saved = saved.as_object().unwrap();
+        assert_eq!(saved.len(), MAXIMUM_CONTROLLER_PROFILES);
+        assert!(!saved.contains_key(&long_key));
+        assert!(saved.contains_key("guid:39"));
+        assert!(saved.contains_key("guid:08"));
+        assert!(!saved.contains_key("guid:07"));
+        let mut persisted: Value =
+            serde_json::from_slice(&fs::read(directory.join("settings.json")).unwrap()).unwrap();
+        persisted["controllerProfiles"] = Value::Object(profiles);
+        fs::write(
+            directory.join("settings.json"),
+            serde_json::to_vec(&persisted).unwrap(),
+        )
+        .unwrap();
+        let loaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(
+            loaded.all()["controllerProfiles"]
+                .as_object()
+                .unwrap()
+                .len(),
+            MAXIMUM_CONTROLLER_PROFILES
+        );
+        assert_eq!(store.reset().unwrap()["controllerProfiles"], json!({}));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_saved_before_controller_profiles_load_with_empty_profiles() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profile-legacy-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("settings.json"),
+            br#"{"controllerLeftStickDeadzone":17,"controllerVibrationIntensity":40}"#,
+        )
+        .unwrap();
+        let store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(17));
+        assert_eq!(store.all()["controllerVibrationIntensity"], json!(40));
+        assert_eq!(store.all()["controllerProfiles"], json!({}));
         fs::remove_dir_all(directory).unwrap();
     }
 

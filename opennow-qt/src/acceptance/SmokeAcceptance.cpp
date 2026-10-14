@@ -543,6 +543,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-bug-reports"_s)
                      || m_arguments.contains(u"--smoke-microphone"_s)
                      || m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
+                     || m_arguments.contains(u"--smoke-stream-controllers"_s)
                      || m_arguments.contains(u"--smoke-audio-output"_s)
                      || m_arguments.contains(u"--smoke-background-stream"_s)
                      || m_arguments.contains(u"--smoke-recording"_s)
@@ -584,6 +585,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/MicrophoneAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-desktop-anti-afk"_s)
             ? u"qrc:/acceptance/DesktopAntiAfkAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-stream-controllers"_s)
+            ? u"qrc:/acceptance/DesktopStreamControllersAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-audio-output"_s)
             ? u"qrc:/acceptance/AudioOutputAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-background-stream"_s)
@@ -620,6 +623,11 @@ int AcceptanceSession::startSmokeWorkload()
         fixture->setParent(&m_engine);
         if (m_arguments.contains(u"--smoke-console-spacing"_s))
             fixture->setProperty("recordingSection", m_arguments.contains(u"--smoke-spacing-recording"_s));
+        if (m_arguments.contains(u"--smoke-stream-controllers"_s)) {
+            auto *input = fixture->property("input").value<QObject *>();
+            if (!input) return EXIT_FAILURE;
+            m_engine.rootContext()->setContextProperty(u"ControllerInput"_s, input);
+        }
         if (m_arguments.contains(u"--smoke-stream-recovery"_s)
             || m_arguments.contains(u"--smoke-microphone"_s)
             || m_arguments.contains(u"--smoke-recording"_s)
@@ -668,6 +676,7 @@ int AcceptanceSession::startSmokeWorkload()
                 });
             }
             if (ok && (m_arguments.contains(u"--smoke-command-search"_s)
+                       || m_arguments.contains(u"--smoke-stream-controllers"_s)
                        || m_arguments.contains(u"--smoke-shortcuts"_s)
                        || m_arguments.contains(u"--smoke-console-settings"_s)
                        || m_arguments.contains(u"--bug-report-notice-check"_s)

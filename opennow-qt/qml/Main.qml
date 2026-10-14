@@ -316,6 +316,11 @@ ApplicationWindow {
         property: "vibrationIntensity"
         value: Number(ShellStore.settings.controllerVibrationIntensity ?? 100)
     }
+    Binding {
+        target: ControllerInput
+        property: "controllerProfiles"
+        value: ShellStore.settings.controllerProfiles || ({})
+    }
 
     Shortcut {
         objectName: "configuredStreamStatsShortcut"
