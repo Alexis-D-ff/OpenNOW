@@ -46,8 +46,10 @@ For isolated Advanced-panel acceptance, add `--smoke-settings-panel` with
 `--smoke-renew-settings-actions` checks the new controls' settings callbacks
 without starting the core or making network requests.
 
-The HDR toggle remains disabled because the native session API cannot request
-HDR. Mouse capture follows the server cursor and the existing F8 shortcut;
+The HDR toggle enables when the display supports HDR, a 10-bit H.265 or AV1
+hardware decoder is available, and membership allows 10-bit, and the session
+request carries that choice. Mouse capture follows the server cursor and the
+existing F8 shortcut;
 the UI does not pretend that a persistent relative/absolute override exists.
 
 Verified on Windows with Qt 6.11.2: all 104 Qt/acceptance tests, five Rust settings
