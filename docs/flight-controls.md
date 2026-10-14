@@ -130,7 +130,7 @@ and [X56](https://github.com/Chryseus/x56linux).
 
 `C272` is shared by two models, and `B697` varies by revision and does not establish
 a firmware mode. The list retains those ambiguities. Paper's T.Flight Rudder
-Pedals row is not in this allowlist; `B68F` identifies TPR instead. The seven wheel
+Pedals row is not in this allowlist; `B68F` identifies TPR instead. The seven Logitech wheel
 IDs include G PRO and RS50, so the UI does not collapse them into G29/G920/G923.
 
 ### Visual acceptance
