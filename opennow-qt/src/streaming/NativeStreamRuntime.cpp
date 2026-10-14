@@ -206,6 +206,7 @@ struct NativeStreamRuntime::Private {
     std::atomic_bool inputAllowed{false};
     bool inputAuthorizationPending = false;
     bool serverCursorComposited = true;
+    bool defaultRelativeMouse = false;
     QString cursorStartId;
     QString sessionStartId;
     QString presentationStartId;
@@ -458,6 +459,11 @@ bool NativeStreamRuntime::serverCursorComposited() const
     return d->serverCursorComposited;
 }
 
+bool NativeStreamRuntime::defaultRelativeMouse() const
+{
+    return d->defaultRelativeMouse;
+}
+
 bool NativeStreamRuntime::send(const QJsonObject &command)
 {
     return sendBytes(QJsonDocument(command).toJson(QJsonDocument::Compact));
@@ -499,6 +505,7 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
     }
     if (type == u"start"_s || type == u"stop"_s) {
         invalidatePresentation();
+        d->defaultRelativeMouse = false;
         d->sessionStartId = type == u"start"_s ? object.value(u"id"_s).toString() : QString{};
         if (type == u"start"_s) {
             d->serverCursorComposited = true;
@@ -520,6 +527,7 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
 
 bool NativeStreamRuntime::shutdown(int timeoutMs)
 {
+    d->defaultRelativeMouse = false;
     resetInputCapture();
     invalidatePresentation();
     OpenNowStreamer *handle = nullptr;
@@ -1039,6 +1047,12 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
             d->presentationStartId.clear();
             d->upstreamProgressSamples.publish(false, false, 0, 0);
             d->presentationAllowed.store(kind == u"ok"_s, std::memory_order_release);
+            const bool defaultRelativeMouse = kind == u"ok"_s
+                && document.object().value(u"transport"_s).toString() == u"webrtc"_s;
+            if (std::exchange(d->defaultRelativeMouse, defaultRelativeMouse) != defaultRelativeMouse) {
+                emit cursorStateReset();
+                if (!current()) return;
+            }
             const bool allowed = std::exchange(d->inputAuthorizationPending, false) && kind == u"ok"_s;
             if (d->inputAllowed.exchange(allowed, std::memory_order_acq_rel) != allowed) {
                 emit inputAllowedChanged();

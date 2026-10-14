@@ -470,6 +470,29 @@ fn media_overload_drops_delta_frames_until_reference_and_requests_pli() {
 }
 
 #[test]
+fn local_peer_delivers_signed_relative_mouse_motion() {
+    let mut peer = Peer::connect(1);
+    let mut motion = vec![0; 22];
+    motion[..4].copy_from_slice(&7_u32.to_le_bytes());
+    motion[4..6].copy_from_slice(&(-12_i16).to_be_bytes());
+    motion[6..8].copy_from_slice(&34_i16.to_be_bytes());
+    motion[14..22].copy_from_slice(&1234_u64.to_be_bytes());
+    peer.control().send_input(motion.clone(), false).unwrap();
+    peer.until(|peer| {
+        peer.received
+            .iter()
+            .any(|packet| packet.first() == Some(&0x23) && packet.get(9) == Some(&0x21))
+    });
+    let packet = peer
+        .received
+        .iter()
+        .find(|packet| packet.first() == Some(&0x23) && packet.get(9) == Some(&0x21))
+        .unwrap();
+    assert_eq!(&packet[10..12], &22_u16.to_be_bytes());
+    assert_eq!(&packet[12..], motion);
+}
+
+#[test]
 fn command_bounds_and_stop_do_not_depend_on_queue_space() {
     let (commands, receiver) = mpsc::sync_channel(1);
     let control = TransportControl {

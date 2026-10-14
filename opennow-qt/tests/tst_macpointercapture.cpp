@@ -5,6 +5,7 @@
 #include <QPlatformSurfaceEvent>
 #include <QSignalSpy>
 #include <QResizeEvent>
+#include <QScopeGuard>
 #include <QTest>
 #include <QWindow>
 #include <limits>
@@ -382,6 +383,38 @@ private slots:
         native->move({std::numeric_limits<double>::infinity(), 0});
         QVERIFY(!capture.locked());
         QVERIFY(!capture.error().isEmpty());
+    }
+
+    void inactiveApplicationCannotReacquireBeforeWindowDeactivation()
+    {
+        QWindow window;
+        window.resize(640, 480);
+        window.show();
+        window.requestActivate();
+        QTRY_VERIFY(window.isActive());
+        const auto native = std::make_shared<NativeState>();
+        MacPointerCapture capture(std::make_unique<FakeNativeOperations>(native));
+        const QRect region(0, 0, 640, 480);
+        capture.setCapture(&window, true, region);
+        QVERIFY(capture.locked());
+        QVERIFY(QMetaObject::invokeMethod(qApp, "applicationStateChanged", Qt::DirectConnection,
+                                          Q_ARG(Qt::ApplicationState, Qt::ApplicationInactive)));
+        const auto restoreApplication = qScopeGuard([] {
+            QMetaObject::invokeMethod(qApp, "applicationStateChanged", Qt::DirectConnection,
+                                     Q_ARG(Qt::ApplicationState, Qt::ApplicationActive));
+        });
+        QVERIFY(!capture.locked());
+        QVERIFY(window.isActive());
+        const auto calls = native->calls;
+        capture.setCapture(&window, true, region);
+        QVERIFY(!capture.locked());
+        QCOMPARE(native->calls, calls);
+        QSignalSpy changes(&capture, &MacPointerCapture::stateChanged);
+        QVERIFY(QMetaObject::invokeMethod(qApp, "applicationStateChanged", Qt::DirectConnection,
+                                          Q_ARG(Qt::ApplicationState, Qt::ApplicationActive)));
+        QCOMPARE(changes.count(), 1);
+        capture.setCapture(&window, true, region);
+        QVERIFY(capture.locked());
     }
 
     void releaseDuringMotionStopsRemainingChunks()
