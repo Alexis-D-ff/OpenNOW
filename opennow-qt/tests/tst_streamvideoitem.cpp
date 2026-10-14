@@ -219,6 +219,7 @@ class StreamVideoItemTest final : public QObject
 
     struct CursorSession {
         inline static OpenNowStreamerConfig callbacks;
+        inline static QList<QPoint> motions;
 
         static NativeStreamRuntime::Api api()
         {
@@ -239,16 +240,24 @@ class StreamVideoItemTest final : public QObject
                 *raw = false;
                 return OPENNOW_STREAMER_OK;
             };
+            api.submitMouseRelative = [](const OpenNowStreamer *, std::int16_t x, std::int16_t y) {
+                motions.append(QPoint(x, y));
+                return OPENNOW_STREAMER_OK;
+            };
             return api;
         }
 
-        bool start()
+        bool start(const QString &transport = {})
         {
+            motions.clear();
             if (!runtime.start()) return false;
             StreamVideoItem::setNativeStreamRuntime(&runtime);
             if (!runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
                                {QStringLiteral("id"), QStringLiteral("cursor-test")}})) return false;
-            const QByteArray ready = R"({"id":"cursor-test","type":"ok"})";
+            const QByteArray ready = QJsonDocument(QJsonObject{
+                {QStringLiteral("id"), startId},
+                {QStringLiteral("type"), QStringLiteral("ok")},
+                {QStringLiteral("transport"), transport}}).toJson(QJsonDocument::Compact);
             callbacks.response_callback(reinterpret_cast<const std::uint8_t *>(ready.constData()),
                                         ready.size(), callbacks.user_data);
             window.resize(640, 480);
@@ -635,13 +644,115 @@ private slots:
         QVERIFY(!item.relativeMouse());
     }
 
+    void macAbsoluteCursorStaysVisibleWithoutNativeLock_data()
+    {
+        QTest::addColumn<bool>("fullscreen");
+        QTest::newRow("windowed") << false;
+        QTest::newRow("fullscreen") << true;
+    }
+
+    void macAbsoluteCursorStaysVisibleWithoutNativeLock()
+    {
+        QFETCH(bool, fullscreen);
+        struct PointerState {
+            bool associated = true;
+            int hideCount = 0;
+            std::function<void(QPointF)> motion;
+        } pointer;
+        class Operations final : public MacPointerCapture::NativeOperations {
+        public:
+            explicit Operations(PointerState &state) : state(state) {}
+            QString associate(bool value) override { state.associated = value; return {}; }
+            QString center(QWindow *, const QRect &) override { return {}; }
+            QString setHidden(bool value) override { state.hideCount += value ? 1 : -1; return {}; }
+            QString startMotion(QWindow *, std::function<void(QPointF)> callback) override
+            { state.motion = std::move(callback); return {}; }
+            void stopMotion() override { state.motion = {}; }
+            PointerState &state;
+        };
+        CursorSession session;
+        QVERIFY(session.start());
+        if (fullscreen) session.window.showFullScreen();
+        session.window.requestActivate();
+        StreamVideoItem item(
+            std::make_unique<MacPointerCapture>(std::make_unique<Operations>(pointer)),
+            true, session.window.contentItem());
+        item.setRenderCallback({});
+        item.setSize(session.window.size());
+        item.forceActiveFocus();
+        QTRY_VERIFY(item.captureActive());
+        QVERIFY(!item.relativeMouse());
+        QVERIFY(item.m_serverCursorComposited);
+        QVERIFY(!item.m_macPointer->locked());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
+        QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
+        session.composition(false);
+        QTRY_VERIFY(!item.m_serverCursorComposited);
+        item.applyRemoteCursor(QByteArray::fromHex("0002"));
+        QCOMPARE(item.cursor().shape(), Qt::IBeamCursor);
+        session.composition(true);
+        QTRY_VERIFY(item.m_serverCursorComposited);
+        QCOMPARE(item.cursor().shape(), Qt::IBeamCursor);
+        item.togglePointerLock();
+        QVERIFY(item.m_macPointer->locked());
+        QVERIFY(!pointer.associated);
+        QCOMPARE(pointer.hideCount, 1);
+        QCOMPARE(item.cursor().shape(), Qt::BlankCursor);
+        item.m_decodedVideoSize = QSize(1280, 720);
+        item.refreshVideoSize();
+        QVERIFY(item.m_macPointer->locked());
+        QVERIFY(!pointer.associated);
+        QCOMPARE(pointer.hideCount, 1);
+        QQuickItem overlay(session.window.contentItem());
+        overlay.forceActiveFocus();
+        QTRY_VERIFY(!item.captureActive());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
+        QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
+        item.forceActiveFocus();
+        QTRY_VERIFY(item.m_macPointer->locked());
+        QCOMPARE(pointer.hideCount, 1);
+        item.togglePointerLock();
+        QVERIFY(!item.m_macPointer->locked());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
+        QCOMPARE(item.cursor().shape(), Qt::IBeamCursor);
+    }
+
+    void relativeMouseDefaultIsUpdatedForAnExistingStreamItem()
+    {
+        CursorSession session;
+        QVERIFY(session.start(QStringLiteral("nvst")));
+        StreamVideoItem item(session.window.contentItem());
+        item.setRenderCallback({});
+        item.setSize(session.window.size());
+        item.forceActiveFocus();
+        QTRY_VERIFY(item.captureActive());
+        QVERIFY(!item.relativeMouse());
+        QVERIFY(session.runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                      {QStringLiteral("id"), QStringLiteral("webrtc-restart")}}));
+        QVERIFY(!item.captureActive());
+        QVERIFY(!item.relativeMouse());
+        const QByteArray ready = R"({"id":"webrtc-restart","type":"ok","transport":"webrtc"})";
+        CursorSession::callbacks.response_callback(
+            reinterpret_cast<const std::uint8_t *>(ready.constData()), ready.size(),
+            CursorSession::callbacks.user_data);
+        QTRY_VERIFY(item.captureActive());
+        QVERIFY(item.relativeMouse());
+        item.togglePointerLock();
+        QVERIFY(!item.relativeMouse());
+        item.resetRemoteCursor();
+        QVERIFY(!item.relativeMouse());
+    }
+
     void macCursorVisibilityTracksCaptureAndServerHandoff()
     {
         StreamVideoItem item;
         item.m_usesMacPointerCapture = true;
         item.m_captureActive = true;
         item.updateLocalCursor();
-        QCOMPARE(item.cursor().shape(), Qt::BlankCursor);
+        QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
         item.m_manualRelativeMouse = false;
         item.updateLocalCursor();
         QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
@@ -658,6 +769,110 @@ private slots:
         item.m_captureActive = false;
         item.updateLocalCursor();
         QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void acceptedTransportControlsMacCaptureDefault_data()
+    {
+        QTest::addColumn<QString>("transport");
+        QTest::addColumn<bool>("fullscreen");
+        QTest::newRow("webrtc-windowed") << QStringLiteral("webrtc") << false;
+        QTest::newRow("webrtc-fullscreen") << QStringLiteral("webrtc") << true;
+        QTest::newRow("nvst-windowed") << QStringLiteral("nvst") << false;
+        QTest::newRow("nvst-fullscreen") << QStringLiteral("nvst") << true;
+    }
+
+    void acceptedTransportControlsMacCaptureDefault()
+    {
+        QFETCH(QString, transport);
+        QFETCH(bool, fullscreen);
+        struct PointerState {
+            bool associated = true;
+            int hideCount = 0;
+            std::function<void(QPointF)> motion;
+        } pointer;
+        class Operations final : public MacPointerCapture::NativeOperations {
+        public:
+            explicit Operations(PointerState &state) : state(state) {}
+            QString associate(bool value) override { state.associated = value; return {}; }
+            QString center(QWindow *, const QRect &) override { return {}; }
+            QString setHidden(bool value) override { state.hideCount += value ? 1 : -1; return {}; }
+            QString startMotion(QWindow *, std::function<void(QPointF)> callback) override
+            { state.motion = std::move(callback); return {}; }
+            void stopMotion() override { state.motion = {}; }
+            PointerState &state;
+        };
+        CursorSession session;
+        QVERIFY(session.start(transport));
+        QTRY_VERIFY(session.runtime.inputAllowed());
+        if (fullscreen) session.window.showFullScreen();
+        session.window.requestActivate();
+        QTRY_VERIFY(session.window.isActive());
+        StreamVideoItem item(
+            std::make_unique<MacPointerCapture>(std::make_unique<Operations>(pointer)),
+            true, session.window.contentItem());
+        item.setRenderCallback({});
+        item.setSize(session.window.size());
+        QVERIFY(!item.m_macPointer->locked());
+        QMouseEvent click(QEvent::MouseButtonPress, QPointF(100, 100), QPointF(100, 100),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        item.mousePressEvent(&click);
+        QVERIFY(click.isAccepted());
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(100, 100), QPointF(100, 100),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        item.mouseReleaseEvent(&release);
+        QTRY_VERIFY(item.captureActive());
+        const bool webrtc = transport == QStringLiteral("webrtc");
+        QCOMPARE(item.relativeMouse(), webrtc);
+        QCOMPARE(item.m_macPointer->locked(), webrtc);
+        QCOMPARE(pointer.associated, !webrtc);
+        QCOMPARE(pointer.hideCount, webrtc ? 1 : 0);
+        if (!webrtc) {
+            item.applyRemoteCursor(QByteArray::fromHex("0000"));
+            QVERIFY(item.m_macPointer->locked());
+        }
+        QVERIFY(pointer.motion);
+        const auto move = pointer.motion;
+        move(QPointF(-12, 34));
+        QCOMPARE(CursorSession::motions, QList<QPoint>{QPoint(-12, 34)});
+        item.togglePointerLock();
+        QVERIFY(!item.relativeMouse());
+        QVERIFY(!item.m_macPointer->locked());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
+        QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
+        QQuickItem overlay(session.window.contentItem());
+        overlay.forceActiveFocus();
+        QTRY_VERIFY(!item.captureActive());
+        item.forceActiveFocus();
+        QTRY_VERIFY(item.captureActive());
+        QVERIFY(!item.relativeMouse());
+        QVERIFY(!item.m_macPointer->locked());
+        item.togglePointerLock();
+        QVERIFY(item.m_macPointer->locked());
+        QVERIFY(!pointer.associated);
+        QCOMPARE(pointer.hideCount, 1);
+
+        QVERIFY(session.runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                      {QStringLiteral("id"), QStringLiteral("replacement")}}));
+        QVERIFY(!item.captureActive());
+        QVERIFY(!item.m_macPointer->locked());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
+        const QByteArray stale = R"({"id":"cursor-test","type":"ok","transport":"webrtc"})";
+        CursorSession::callbacks.response_callback(
+            reinterpret_cast<const std::uint8_t *>(stale.constData()), stale.size(),
+            CursorSession::callbacks.user_data);
+        QCoreApplication::processEvents();
+        QVERIFY(!item.captureActive());
+        const QByteArray replacement = R"({"id":"replacement","type":"ok","transport":"nvst"})";
+        CursorSession::callbacks.response_callback(
+            reinterpret_cast<const std::uint8_t *>(replacement.constData()), replacement.size(),
+            CursorSession::callbacks.user_data);
+        QTRY_VERIFY(item.captureActive());
+        QVERIFY(!item.relativeMouse());
+        QVERIFY(!item.m_macPointer->locked());
+        QVERIFY(pointer.associated);
+        QCOMPARE(pointer.hideCount, 0);
     }
 
     void cursorOwnershipSurvivesOverlaysFullscreenAndRestart()
@@ -755,7 +970,7 @@ private slots:
                         item.m_remoteCursor = QCursor(Qt::CrossCursor);
                         item.updateLocalCursor();
                         QCOMPARE(item.cursor().shape(), !capture ? Qt::ArrowCursor
-                            : relative || composited ? Qt::BlankCursor : Qt::CrossCursor);
+                            : relative || (composited && !mac) ? Qt::BlankCursor : Qt::CrossCursor);
                     }
                 }
             }

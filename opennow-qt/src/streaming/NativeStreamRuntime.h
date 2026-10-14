@@ -111,6 +111,7 @@ public:
     [[nodiscard]] UpstreamProgress upstreamProgress() const;
     [[nodiscard]] bool inputAllowed() const;
     [[nodiscard]] bool serverCursorComposited() const;
+    [[nodiscard]] bool defaultRelativeMouse() const;
     [[nodiscard]] const OpenNowStreamerVulkanDevice *vulkanDevice() const;
     enum class PresentationFailure { Recoverable, Unsupported };
     void logRenderDiagnostic(const QString &detail);

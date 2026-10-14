@@ -1210,6 +1210,73 @@ private slots:
         QVERIFY(runtime.shutdown());
     }
 
+    void relativeMouseDefaultUsesOnlyTheAcceptedSessionTransport()
+    {
+        static OpenNowStreamerConfig callbacks;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbacks = *config;
+            return fakeCreate(config, output);
+        };
+        api.send = [](const OpenNowStreamer *, const std::uint8_t *, std::size_t) {
+            return sendStatus;
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QSignalSpy resets(&runtime, &NativeStreamRuntime::cursorStateReset);
+        QList<bool> authorizedDefaults;
+        connect(&runtime, &NativeStreamRuntime::inputAllowedChanged, &runtime, [&] {
+            if (runtime.inputAllowed()) authorizedDefaults.append(runtime.defaultRelativeMouse());
+        });
+        const auto deliver = [](const QByteArray &bytes) {
+            callbacks.response_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                                        bytes.size(), callbacks.user_data);
+        };
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("first")}}));
+        deliver(R"({"id":"first","type":"ok","transport":"webrtc"})");
+        QTRY_VERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.defaultRelativeMouse());
+        QCOMPARE(authorizedDefaults, QList<bool>{true});
+        QCOMPARE(resets.count(), 2);
+        sendStatus = OPENNOW_STREAMER_QUEUE_FULL;
+        const auto restore = qScopeGuard([] { sendStatus = OPENNOW_STREAMER_OK; });
+        QVERIFY(!runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                               {QStringLiteral("id"), QStringLiteral("rejected")}}));
+        QVERIFY(runtime.defaultRelativeMouse());
+        QVERIFY(runtime.inputAllowed());
+        sendStatus = OPENNOW_STREAMER_OK;
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("replacement")}}));
+        QVERIFY(!runtime.defaultRelativeMouse());
+        deliver(R"({"id":"first","type":"ok","transport":"webrtc"})");
+        QCoreApplication::processEvents();
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QVERIFY(!runtime.inputAllowed());
+        deliver(R"({"id":"replacement","type":"error","transport":"webrtc"})");
+        QCoreApplication::processEvents();
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QVERIFY(!runtime.inputAllowed());
+        for (const auto &transport : {QStringLiteral("nvst"), QStringLiteral(""),
+                                     QStringLiteral("unknown")}) {
+            QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                  {QStringLiteral("id"), transport + QStringLiteral("-session")}}));
+            deliver(QJsonDocument(QJsonObject{
+                {QStringLiteral("id"), transport + QStringLiteral("-session")},
+                {QStringLiteral("type"), QStringLiteral("ok")},
+                {QStringLiteral("transport"), transport}}).toJson(QJsonDocument::Compact));
+            QTRY_VERIFY(runtime.inputAllowed());
+            QVERIFY(!runtime.defaultRelativeMouse());
+        }
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("shutdown-session")}}));
+        deliver(R"({"id":"shutdown-session","type":"ok","transport":"webrtc"})");
+        QTRY_VERIFY(runtime.defaultRelativeMouse());
+        QVERIFY(runtime.shutdown());
+        QVERIFY(!runtime.defaultRelativeMouse());
+    }
+
     void lateRenderFailureKeepsItsOriginalSessionGeneration()
     {
         NativeStreamRuntime runtime(fakeApi());
