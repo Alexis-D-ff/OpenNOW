@@ -618,9 +618,10 @@ jobs:
         run: |
           [[ "$(uname -m)" == arm64 ]]
           python3 -m unittest discover -s opennow-qt/tests -p 'test_macos_*.py'
+          python3 -m unittest discover -s opennow-qt/packaging -p test_macos_awdl.py
           cargo test --manifest-path native/opennow-core/Cargo.toml --locked
           cargo test --manifest-path native/opennow-streamer/Cargo.toml --locked \
-            -p opennow-streamer-platform-macos -p opennow-streamer-protocol -p opennow-streamer-ffi
+            -p opennow-streamer-platform-macos -p opennow-streamer-protocol -p opennow-streamer-ffi -p opennow-awdl-helper
 
       - name: Configure and build Qt native release
         shell: bash
@@ -689,6 +690,12 @@ jobs:
               test -x "$bin/$executable"
               lipo "$bin/$executable" -verify_arch arm64
             done
+            test -x "$app/Contents/Helpers/opennow-awdl-helper"
+            lipo "$app/Contents/Helpers/opennow-awdl-helper" -verify_arch arm64
+            /usr/bin/codesign --verify --strict "$app/Contents/Helpers/opennow-awdl-helper"
+            /usr/bin/codesign --display --verbose=4 "$app/Contents/Helpers/opennow-awdl-helper" 2>&1 \
+              | grep -Fx 'Identifier=io.github.opencloudgaming.OpenNOW.awdl-helper'
+            plutil -lint "$app/Contents/Resources/opennow-awdl.plist"
             test -f "$bin/libopennow_streamer_ffi.dylib"
             lipo "$bin/libopennow_streamer_ffi.dylib" -verify_arch arm64
             otool -D "$bin/libopennow_streamer_ffi.dylib" \
@@ -718,10 +725,13 @@ jobs:
 
           bin_dir = Path(sys.argv[1])
           for name in ("OpenNOW", "opennow-core", "opennow-acceptance-verify",
-                       "opennow-update-helper", "opennow-streamer", "libopennow_streamer_ffi.dylib"):
+                       "opennow-update-helper", "opennow-streamer", "libopennow_streamer_ffi.dylib",
+                       "../Helpers/opennow-awdl-helper"):
               dependencies = subprocess.check_output(["otool", "-L", bin_dir / name], text=True)
               for line in dependencies.splitlines()[1:]:
                   dependency = line.strip().split(" (", 1)[0]
+                  if name == "../Helpers/opennow-awdl-helper":
+                      assert dependency.startswith(("/System/Library/", "/usr/lib/")), (name, dependency)
                   assert not dependency.startswith("/") or dependency.startswith(
                       ("/System/Library/", "/usr/lib/")), (name, dependency)
           probe = subprocess.run(

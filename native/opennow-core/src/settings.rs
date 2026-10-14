@@ -1099,6 +1099,7 @@ fn defaults() -> Map<String, Value> {
         "encoderPreference":"auto", "colorQuality":"8bit_420", "enableHdr":false, "region":"", "regionProviderIdpId":"", "providerRegions":{},
         "suppressTenBitWarning":false,
         "sessionProxyEnabled":false, "sessionProxyUrl":"", "clipboardPaste":false, "networkTest":false,
+        "suppressAwdlWhileStreaming":false,
         "enableGyroscopeControls":false, "steamControllerCompatibilityMode":false,
         "nativeCursorOverlay":true, "mouseSensitivity":1, "mouseAcceleration":1,
         "shortcutToggleStats":"Ctrl+N", "shortcutTogglePointerLock":"F8",
@@ -1540,6 +1541,40 @@ mod tests {
                 json!(false)
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn awdl_suppression_is_opt_in_boolean_and_persisted() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-awdl-setting-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["suppressAwdlWhileStreaming"], json!(false));
+        assert_eq!(
+            store
+                .set("suppressAwdlWhileStreaming", json!(true))
+                .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            SettingsStore::load(Some(directory.clone())).unwrap().all()["suppressAwdlWhileStreaming"],
+            json!(true)
+        );
+        for invalid in [json!("true"), json!(1), json!(null), json!([]), json!({})] {
+            assert_eq!(
+                store.set("suppressAwdlWhileStreaming", invalid).unwrap(),
+                json!(false)
+            );
+        }
+        store
+            .set("suppressAwdlWhileStreaming", json!(true))
+            .unwrap();
+        store.reset().unwrap();
+        assert_eq!(store.all()["suppressAwdlWhileStreaming"], json!(false));
         fs::remove_dir_all(directory).unwrap();
     }
 

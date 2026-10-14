@@ -268,7 +268,7 @@ cpack --config build/opennow-qt/CPackConfig.cmake -G 'DragNDrop;ZIP' -B build/qt
 CMake selects the matching Rust target; an explicitly supplied
 `OPENNOW_RUST_TARGET` must agree with the Qt architecture. The app bundle carries
 the core, acceptance verifier, standalone capability probe, embedded streamer
-dylib, and deployed Qt/SDL3 libraries. The FFI dylib uses an `@rpath` install name
+dylib, macOS AWDL helper, and deployed Qt/SDL3 libraries. The FFI dylib uses an `@rpath` install name
 so it can load outside the build tree.
 The app explicitly links Qt Svg so macdeployqt includes the SVG image plugin used
 by the QML icons; the relocated-bundle check requires that plugin to be present.
@@ -282,6 +282,23 @@ notarization and require manual updates. See
 Windows MSI/portable ZIP contract. Offscreen tests cover shell and FFI
 contracts; real VideoToolbox/Metal presentation, audio, input capture, and login
 still require macOS hardware and a GFN account.
+
+The macOS-only `opennow-awdl-helper` crate uses Rust's standard library and `libc`.
+CMake builds it for the configured Qt architecture and Debug or Release profile,
+without the streamer's media features. It is bundled at
+`Contents/Helpers/opennow-awdl-helper`; its LaunchDaemon template is
+`Contents/Resources/opennow-awdl.plist`. Packaging does not install a privileged
+service on the build host or the user's Mac.
+
+AWDL suppression during streaming is opt-in and off by default. Installing the
+helper requires a separate administrator approval. The helper keeps `awdl0` down
+while OpenNOW holds a streaming lease, then restores the state it changed when
+the last lease ends. AirDrop, AirPlay, Sidecar, Universal Control, and other
+Continuity features can stop working for all users while suppression is active.
+See [the macOS AWDL helper contract](../docs/macos-awdl-helper.md) for installation
+requirements, signing limitations, crash recovery, and removal. Run the
+[macOS acceptance checks](../docs/qt-acceptance.md#macos-awdl-helper) before relying
+on the feature on a real Mac.
 
 Relative mouse mode uses native CoreGraphics pointer capture on macOS, not repeated
 cursor warps. F8 (or the configured pointer-lock shortcut) explicitly locks or
@@ -329,19 +346,11 @@ stepper as Settings. Selection still edits the onboarding draft rather than savi
 immediately. Short pages center within the available content area; longer pages
 remain scrollable, including keyboard focus inside the expanded resolution picker.
 
-On macOS, setup requires the `awdl0` interface to be down. The Network check step,
-which appears only where the AWDL controller is supported, offers an explicit,
-confirmed disable action using the macOS administrator prompt. Finish and Skip
-both check the current interface state, with a fresh check before sending the
-completion-marker write after the other settings. Enabled, unreadable and busy
-states block completion and return to the Network check without discarding the draft. A
-confirmed absent interface needs no change; other platforms have no AWDL requirement.
-Re-enabling AWDL from the card undoes the network change and blocks completion again.
-OpenNOW never disables AWDL automatically, stores administrator credentials, or
-installs a service. Disabling AWDL can interrupt AirDrop, AirPlay, Sidecar and other
-Continuity features for all users. macOS may re-enable it after the check; OpenNOW
-does not enforce its state after setup. An interface-down reading is not proof of
-zero AWDL radio traffic or a guaranteed fix for streaming stutter.
+On macOS, the Network check offers the optional AWDL helper described above.
+Leaving suppression off, declining administrator approval, or having no helper
+does not block setup or streaming. OpenNOW never saves administrator credentials.
+An interface-down reading is not proof of zero AWDL radio traffic or a guaranteed
+fix for streaming stutter.
 
 Run persistence and whole-app acceptance without an account:
 

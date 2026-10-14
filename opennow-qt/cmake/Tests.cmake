@@ -31,7 +31,7 @@ if(BUILD_TESTING)
     qt_add_executable(opennow-macawdl-tests tests/tst_macawdlcontroller.cpp
         src/app/platform/MacAwdlController.cpp src/app/platform/MacAwdlController.h)
     target_include_directories(opennow-macawdl-tests PRIVATE src)
-    target_link_libraries(opennow-macawdl-tests PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(opennow-macawdl-tests PRIVATE Qt6::Core Qt6::Network Qt6::Test)
     add_test(NAME opennow-macawdl-tests COMMAND opennow-macawdl-tests -o -,txt)
     set_tests_properties(opennow-macawdl-tests PROPERTIES TIMEOUT 20)
     qt_add_executable(opennow-waylandhdroutput-tests tests/tst_waylandhdroutput.cpp)

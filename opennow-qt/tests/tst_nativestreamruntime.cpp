@@ -146,6 +146,70 @@ class NativeStreamRuntimeTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void actualStreamingLifetimeIsIndependentOfRuntimeAndResumableStatuses()
+    {
+        static OpenNowStreamerConfig callbacks;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbacks = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.running());
+        QVERIFY(!runtime.streaming());
+        const auto deliver = [&](const QByteArray &bytes) {
+            callbacks.event_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                static_cast<std::size_t>(bytes.size()), callbacks.user_data);
+            QCoreApplication::processEvents();
+        };
+        const auto start = [&](const QString &id) {
+            QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                  {QStringLiteral("id"), id}}));
+            QTRY_VERIFY(runtime.inputAllowed());
+            QVERIFY(!runtime.streaming());
+        };
+        deliver(R"({"type":"status","status":"streaming"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("first"));
+        deliver(R"({"type":"status","status":"streaming","startId":"old"})");
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"first"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"status","status":"paused","startId":"first"})");
+        deliver(R"({"type":"status","status":"connecting","startId":"first"})");
+        deliver(R"({"type":"status","status":"ready","startId":"first"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"status","status":"stopped","startId":"old"})");
+        deliver(R"({"type":"error","startId":"old","message":"stale error"})");
+        QVERIFY(runtime.streaming());
+        sendStatus = OPENNOW_STREAMER_CLOSED;
+        const auto restoreSend = qScopeGuard([] { sendStatus = OPENNOW_STREAMER_OK; });
+        QVERIFY(!runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QVERIFY(runtime.streaming());
+        sendStatus = OPENNOW_STREAMER_OK;
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"first"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("second"));
+        deliver(R"({"type":"status","status":"streaming"})");
+        QVERIFY(runtime.streaming());
+        start(QStringLiteral("third"));
+        deliver(R"({"type":"status","status":"streaming","startId":"third"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"error","startId":"third","message":"session failed"})");
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"third"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("fourth"));
+        deliver(R"({"type":"status","status":"streaming","startId":"fourth"})");
+        QVERIFY(runtime.streaming());
+        QVERIFY(runtime.shutdown());
+        QVERIFY(!runtime.streaming());
+        QVERIFY(!runtime.running());
+    }
+
     void textInputErrorsAreNonterminalAndScopedToSessionGeneration()
     {
         static OpenNowStreamerConfig callbackConfig;

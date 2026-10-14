@@ -17,6 +17,7 @@ class NativeStreamRuntime final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool streaming READ streaming NOTIFY streamingChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
 public:
@@ -97,6 +98,7 @@ public:
     ~NativeStreamRuntime() override;
 
     [[nodiscard]] bool running() const;
+    [[nodiscard]] bool streaming() const;
     [[nodiscard]] QString lastError() const;
     [[nodiscard]] quint64 presentationGeneration() const;
     [[nodiscard]] bool presentationAllowed() const;
@@ -159,6 +161,7 @@ signals:
     void inputAllowedChanged();
     void presentationError(const QString &message, const QString &errorCode);
     void runningChanged();
+    void streamingChanged();
     void lastErrorChanged();
     void responseReceived(const QJsonObject &response);
     void eventReceived(const QJsonObject &event);
@@ -194,6 +197,7 @@ private:
     void invalidatePresentation();
     void publishDecodedDisplaySize(const QSize &size, quint64 generation);
     void resetInputCapture();
+    void setStreaming(bool streaming);
 
     std::unique_ptr<Private> d;
 };

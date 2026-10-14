@@ -6,6 +6,7 @@ Column {
     objectName: "desktopNetworkSettings"
     required property real availableWidth
     required property var settingsScreen
+    property var awdlController: MacAwdl
 
     width: page.availableWidth; spacing: DesktopTokens.px(12)
     Component.onCompleted: ShellStore.refreshRegions()
@@ -54,6 +55,65 @@ Column {
                 checked: !page.settingsScreen.boolSetting("hideQueueSelector", false)
                 onValueChangedByUser: value => page.settingsScreen.setSetting("hideQueueSelector", !value)
             }
+        }
+    }
+    DesktopSettingsPanel {
+        visible: page.awdlController.state !== MacAwdlController.Unsupported
+        width: parent.width; paperStyle: true
+        DesktopSettingsSection { text: qsTr("MACOS WI-FI") }
+        DesktopSettingsRow {
+            objectName: "suppressAwdlWhileStreamingRow"
+            width: parent.width; paperStyle: true; glyph: "globe"
+            title: qsTr("Suppress AWDL while streaming")
+            description: qsTr("May reduce Wi-Fi latency spikes. Temporarily interrupts AirDrop, AirPlay, Sidecar, Universal Control and other Continuity features for all users while a stream is active. AWDL is restored when the stream ends or OpenNOW disconnects.")
+            DesktopSettingsToggle {
+                objectName: "suppressAwdlWhileStreamingToggle"
+                enabled: !page.awdlController.busy
+                    && (page.awdlController.state === MacAwdlController.Installed || checked)
+                checked: page.settingsScreen.boolSetting("suppressAwdlWhileStreaming", false)
+                onValueChangedByUser: value => page.settingsScreen.setSetting("suppressAwdlWhileStreaming", value)
+            }
+        }
+        DesktopSettingsRow {
+            objectName: "awdlHelperStatus"
+            width: parent.width; paperStyle: true; glyph: "shield"
+            title: qsTr("AWDL helper")
+            description: page.awdlController.busy ? qsTr("Waiting for macOS authorization…")
+                : page.awdlController.error !== "" ? qsTr("Error")
+                : page.awdlController.leased ? qsTr("Active")
+                : page.awdlController.state === MacAwdlController.Installed ? qsTr("Ready")
+                : qsTr("Not installed")
+            DesktopSettingsButton {
+                objectName: "awdlHelperInstallButton"
+                enabled: !page.awdlController.busy
+                text: page.awdlController.state === MacAwdlController.Installed ? qsTr("Remove helper…") : qsTr("Install helper…")
+                onClicked: {
+                    if (page.awdlController.state === MacAwdlController.Installed)
+                        page.awdlController.uninstall()
+                    else
+                        page.awdlController.install()
+                }
+            }
+            DesktopSettingsButton {
+                objectName: "awdlHelperRefreshButton"
+                text: qsTr("Refresh")
+                enabled: !page.awdlController.busy
+                onClicked: page.awdlController.refresh()
+            }
+        }
+        DesktopSettingsRow {
+            width: parent.width; paperStyle: true; glyph: "info"
+            title: qsTr("Administrator authorization")
+            description: qsTr("Installing or removing the helper requires administrator approval once. Only install it if you trust this copy of OpenNOW. Ad-hoc signing does not verify the publisher.")
+            showDivider: false
+        }
+        DesktopSettingsRow {
+            objectName: "awdlHelperError"
+            visible: page.awdlController.error !== ""
+            width: parent.width; paperStyle: true; glyph: "info"
+            title: qsTr("AWDL helper needs attention")
+            description: page.awdlController.error
+            showDivider: false
         }
     }
     DesktopSettingsAdvanced {

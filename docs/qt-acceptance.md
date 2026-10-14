@@ -476,6 +476,69 @@ between settings sections and desktop pages.
 - Verify the published SHA-256 hashes and production Ed25519 update manifest before exposing a
   release to any update channel. Keep the signing key outside CI build workers.
 
+### macOS AWDL helper
+
+Run the packaging contract checks on any host:
+
+```sh
+	python3 -m unittest discover -s opennow-qt/packaging -p test_macos_awdl.py
+	python3 -m unittest discover -s opennow-qt/tests -p 'test_macos_*.py'
+	cargo test --manifest-path native/opennow-streamer/Cargo.toml -p opennow-awdl-helper
+```
+
+The static checks inspect generated ARM64 and Intel CMake rules, Debug and Release
+profile selection, the LaunchDaemon plist, and both signing paths. They do not run
+launchd, privilege prompts, or network-interface changes. Use a real Mac for these checks:
+
+1. Copy the packaged app from both the DMG and ZIP to a new location. Verify the
+   outer app with `codesign --verify --deep --strict`. Verify the executable at
+   `Contents/Helpers/opennow-awdl-helper` with `codesign --verify --strict`, and
+   check its architecture with `lipo <helper> -verify_arch arm64`. Use `x86_64` for
+   an Intel development build. Check `otool -L <helper>` for dependencies outside
+   `/usr/lib` and `/System/Library`; there must be none. Lint
+   `Contents/Resources/opennow-awdl.plist` with `plutil -lint`.
+2. Check the helper's signing identifier is
+   `io.github.opencloudgaming.OpenNOW.awdl-helper`. For an ad-hoc nightly, confirm
+   `Signature=adhoc` and no TeamIdentifier. For a Developer ID release, verify the
+   helper's TeamIdentifier matches the app, no app entitlements are attached, and
+   the app and DMG pass Gatekeeper and stapler checks.
+3. With no helper installed, complete onboarding and start a session with suppression
+   off. Decline an install prompt. Neither case may block onboarding or streaming,
+   change `awdl0`, or save administrator credentials. Change the snapshot after the
+   client captures its SHA-256, and confirm installation rejects the changed bytes.
+   Symlinked or writable system destinations must fail without altering the service.
+4. Install from a trusted user-owned app with administrator approval, using the
+   [installation contract](macos-awdl-helper.md#installation-contract).
+   Inspect `root:wheel` ownership and modes
+   `0755` for the installed executable and `0644` for the installed plist.
+   `launchctl print system/io.github.opencloudgaming.OpenNOW.awdl` must show the
+   service. Installing while idle must not change `awdl0`.
+5. Record whether `awdl0` is initially up. Enable suppression and start a real session.
+   Confirm the interface goes down only after streaming becomes active. Re-enable
+   `awdl0` as administrator while streaming and confirm the helper suppresses it again.
+   Toggle local overlays, focus, fullscreen, and pointer lock. They must not release
+   the lease, restart media, or restore the interface.
+6. End the session, turn the preference off, and terminate OpenNOW unexpectedly in
+   separate runs. Confirm the interface returns to up only when the helper found it
+   up before acquisition. Repeat with the interface initially down and confirm it
+   remains down. Check that the journal clears after successful restoration.
+7. Acquire two authorized leases. End one and confirm suppression remains until
+   the other ends. Switch console users and confirm the old user's leases cannot
+   keep suppression active. Try the socket as another user and as root; both must
+   be rejected. Malformed requests must not change another interface or run a command.
+8. Kill the helper while a lease is active, then reboot in a separate run. Confirm
+   launchd restarts it and processes the durable journal before accepting new leases.
+   Simulate a restoration failure and confirm the journal remains, retries occur,
+   and uninstall retains the executable and plist. Resolve the failure and confirm
+   restoration completes before uninstall removes the service.
+9. Replace the application with an updated bundle. Confirm the existing daemon is
+   not silently replaced. End streaming, reinstall with approval, and repeat the
+   lease cycle. Uninstall, then confirm the daemon and socket are gone and no pending
+   journal was discarded. Check that no subsequent session changes `awdl0`.
+
+Record actual results, macOS version, architecture, package signing mode, and initial
+interface state. Linux tests or Darwin cross-compilation do not establish these results.
+
 ## Staged rollout after Electron removal
 
 Roll out the Qt build in explicit cohorts. Monitor crash-free launches, core/streamer restart rate,

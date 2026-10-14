@@ -193,6 +193,8 @@ struct NativeStreamRuntime::Private {
     OpenNowStreamer *handle = nullptr;
     std::shared_ptr<CallbackState> callbackState;
     QString lastError;
+    bool streaming = false;
+    bool streamSessionActive = false;
     bool graphicsActive = false;
     bool firstNotification = false;
     std::atomic<quint64> presentationGeneration{0};
@@ -281,6 +283,15 @@ bool NativeStreamRuntime::running() const
 {
     const std::shared_lock lock(d->handleMutex);
     return d->handle != nullptr;
+}
+
+bool NativeStreamRuntime::streaming() const { return d->streaming; }
+
+void NativeStreamRuntime::setStreaming(bool streaming)
+{
+    if (d->streaming == streaming) return;
+    d->streaming = streaming;
+    emit streamingChanged();
 }
 
 QString NativeStreamRuntime::lastError() const
@@ -504,6 +515,8 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
         return false;
     }
     if (type == u"start"_s || type == u"stop"_s) {
+        setStreaming(false);
+        d->streamSessionActive = type == u"start"_s;
         invalidatePresentation();
         d->defaultRelativeMouse = false;
         d->sessionStartId = type == u"start"_s ? object.value(u"id"_s).toString() : QString{};
@@ -528,6 +541,8 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
 bool NativeStreamRuntime::shutdown(int timeoutMs)
 {
     d->defaultRelativeMouse = false;
+    d->streamSessionActive = false;
+    setStreaming(false);
     resetInputCapture();
     invalidatePresentation();
     OpenNowStreamer *handle = nullptr;
@@ -1002,6 +1017,14 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
                                                epoch.value_or(0), outputs.value_or(0));
         }
         const auto status = document.object().value(u"status"_s).toString();
+        if (message.event && kind == u"status"_s && d->streamSessionActive) {
+            const auto startId = document.object().value(u"startId"_s).toString();
+            if (!startId.isEmpty() && startId != d->sessionStartId) continue;
+            if (status == u"streaming"_s) {
+                setStreaming(true);
+                if (!current()) return;
+            }
+        }
         if (message.event && kind == u"cursor-capture"_s) {
             if (d->cursorStartId.isEmpty()
                 || document.object().value(u"startId"_s).toString() != d->cursorStartId) continue;
@@ -1038,6 +1061,11 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
         }
         if (message.event && (kind == u"error"_s
                 || (kind == u"status"_s && (status == u"stopped"_s || status == u"error"_s)))) {
+            const auto startId = document.object().value(u"startId"_s).toString();
+            if (!startId.isEmpty() && startId != d->sessionStartId) continue;
+            d->streamSessionActive = false;
+            setStreaming(false);
+            if (!current()) return;
             resetInputCapture();
             invalidatePresentation();
             if (!current()) return;
@@ -1045,6 +1073,11 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
                 && document.object().value(u"id"_s).toString() == d->presentationStartId) {
             d->acceptedSessionStartId = d->presentationStartId;
             d->presentationStartId.clear();
+            if (kind != u"ok"_s) {
+                d->streamSessionActive = false;
+                setStreaming(false);
+                if (!current()) return;
+            }
             d->upstreamProgressSamples.publish(false, false, 0, 0);
             d->presentationAllowed.store(kind == u"ok"_s, std::memory_order_release);
             const bool defaultRelativeMouse = kind == u"ok"_s
