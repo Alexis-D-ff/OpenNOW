@@ -535,7 +535,7 @@ if(BUILD_TESTING)
         set_tests_properties(qml-push-invalidation-${width} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     qt_add_resources(opennow-qt "store-paging-acceptance"
-        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
+        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/DesktopAntiAfkAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
     add_test(NAME qml-account-shortcuts
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
             --smoke-paper-design --smoke-accounts 4 --smoke-account-shortcuts --reduced-motion)
@@ -570,6 +570,10 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route settings-audio --smoke-microphone --reduced-motion)
     set_tests_properties(qml-microphone PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    add_test(NAME qml-desktop-anti-afk
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-desktop-anti-afk --reduced-motion)
+    set_tests_properties(qml-desktop-anti-afk PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
     foreach(surface desktop console)
         set(microphone_settings_route settings-audio)
         set(microphone_overlay desktop-stream-menu)

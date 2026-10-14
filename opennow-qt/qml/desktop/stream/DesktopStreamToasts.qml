@@ -23,6 +23,8 @@ Column {
     readonly property var bugReport: ShellStore.bugReports.latest
     property bool bugReportNotice: false
     property real bugReportLifetime: 0
+    property bool antiAfkNotice: false
+    property real antiAfkLifetime: 0
     width: Math.min(384, parent ? Math.max(0, parent.width - 48) : 384)
     spacing: 12
 
@@ -33,6 +35,8 @@ Column {
         colorNotice = false
         bugReportAnimation.stop()
         bugReportNotice = false
+        antiAfkAnimation.stop()
+        antiAfkNotice = false
         controllerNotice = null
         lossNotice = false
         knownControllerIds = controllers.map(controller => controller.instanceId)
@@ -105,6 +109,14 @@ Column {
             bugReportAnimation.restart()
         }
     }
+    Connections {
+        target: ShellStore
+        function onAntiAfkEnabledChanged() {
+            if (!root.active || !ShellStore.activeSession) return
+            root.antiAfkNotice = true
+            antiAfkAnimation.restart()
+        }
+    }
     onActiveChanged: {
         reset()
         if (active) {
@@ -140,10 +152,28 @@ Column {
         onFinished: root.bugReportNotice = false
     }
     NumberAnimation {
+        id: antiAfkAnimation
+        target: root; property: "antiAfkLifetime"
+        from: 1; to: 0; duration: 4000
+        onFinished: root.antiAfkNotice = false
+    }
+    NumberAnimation {
         id: colorAnimation
         target: root; property: "colorLifetime"
         from: 1; to: 0; duration: 4000
         onFinished: root.colorNotice = false
+    }
+
+    DesktopStreamToast {
+        objectName: "streamAntiAfkToast"
+        width: root.width
+        visible: root.active && root.antiAfkNotice
+        formatNotice: true
+        title: ShellStore.antiAfkEnabled ? qsTr("Anti-AFK on") : qsTr("Anti-AFK off")
+        subtitle: ShellStore.antiAfkEnabled
+            ? qsTr("A short keypress every 4 minutes keeps the session from timing out.")
+            : qsTr("GeForce NOW can end the session after a period of inactivity.")
+        lifetimeFraction: root.antiAfkLifetime
     }
 
     DesktopStreamToast {
