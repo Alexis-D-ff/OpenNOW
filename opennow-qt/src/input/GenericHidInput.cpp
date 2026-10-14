@@ -804,8 +804,8 @@ void GenericHidInput::run()
             }
             if (!healthy) closeSource(key, true);
         }
-        const auto interval = sources.isEmpty() ? 300 : 4;
-        if (timer.interval() != interval) timer.setInterval(interval);
+        const auto interval = sources.isEmpty() ? std::max<qint64>(1, 300 - discoveryClock.elapsed()) : 4;
+        if (timer.interval() != interval) timer.setInterval(static_cast<int>(interval));
     };
     timer.setTimerType(Qt::PreciseTimer);
     timer.setInterval(300);
