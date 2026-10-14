@@ -55,9 +55,11 @@ jobs:
             version=$(python3 opennow-qt/packaging/nightly_release.py version \
               --run "$GITHUB_RUN_NUMBER" --attempt "$GITHUB_RUN_ATTEMPT" --channel stable)
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "package_arch=$package_arch" >> "$GITHUB_OUTPUT"
-          echo "bundle=build/flatpak/OpenNOW-Qt-$version-Linux-$package_arch.flatpak" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "package_arch=$package_arch"
+            echo "bundle=build/flatpak/OpenNOW-Qt-$version-Linux-$package_arch.flatpak"
+          } >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Flatpak tools and SDK
         run: |
