@@ -554,6 +554,23 @@ if(BUILD_TESTING)
                 --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-${account_state}.png)
         set_tests_properties(qml-account-picker-${account_state} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
     endforeach()
+    add_test(NAME qml-account-switch-confirm-light
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 2 --smoke-account-state switch-confirm --smoke-light-theme
+            --smoke-account-chrome-check --smoke-width 1440 --smoke-height 900 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switch-confirm-light.png)
+    add_test(NAME qml-account-picker-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route accounts
+            --smoke-accounts 8 --smoke-settings-scale 1.25 --smoke-account-chrome-check
+            --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-fit-960.png)
+    add_test(NAME qml-account-switcher-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 8 --smoke-account-state switcher --smoke-settings-scale 1.25
+            --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switcher-fit-960.png)
+    set_tests_properties(qml-account-switch-confirm-light qml-account-picker-fit-960 qml-account-switcher-fit-960
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     add_test(NAME qml-console-settings
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --console
             --route settings-video --smoke-console-settings --reduced-motion)

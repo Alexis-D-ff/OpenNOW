@@ -118,10 +118,12 @@ FocusScope {
 
     Rectangle {
         id: card
+        objectName: "accountSwitcherCard"
         x: DesktopTokens.railCollapsedWidth + root.u(12)
-        y: root.height - height - root.u(20)
+        y: Math.max(root.u(8), root.height - height - root.u(20))
         width: root.u(420)
-        height: content.implicitHeight
+        height: Math.min(content.implicitHeight, Math.max(root.u(160), root.height - root.u(16)))
+        clip: true
         radius: root.u(16)
         color: Theme.lightMode ? "#FAFFFFFF" : "#F512161F"
         border.width: 1
@@ -222,7 +224,19 @@ FocusScope {
                     font.weight: Font.DemiBold
                     font.letterSpacing: root.u(1.4)
                 }
-                Flow {
+                Flickable {
+                    id: switcherTiles
+                    objectName: "accountSwitcherTiles"
+                    width: parent.width
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    contentWidth: width
+                    contentHeight: switcherTileFlow.implicitHeight
+                    interactive: contentHeight > height + 1
+                    height: Math.min(switcherTileFlow.implicitHeight,
+                        Math.max(root.u(86), root.height - root.u(348)))
+                    Flow {
+                    id: switcherTileFlow
                     width: parent.width
                     spacing: root.u(2)
                     Repeater {
@@ -245,6 +259,7 @@ FocusScope {
                                 root.activate(index)
                             }
                         }
+                    }
                     }
                 }
                 Rectangle {

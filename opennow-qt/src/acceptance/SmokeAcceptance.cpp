@@ -4,6 +4,7 @@
 #include "streaming/NativeStreamRuntime.h"
 #include "acceptance/MotionAcceptance.h"
 
+#include <QColor>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QDeadlineTimer>
@@ -23,6 +24,55 @@
 #include <memory>
 
 using namespace Qt::StringLiterals;
+
+static qreal relativeLuminance(const QColor &color)
+{
+    return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF();
+}
+
+static QRectF sceneRect(QQuickItem *item)
+{
+    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+}
+
+static bool accountChromeFits(QQuickWindow *window)
+{
+    if (!window)
+        return false;
+    if (auto *confirm = window->findChild<QQuickItem *>(u"accountSwitchConfirmation"_s); confirm && confirm->isVisible()) {
+        auto *title = confirm->findChild<QQuickItem *>(u"accountSwitchTitle"_s);
+        auto *body = confirm->findChild<QQuickItem *>(u"accountSwitchBody"_s);
+        const auto titleColor = title ? title->property("color").value<QColor>() : QColor();
+        const auto bodyColor = body ? body->property("color").value<QColor>() : QColor();
+        if (!title || !body || relativeLuminance(titleColor) < 0.55 || relativeLuminance(bodyColor) < 0.28) {
+            qCritical("Switch confirmation text is not readable on its dark card");
+            return false;
+        }
+    }
+    if (auto *picker = window->findChild<QQuickItem *>(u"desktopAccountPicker"_s); picker && picker->isVisible()) {
+        auto *stage = picker->findChild<QQuickItem *>(u"accountPickerStage"_s);
+        auto *grid = picker->findChild<QQuickItem *>(u"accountPickerGrid"_s);
+        auto *heading = picker->findChild<QQuickItem *>(u"accountPickerHeading"_s);
+        if (!stage || !grid || !heading)
+            return false;
+        const auto stageRect = sceneRect(stage);
+        const auto gridRect = sceneRect(grid);
+        const auto headingRect = sceneRect(heading);
+        if (headingRect.top() < -1 || headingRect.bottom() > window->height() + 1
+                || gridRect.top() < stageRect.top() - 1 || gridRect.bottom() > stageRect.bottom() + 1) {
+            qCritical("Account picker chrome leaves the window");
+            return false;
+        }
+    }
+    if (auto *card = window->findChild<QQuickItem *>(u"accountSwitcherCard"_s); card && card->isVisible()) {
+        const auto rect = sceneRect(card);
+        if (rect.top() < -1 || rect.bottom() > window->height() + 1 || rect.right() > window->width() + 1) {
+            qCritical("Account switcher leaves the window");
+            return false;
+        }
+    }
+    return true;
+}
 
 void presentUpdateSurface(QQmlApplicationEngine &engine, QQuickWindow *window, const QString &surface)
 {
@@ -898,6 +948,10 @@ int AcceptanceSession::startSmokeWorkload()
                 return;
             }
             auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+            if (m_arguments.contains(u"--smoke-account-chrome-check"_s) && !accountChromeFits(window)) {
+                m_application.exit(EXIT_FAILURE);
+                return;
+            }
             const auto saved = window && window->grabWindow().save(screenshotPath);
             m_application.exit(saved ? EXIT_SUCCESS : EXIT_FAILURE);
         });
