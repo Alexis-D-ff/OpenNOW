@@ -61,8 +61,16 @@ QtObject {
         check(indicator !== null && indicator.visible, "the indicator shows while Anti-AFK is on")
         AppController.showOverlay("desktop-stream-stats")
         check(!indicator.visible, "the indicator yields to the statistics overlay like the session clock")
+        AppController.showOverlay("desktop-stream-menu")
+        check(!indicator.visible, "the indicator does not sit under the stream menu")
+        toggle.activated()
         AppController.showOverlay("")
-        check(indicator.visible, "the indicator returns when statistics close")
+        check(toast.visible && toast.title === qsTr("Anti-AFK off"),
+            "a menu toggle still toasts after the menu closes")
+        check(!indicator.visible, "the indicator stays hidden while Anti-AFK is off")
+        video.localShortcutRequested("toggle-anti-afk")
+        check(ShellStore.antiAfkEnabled && indicator.visible,
+            "the indicator returns when Anti-AFK is on and the menu is closed")
 
         useSettings({showAntiAfkIndicator: false})
         check(!ShellStore.antiAfkIndicatorShown(899) && ShellStore.antiAfkIndicatorShown(900)

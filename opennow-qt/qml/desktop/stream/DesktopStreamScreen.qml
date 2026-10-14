@@ -50,7 +50,7 @@ FocusScope {
     MotionProgress {
         id: antiAfkReveal
         shown: root.videoReady && ShellStore.antiAfkIndicatorShown(root.clockSeconds)
-            && AppController.overlay.indexOf("stats") < 0
+            && AppController.overlay === ""
     }
     Rectangle {
         objectName: "desktopAntiAfkIndicator"

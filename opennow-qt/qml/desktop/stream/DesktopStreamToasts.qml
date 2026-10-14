@@ -35,8 +35,6 @@ Column {
         colorNotice = false
         bugReportAnimation.stop()
         bugReportNotice = false
-        antiAfkAnimation.stop()
-        antiAfkNotice = false
         controllerNotice = null
         lossNotice = false
         knownControllerIds = controllers.map(controller => controller.instanceId)
@@ -112,7 +110,8 @@ Column {
     Connections {
         target: ShellStore
         function onAntiAfkEnabledChanged() {
-            if (!root.active || !ShellStore.activeSession) return
+            if (!ShellStore.activeSession
+                    || String((ShellStore.streamer || {}).status || "") !== "streaming") return
             root.antiAfkNotice = true
             antiAfkAnimation.restart()
         }
@@ -124,7 +123,11 @@ Column {
             observeColorFormat()
         }
     }
-    onSessionIdChanged: reset()
+    onSessionIdChanged: {
+        reset()
+        antiAfkAnimation.stop()
+        antiAfkNotice = false
+    }
     Component.onCompleted: {
         reset()
         if (active) {
