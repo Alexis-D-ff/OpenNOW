@@ -263,6 +263,9 @@ qt_add_qml_module(opennow-qt
         qml/components/TogglePill.qml
         qml/components/TenBitWarningDialog.qml
         qml/components/VirtualKeyboard.qml
+        qml/desktop/auth/DesktopAccountChip.qml
+        qml/desktop/auth/DesktopAccountPicker.qml
+        qml/desktop/auth/DesktopAccountTile.qml
         qml/desktop/auth/DesktopSignInScreen.qml
         qml/desktop/components/DesktopBackdrop.qml
         qml/desktop/components/DesktopBrandLockup.qml
@@ -323,6 +326,7 @@ qt_add_qml_module(opennow-qt
         qml/desktop/settings/pages/DesktopSettingsStreamPage.qml
         qml/desktop/settings/pages/DesktopSettingsSubscriptionPage.qml
         qml/desktop/shell/DesktopApp.qml
+        qml/desktop/shell/DesktopAccountSwitcher.qml
         qml/desktop/shell/DesktopCommandPalette.qml
         qml/desktop/shell/DesktopShell.qml
         qml/desktop/shell/DesktopSidebar.qml
@@ -347,7 +351,6 @@ qt_add_qml_module(opennow-qt
         qml/overlays/QuickSettingsOverlay.qml
         qml/overlays/SessionConflictOverlay.qml
         qml/overlays/SessionReportOverlay.qml
-        qml/screens/AccountsScreen.qml
         qml/screens/DiagnosticsScreen.qml
         qml/screens/FeedbackScreen.qml
         qml/screens/GameAccountsScreen.qml
@@ -473,6 +476,11 @@ qt_add_qml_module(opennow-qt
         res/icons/desktop-sliders-on-light.svg
         res/icons/desktop-user-plus.svg
         res/icons/desktop-user-plus-on-light.svg
+        res/icons/desktop-users.svg
+        res/icons/desktop-users-on-light.svg
+        res/icons/desktop-pencil.svg
+        res/icons/desktop-pencil-on-light.svg
+        res/icons/desktop-lock-badge.svg
         res/icons/desktop-logout.svg
         res/icons/desktop-logout-on-light.svg
         res/icons/desktop-plus-ink.svg

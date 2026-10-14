@@ -76,6 +76,11 @@ impl SettingsStore {
                     {
                         values.insert("webrtcCompatibilityMode".to_owned(), json!("on"));
                     }
+                    if !persisted.contains_key("startAsLastUsedAccount")
+                        && persisted.get("consoleProfilePickerOnLaunch") == Some(&json!(false))
+                    {
+                        values.insert("startAsLastUsedAccount".to_owned(), json!(true));
+                    }
                     migrate_onboarding = policy == LoadPolicy::ReadWrite
                         && !persisted.contains_key("onboardingCompleted");
                     if migrate_onboarding {
@@ -1118,7 +1123,7 @@ fn defaults() -> Map<String, Value> {
         "controllerLeftStickDeadzone":5, "controllerRightStickDeadzone":5,
         "controllerVibrationIntensity":100,
         "reducedMotion":false, "uiSoundsEnabled":true,
-        "launchInConsoleMode":false, "consoleProfilePickerOnLaunch":true,
+        "launchInConsoleMode":false, "startAsLastUsedAccount":false,
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
         "desktopBackgroundImage":"", "desktopBackgroundOpacity":30,
         "switchToConsoleOnPad":false, "leaveConsoleOnPointer":true,
@@ -2019,6 +2024,35 @@ mod tests {
         store.reset().unwrap();
         assert_eq!(store.all()["steamBigPictureMode"], false);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn start_as_last_used_account_persists_and_migrates_the_console_picker_toggle() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-account-picker-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["startAsLastUsedAccount"], false);
+        assert!(store.all().get("consoleProfilePickerOnLaunch").is_none());
+        store.set("startAsLastUsedAccount", json!(true)).unwrap();
+        let loaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(loaded.all()["startAsLastUsedAccount"], true);
+        fs::remove_dir_all(&directory).unwrap();
+
+        for (legacy, expected) in [(false, true), (true, false)] {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("settings.json"),
+                json!({"onboardingCompleted":true,"consoleProfilePickerOnLaunch":legacy})
+                    .to_string(),
+            )
+            .unwrap();
+            let migrated = SettingsStore::load(Some(directory.clone())).unwrap();
+            assert_eq!(migrated.all()["startAsLastUsedAccount"], expected);
+            fs::remove_dir_all(&directory).unwrap();
+        }
     }
 
     #[test]

@@ -109,16 +109,21 @@ QtObject {
         check(AppController.route === "accounts" && find(parent, "desktopApp") === unlockDesktop
             && find(parent, "streamSurfaceHost") === unlockSurface,
             "explicit account navigation retains the desktop and native video item")
+        const picker = find(parent, "desktopAccountPicker")
+        check(picker && picker.visible && picker.activeFocus
+            && Math.abs(picker.width - unlockDesktop.width) < 1
+            && Math.abs(picker.height - unlockDesktop.height) < 1,
+            "the account picker fills the locked desktop stream window and owns focus")
+        check(!unlockDesktop.signInVisible && !unlockDesktop.shellVisible && !unlockSurface.inputEnabled
+            && !unlockSurface.captureActive && (ControllerInput.shellCaptureEnabled || ControllerInput.inputSuspended),
+            "account selection owns keyboard, pointer, and controller input instead of gameplay")
+        ShellStore.openPin("unlock", ShellStore.savedAccounts[0])
         const loader = find(parent, "desktopProfileLoader")
         const viewport = find(parent, "desktopProfileViewport")
         check(loader && loader.item && viewport && viewport.scale > 0
             && Math.abs(viewport.width * viewport.scale - unlockDesktop.width) < 1
             && Math.abs(viewport.height * viewport.scale - unlockDesktop.height) < 1,
-            "existing account screens scale to the locked desktop stream window")
-        check(!unlockDesktop.signInVisible && !unlockDesktop.shellVisible && !unlockSurface.inputEnabled
-            && !unlockSurface.captureActive && (ControllerInput.shellCaptureEnabled || ControllerInput.inputSuspended),
-            "account selection owns keyboard, pointer, and controller input instead of gameplay")
-        ShellStore.openPin("unlock", ShellStore.savedAccounts[0])
+            "the PIN screen scales to the locked desktop stream window")
         check(AppController.route === "profile-pin" && loader.item && loader.item.heading.indexOf("Locked player") >= 0
             && find(parent, "streamSurfaceHost") === unlockSurface,
             "the existing PIN screen replaces only the profile loader")

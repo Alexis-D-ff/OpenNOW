@@ -68,6 +68,11 @@ bool prepareAuthentication(QJSEngine &engine)
         var providerDiscoveryDegraded = false, authGeneration = 0, authSessionRequestId = '';
         var accountsRequestId = '', savedAccounts = [], authRestorePending = false, activeSession = null, streamBusy = false;
         var coreSessionRestoreId = '', sessionStopIntentId = '';
+        var accountsLoaded = false, launchAccountPickerConsidered = false, settings = {}, pendingDirectLaunch = null;
+        var accountSwitchTargetUserId = '', accountSwitchConfirmTarget = null, pendingAccountSwitch = null;
+        var streamCreateRequestId = '', sessionClaimRequestId = '', pendingLaunchParams = null, streamStopRequestId = '';
+        var accessibilityMessage = '', stopRequests = 0, pinMode = '', pinTargetUserId = '', pinTargetName = '';
+        function stopStreamingSession() { stopRequests++; streamStopRequestId = 'stop'; }
         var authSession = {user:{userId:'old',displayName:'Old'},provider:{idpId:'alliance'}};
         Object.defineProperty(root, 'signedIn', {get: function() { return authSession !== null; }});
         var addingAccount = false, authState = 'signed-in', authMessage = '', accountMessage = '';
@@ -82,7 +87,9 @@ bool prepareAuthentication(QJSEngine &engine)
         var CoreClient = {request:function(method,params) {
             requests.push({method:method,params:params});return 'request-' + requests.length;
         },cancel:function(id) {cancelled.push(id);}};
-        var AppController = {route:'accounts',navigate:function(route) {this.route=route;}};
+        var AppController = {route:'accounts',overlay:'',backRoute:'',navigate:function(route) {this.route=route;},
+            showOverlay:function(overlay) {this.overlay=overlay;},navigateFromLastPrimary:function(route) {this.route=route;},
+            goBack:function() {}};
         var settingsOwner = {settingWrites:{},acceptResponse:function() {return false;},acceptFailure:function() {return false;}};
         var onboardingOwner = {acceptResponse:function() {return false;},acceptFailure:function() {return false;}};
         var bugReports = {observeTelemetry:function() {},observeFrameDrops:function() {},reportStreamError:function() {}};
@@ -100,7 +107,11 @@ bool prepareAuthentication(QJSEngine &engine)
     )JS"));
     if (setup.isError()) return false;
     for (const auto &name : {"refreshProviders", "scheduleProviderRetry", "beginAddAccount",
-             "startDeviceLogin", "cancelDeviceLogin", "switchAccount", "refreshSavedAccounts", "showSavedAccountSelection"}) {
+             "startDeviceLogin", "cancelDeviceLogin", "switchAccount", "refreshSavedAccounts", "showSavedAccountSelection",
+             "accountPickerLaunchDecision", "leaveAccountPicker", "accountSwitchEndsSession", "isActiveAccount",
+             "chooseAccount", "continueAccountChoice", "chooseAccountAt", "confirmAccountSwitch", "cancelAccountSwitch",
+             "continuePendingAccountSwitch", "beginAccountSignIn", "openPin", "sessionOwnerSignedIn",
+             "settleRouteAfterAccountSwitch", "sessionRouteWithoutOwnedSeat"}) {
         if (!loadShellFunction(engine, QString::fromLatin1(name))) return false;
     }
     return loadShellFunction(engine, QStringLiteral("onResponseReceived"), 8)
@@ -341,7 +352,7 @@ private slots:
         QVERIFY2(!completion.isError(), qPrintable(completion.toString()));
         QVERIFY(engine.evaluate(QStringLiteral("signedIn && !addingAccount && authSession.user.userId === 'new'")).toBool());
         QCOMPARE(engine.evaluate(QStringLiteral("AppController.route")).toString(), QStringLiteral("home"));
-        QVERIFY(source(QStringLiteral("qml/screens/AccountsScreen.qml")).contains(QStringLiteral("onClicked: ShellStore.beginAddAccount()")));
+        QVERIFY(source(QStringLiteral("qml/desktop/auth/DesktopAccountPicker.qml")).contains(QStringLiteral("ShellStore.beginAddAccount()")));
     }
 
     void cancellingAnAddedAccountReturnsToIdleInsteadOfWaiting()
@@ -383,9 +394,215 @@ private slots:
         QCOMPARE(engine.evaluate(QStringLiteral("authSession.user.userId")).toString(), QStringLiteral("old"));
         QVERIFY(!engine.evaluate(QStringLiteral("switchAccount('new','')")).isError());
         QCOMPARE(engine.evaluate(QStringLiteral("accountMessage")).toString(), QString());
-        const auto accounts = source(QStringLiteral("qml/screens/AccountsScreen.qml"));
+        const auto accounts = source(QStringLiteral("qml/desktop/auth/DesktopAccountPicker.qml"));
         QVERIFY(accounts.contains(QStringLiteral("objectName: \"accountActionError\"")));
         QVERIFY(accounts.contains(QStringLiteral("text: ShellStore.accountMessage")));
+    }
+
+    void launchPickerAppearsOnlyForSeveralAccountsUnlessSkipped()
+    {
+        QJSEngine engine;
+        QVERIFY(prepareAuthentication(engine));
+        const auto decisions = engine.evaluate(QStringLiteral(R"JS(
+            [accountPickerLaunchDecision(0, true, false), accountPickerLaunchDecision(1, true, false),
+             accountPickerLaunchDecision(2, true, false), accountPickerLaunchDecision(5, true, false),
+             accountPickerLaunchDecision(2, true, true), accountPickerLaunchDecision(1, false, true),
+             accountPickerLaunchDecision(0, false, false)].join(',')
+        )JS"));
+        QCOMPARE(decisions.toString(), QStringLiteral("false,false,true,true,false,true,false"));
+        const auto launch = engine.evaluate(QStringLiteral(R"JS(
+            AppController.route = 'home';
+            settings = {startAsLastUsedAccount:false};
+            savedAccounts = [{userId:'old',displayName:'Old'},{userId:'new',displayName:'New'}];
+            accountsLoaded = true;
+            showSavedAccountSelection();
+            const first = AppController.route;
+            AppController.route = 'home';
+            showSavedAccountSelection();
+            [first, AppController.route].join(',')
+        )JS"));
+        QVERIFY2(!launch.isError(), qPrintable(launch.toString()));
+        QCOMPARE(launch.toString(), QStringLiteral("accounts,home"));
+        const auto skipped = engine.evaluate(QStringLiteral(R"JS(
+            launchAccountPickerConsidered = false;
+            AppController.route = 'home';
+            settings = {startAsLastUsedAccount:true};
+            showSavedAccountSelection();
+            const withSkip = AppController.route;
+            launchAccountPickerConsidered = false;
+            settings = {startAsLastUsedAccount:false};
+            savedAccounts = [{userId:'old',displayName:'Old'}];
+            showSavedAccountSelection();
+            [withSkip, AppController.route, launchAccountPickerConsidered].join(',')
+        )JS"));
+        QVERIFY2(!skipped.isError(), qPrintable(skipped.toString()));
+        QCOMPARE(skipped.toString(), QStringLiteral("home,home,true"));
+        const auto waiting = engine.evaluate(QStringLiteral(R"JS(
+            launchAccountPickerConsidered = false;
+            savedAccounts = [{userId:'old',displayName:'Old'},{userId:'new',displayName:'New'}];
+            settings = {};
+            showSavedAccountSelection();
+            const beforeSettings = [AppController.route, launchAccountPickerConsidered].join(',');
+            settings = {startAsLastUsedAccount:false};
+            activeSession = {sessionId:'seat'};
+            showSavedAccountSelection();
+            const duringSession = AppController.route;
+            activeSession = null;
+            authSession = null;
+            authState = 'idle';
+            launchAccountPickerConsidered = true;
+            savedAccounts = [{userId:'locked',displayName:'Locked',hasPin:true}];
+            showSavedAccountSelection();
+            [beforeSettings, duringSession, AppController.route].join(',')
+        )JS"));
+        QVERIFY2(!waiting.isError(), qPrintable(waiting.toString()));
+        QCOMPARE(waiting.toString(), QStringLiteral("home,false,home,accounts"));
+    }
+
+    void switchingAccountsDuringASessionAsksBeforeEndingIt()
+    {
+        QJSEngine engine;
+        QVERIFY(prepareAuthentication(engine));
+        const auto quiet = engine.evaluate(QStringLiteral(R"JS(
+            savedAccounts = [{userId:'old',displayName:'Old'},{userId:'new',displayName:'New'},
+                {userId:'locked',displayName:'Locked',hasPin:true},
+                {userId:'expired',displayName:'Expired',needsSignIn:true,providerIdpId:'alliance'}];
+            [chooseAccountAt(0), chooseAccount(savedAccounts[2], true), AppController.route,
+             chooseAccount(savedAccounts[2], false), AppController.route].join(',')
+        )JS"));
+        QVERIFY2(!quiet.isError(), qPrintable(quiet.toString()));
+        QCOMPARE(quiet.toString(), QStringLiteral("active,pin,accounts,pin,profile-pin"));
+        QCOMPARE(engine.evaluate(QStringLiteral("requests.filter(r => r.method === 'auth.accounts.switch').length")).toInt(), 0);
+        const auto expired = engine.evaluate(QStringLiteral(R"JS(
+            [chooseAccountAt(3), AppController.route, addingAccount, selectedProviderIdpId].join(',')
+        )JS"));
+        QCOMPARE(expired.toString(), QStringLiteral("sign-in,sign-in,true,alliance"));
+        const auto guarded = engine.evaluate(QStringLiteral(R"JS(
+            addingAccount = false;
+            AppController.route = 'home';
+            activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+            const outcome = chooseAccountAt(1);
+            [outcome, AppController.overlay, accountSwitchConfirmTarget.userId, stopRequests,
+             requests.filter(r => r.method === 'auth.accounts.switch').length].join(',')
+        )JS"));
+        QVERIFY2(!guarded.isError(), qPrintable(guarded.toString()));
+        QCOMPARE(guarded.toString(), QStringLiteral("confirm,account-switch-confirm,new,0,0"));
+        const auto cancelled = engine.evaluate(QStringLiteral(R"JS(
+            cancelAccountSwitch();
+            [AppController.overlay, accountSwitchConfirmTarget, stopRequests, activeSession.sessionId].join(',')
+        )JS"));
+        QCOMPARE(cancelled.toString(), QStringLiteral(",,0,seat"));
+        const auto confirmed = engine.evaluate(QStringLiteral(R"JS(
+            chooseAccountAt(1);
+            confirmAccountSwitch();
+            const waiting = [stopRequests, pendingAccountSwitch.userId,
+                requests.filter(r => r.method === 'auth.accounts.switch').length].join(',');
+            streamStopRequestId = '';
+            activeSession = null;
+            continuePendingAccountSwitch();
+            const switched = requests.filter(r => r.method === 'auth.accounts.switch');
+            [waiting, AppController.overlay, pendingAccountSwitch, switched.length, switched[0].params.userId].join(',')
+        )JS"));
+        QVERIFY2(!confirmed.isError(), qPrintable(confirmed.toString()));
+        QCOMPARE(confirmed.toString(), QStringLiteral("1,new,0,,,1,new"));
+        const auto owner = engine.evaluate(QStringLiteral(R"JS(
+            accountSwitchRequestId = '';
+            authSession = {user:{userId:'new',displayName:'New'},provider:{idpId:'alliance'}};
+            activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+            [chooseAccountAt(0), AppController.overlay].join(',')
+        )JS"));
+        QCOMPARE(owner.toString(), QStringLiteral("switch,"));
+    }
+
+    void everyAccountSwitchEntryLeavesSessionRoutesItDoesNotOwn()
+    {
+        const QList<std::pair<QString, QString>> callers{
+            {QStringLiteral("qml/desktop/auth/DesktopAccountPicker.qml"), QStringLiteral("ShellStore.chooseAccount(account, !consoleMode)")},
+            {QStringLiteral("qml/desktop/shell/DesktopAccountSwitcher.qml"), QStringLiteral("ShellStore.chooseAccount(others[index], false)")},
+            {QStringLiteral("qml/desktop/shell/DesktopShell.qml"), QStringLiteral("sequence: \"Ctrl+Shift+A\"")},
+            {QStringLiteral("qml/Main.qml"), QStringLiteral("onActivated: ShellStore.chooseAccountAt(index)")},
+            {QStringLiteral("qml/desktop/shell/DesktopCommandPalette.qml"), QStringLiteral("ShellStore.chooseAccount(action.account, false)")}};
+        for (const auto &[file, call] : callers)
+            QVERIFY2(source(file).contains(call), qPrintable(file + QStringLiteral(" no longer switches through ShellStore.chooseAccount")));
+        const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
+        QCOMPARE(shell.count(QStringLiteral("settleRouteAfterAccountSwitch()")), 2);
+        QCOMPARE(shell.count(QStringLiteral("[\"stream\", \"inserting\", \"joining\"]")), 1);
+
+        // Every entry point reaches the store through chooseAccount or
+        // chooseAccountAt from its own route; one switch completion must land
+        // the same way for all of them.
+        const QList<std::tuple<QString, QString, QString, QString, QString>> entries{
+            {QStringLiteral("picker opened from the stream"), QStringLiteral("accounts"), QStringLiteral("stream"), QStringLiteral("chooseAccount(target, true)"), QStringLiteral("home")},
+            {QStringLiteral("PIN screen opened from the stream"), QStringLiteral("profile-pin"), QStringLiteral("stream"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("home")},
+            {QStringLiteral("stream screen"), QStringLiteral("stream"), QStringLiteral("library"), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("queue screen"), QStringLiteral("inserting"), QStringLiteral("library"), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("sidebar popover and Ctrl+Shift+A"), QStringLiteral("library"), QStringLiteral("home"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("library")},
+            {QStringLiteral("Ctrl+1-9"), QStringLiteral("home"), QStringLiteral(""), QStringLiteral("chooseAccountAt(1)"), QStringLiteral("home")},
+            {QStringLiteral("command palette"), QStringLiteral("store"), QStringLiteral("home"), QStringLiteral("chooseAccount(target, false)"), QStringLiteral("store")}};
+        for (const auto &[name, route, back, pick, landing] : entries) {
+            QJSEngine engine;
+            QVERIFY(prepareAuthentication(engine));
+            const auto result = engine.evaluate(QStringLiteral(R"JS(
+                resetRegionPing = function() {};
+                AppController.goBack = function() { this.route = this.backRoute; };
+                savedAccounts = [{userId:'old',displayName:'Old'},{userId:'new',displayName:'New'}];
+                const target = savedAccounts[1];
+                activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+                AppController.route = '%1';
+                AppController.backRoute = '%2';
+                const outcome = %3;
+                confirmAccountSwitch();
+                streamStopRequestId = '';
+                activeSession = null;
+                continuePendingAccountSwitch();
+                onResponseReceived(accountSwitchRequestId,
+                    {session:{user:{userId:'new',displayName:'New'},provider:{idpId:'alliance'}},persistence:'secure-store'});
+                [outcome, stopRequests, authSession.user.userId, AppController.route].join(',')
+            )JS").arg(route, back, pick));
+            QVERIFY2(!result.isError(), qPrintable(name + QStringLiteral(": ") + result.toString()));
+            QVERIFY2(result.toString() == QStringLiteral("confirm,1,new,") + landing,
+                qPrintable(name + QStringLiteral(": ") + result.toString()));
+        }
+
+        QJSEngine owner;
+        QVERIFY(prepareAuthentication(owner));
+        const auto back = owner.evaluate(QStringLiteral(R"JS(
+            resetRegionPing = function() {};
+            savedAccounts = [{userId:'old',displayName:'Old'},{userId:'locked',displayName:'Locked',hasPin:true}];
+            authSession = {user:{userId:'locked',displayName:'Locked'},provider:{idpId:'alliance'}};
+            activeSession = {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+            AppController.route = 'accounts';
+            AppController.backRoute = 'stream';
+            const outcome = chooseAccountAt(0);
+            onResponseReceived(accountSwitchRequestId,
+                {session:{user:{userId:'old',displayName:'Old'},provider:{idpId:'alliance'}},persistence:'secure-store'});
+            [outcome, stopRequests, activeSession.sessionId, AppController.route].join(',')
+        )JS"));
+        QVERIFY2(!back.isError(), qPrintable(back.toString()));
+        QCOMPARE(back.toString(), QStringLiteral("switch,0,seat,stream"));
+
+        // Leaving the picker without switching (Back, or picking the account
+        // that is already active) follows the same rule.
+        QJSEngine backOut;
+        QVERIFY(prepareAuthentication(backOut));
+        const auto exits = backOut.evaluate(QStringLiteral(R"JS(
+            AppController.goBack = function() { this.route = this.backRoute; };
+            savedAccounts = [{userId:'old',displayName:'Old'}];
+            const results = [];
+            for (const ended of [false, true]) {
+                for (const exit of ['back', 'active']) {
+                    activeSession = ended ? null : {sessionId:'seat',ownerScope:{userId:'old',providerIdpId:'alliance'}};
+                    AppController.route = 'accounts';
+                    AppController.backRoute = 'stream';
+                    if (exit === 'back' || chooseAccountAt(0) === 'active')
+                        leaveAccountPicker();
+                    results.push(AppController.route);
+                }
+            }
+            results.join(',')
+        )JS"));
+        QVERIFY2(!exits.isError(), qPrintable(exits.toString()));
+        QCOMPARE(exits.toString(), QStringLiteral("stream,stream,home,home"));
     }
 
     void exhaustedTransportNegotiationDoesNotReclaimTheSeat_data()

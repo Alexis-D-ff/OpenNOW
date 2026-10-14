@@ -117,9 +117,18 @@ FocusScope {
             AppController.navigate(ShellStore.activeSession && ShellStore.sessionOwnerSignedIn() ? "stream" : "home")
     }
 
+    Loader {
+        objectName: "desktopAccountPickerLoader"
+        anchors.fill: parent
+        active: root.route === "accounts"
+        visible: active
+        z: 150
+        sourceComponent: DesktopAccountPicker {}
+        onLoaded: item.forceActiveFocus()
+    }
     Item {
         anchors.fill: parent
-        visible: root.profileRouteVisible
+        visible: root.route === "profile-pin"
         z: 150
         ShellViewport {
             objectName: "desktopProfileViewport"
@@ -127,14 +136,12 @@ FocusScope {
             Loader {
                 objectName: "desktopProfileLoader"
                 anchors.fill: parent
-                active: root.profileRouteVisible
-                sourceComponent: root.route === "profile-pin" ? profilePinComponent : accountsComponent
+                active: root.route === "profile-pin"
+                sourceComponent: ProfilePinScreen {}
                 onLoaded: item.forceActiveFocus()
             }
         }
     }
-    Component { id: accountsComponent; AccountsScreen {} }
-    Component { id: profilePinComponent; ProfilePinScreen {} }
 
     DesktopShell {
         id: shell
@@ -149,6 +156,9 @@ FocusScope {
         onRouteRequested: route => AppController.navigate(route)
         onConsoleModeRequested: root.toggleConsoleMode()
         onCommandPaletteRequested: root.commandOpen = true
+        accountSwitcherAllowed: root.shellVisible && !root.commandOpen && AppController.overlay === ""
+            && !bugReportNotice.opened && root.route !== "game-detail"
+        onAccountSwitcherClosed: Qt.callLater(root.restoreShellFocus)
 
         Loader {
             id: pageLoader

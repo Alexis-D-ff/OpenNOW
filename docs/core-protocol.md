@@ -30,6 +30,36 @@ handshake. The Qt client and relocated package probes reject cores that omit it,
 including older protocol-5 binaries, before sending any product requests. This
 additive capability leaves the JSON envelope and native streaming ABI unchanged.
 
+## Saved accounts (`auth.accountPicker.v1`)
+
+The "Who's playing?" picker requires the `auth.accountPicker.v1` capability. The
+Qt client rejects cores that omit it during `core.hello`, before any product
+request. The capability is additive: the protocol version, the envelope and the
+native streaming ABI are unchanged.
+
+`auth.accounts.list` returns `{accounts, activeUserId, generation}`. Each account
+contains only public identity fields; tokens never cross the boundary:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `userId`, `displayName` | string | Saved identity. |
+| `email`, `avatarUrl` | string or null | From the last sign-in or token refresh. |
+| `membershipTier` | string | `FREE`, `PERFORMANCE` or `ULTIMATE` today. Shells must render other values without failing. |
+| `providerCode` | string | Login provider code. `NVIDIA` is NVIDIA; any other code is an alliance partner. |
+| `providerName` | string | Display name for the provider. The core owns the code-to-name mapping (`gfn::provider_display_name`): the name saved at sign-in, then the discovered provider name for that code, then the code itself. `BPC` is always `bro.game`. |
+| `providerIdpId` | string, optional | Provider IdP for "Sign in again". Absent for accounts saved before this field existed until their next sign-in or refresh. |
+| `alliance` | bool | `providerCode != "NVIDIA"`. |
+| `hasPin` | bool | A local profile PIN guards `auth.accounts.switch`. |
+| `needsSignIn` | bool | The last restore or switch for this account ended with refresh outcome `expired` after the provider answered (not after a network failure). Cleared when the account signs in or refreshes again. |
+
+`auth.accounts.switch` never ends a running cloud session; the seat keeps its
+original owner. The Qt shell ends the session through its end-session
+confirmation and waits for `session.stop` before it sends the switch.
+
+The `startAsLastUsedAccount` setting (bool, default `false`) skips the launch
+picker when two or more accounts are saved. Loading settings migrates the
+retired `consoleProfilePickerOnLaunch: false` to `startAsLastUsedAccount: true`.
+
 ## Cloud library actions and launch decisions
 
 `catalog.launch.inspect({appId, variantId})` always resolves the exact parent and

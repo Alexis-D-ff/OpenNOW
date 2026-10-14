@@ -374,6 +374,8 @@ QtObject {
     property string sessionReportDropId: ""
     property var streamDropCounts: ({})
     onActiveSessionChanged: {
+        if (!activeSession && pendingAccountSwitch)
+            Qt.callLater(continuePendingAccountSwitch)
         const sessionId = String(activeSession && activeSession.sessionId || "")
         if (streamIdleWarning && streamIdleWarning.sessionId !== sessionId)
             streamIdleWarning = null
@@ -720,6 +722,11 @@ QtObject {
     property string accountsRequestId: ""
     property string accountSwitchRequestId: ""
     property string accountRemoveRequestId: ""
+    property string accountSwitchTargetUserId: ""
+    property bool accountsLoaded: false
+    property bool launchAccountPickerConsidered: false
+    property var accountSwitchConfirmTarget: null
+    property var pendingAccountSwitch: null
     property string pinRequestId: ""
     property alias gameAccountsRequestId: accountServicesOwner.gameAccountsRequestId
     property alias gameAccountActionRequestId: accountServicesOwner.gameAccountActionRequestId
@@ -1251,13 +1258,150 @@ QtObject {
         accountsRequestId = CoreClient.request("auth.accounts.list", {})
     }
 
+    // Nobody signed in with a saved account (PIN-locked or expired restore)
+    // always picks. A restored account only picks once per launch, with two
+    // or more accounts and "start as the last-used account" off.
+    function accountPickerLaunchDecision(accountCount, signedIn, startAsLastUsed) {
+        if (accountCount <= 0)
+            return false
+        if (!signedIn)
+            return true
+        return accountCount >= 2 && !startAsLastUsed
+    }
+
     function showSavedAccountSelection() {
         if (!ready || authRestorePending || authSessionRequestId !== "" || accountsRequestId !== ""
-                || signedIn || addingAccount || authState !== "idle" || activeSession || streamBusy
-                || savedAccounts.length === 0)
+                || !accountsLoaded || addingAccount || activeSession || streamBusy || pendingDirectLaunch
+                || coreSessionRestoreId !== "" || authState !== (signedIn ? "signed-in" : "idle"))
+            return
+        if (signedIn && Object.keys(settings).length === 0)
+            return
+        const launch = !launchAccountPickerConsidered
+        launchAccountPickerConsidered = true
+        if ((signedIn && !launch)
+                || !accountPickerLaunchDecision(savedAccounts.length, signedIn, settings.startAsLastUsedAccount === true))
             return
         if (AppController.route === "home" || AppController.route === "sign-in")
             AppController.navigate("accounts")
+    }
+
+    // Session routes belong to the seat's owner. Every way out of the picker
+    // and every completed switch checks this one rule, so nobody lands on an
+    // empty stream for a seat they do not own.
+    function sessionRouteWithoutOwnedSeat(route) {
+        return ["stream", "inserting", "joining"].indexOf(route) >= 0
+            && !(Boolean(activeSession) && sessionOwnerSignedIn())
+    }
+
+    function leaveAccountPicker() {
+        const back = AppController.backRoute
+        if (back === "" || ["sign-in", "accounts", "profile-pin"].indexOf(back) >= 0
+                || sessionRouteWithoutOwnedSeat(back))
+            AppController.navigateFromLastPrimary("home")
+        else
+            AppController.goBack()
+    }
+
+    // The one place a completed auth.accounts.switch decides where to land,
+    // whichever entry point started it.
+    function settleRouteAfterAccountSwitch() {
+        const route = AppController.route
+        if (!authSession) {
+            if (route === "profile-pin")
+                AppController.navigate("accounts")
+            return
+        }
+        if (route === "accounts" || route === "profile-pin") {
+            if (Boolean(activeSession) && sessionOwnerSignedIn())
+                AppController.navigate("stream")
+            else
+                leaveAccountPicker()
+        } else if (sessionRouteWithoutOwnedSeat(route)) {
+            AppController.navigateFromLastPrimary("home")
+        }
+    }
+
+    // auth.accounts.switch never ends a cloud seat, so picking anyone but the
+    // seat's owner must end it through the confirmation first.
+    function accountSwitchEndsSession(account) {
+        if (!activeSession && streamCreateRequestId === "" && sessionClaimRequestId === ""
+                && !pendingLaunchParams)
+            return false
+        const owner = activeSession && activeSession.ownerScope
+        return !(owner && account && String(owner.userId) === String(account.userId))
+    }
+
+    function isActiveAccount(account) {
+        return Boolean(account && authSession && authSession.user
+            && String(account.userId) === String(authSession.user.userId))
+    }
+
+    // Every entry point (picker, sidebar switcher, Ctrl+1-9, command palette)
+    // picks through here. Returns what happens next so the picker can show its
+    // inline PIN pad: "active", "confirm", "sign-in", "pin" or "switch".
+    function chooseAccount(account, inlinePin) {
+        if (!account || !ready || accountSwitchRequestId !== "")
+            return ""
+        if (isActiveAccount(account))
+            return "active"
+        if (accountSwitchEndsSession(account)) {
+            accountSwitchConfirmTarget = account
+            AppController.showOverlay("account-switch-confirm")
+            accessibilityMessage = qsTr("Confirm ending the cloud session to switch to %1").arg(account.displayName || "")
+            return "confirm"
+        }
+        return continueAccountChoice(account, "", inlinePin)
+    }
+
+    function continueAccountChoice(account, pin, inlinePin) {
+        if (account.needsSignIn) {
+            beginAccountSignIn(account)
+            return "sign-in"
+        }
+        if (account.hasPin && !pin) {
+            if (!inlinePin)
+                openPin("unlock", account)
+            return "pin"
+        }
+        switchAccount(account.userId, pin)
+        return "switch"
+    }
+
+    function chooseAccountAt(index) {
+        return chooseAccount(savedAccounts[index] || null, false)
+    }
+
+    function confirmAccountSwitch() {
+        const target = accountSwitchConfirmTarget
+        accountSwitchConfirmTarget = null
+        AppController.showOverlay("")
+        if (!target)
+            return
+        pendingAccountSwitch = target
+        accountMessage = ""
+        stopStreamingSession()
+        continuePendingAccountSwitch()
+    }
+
+    function cancelAccountSwitch() {
+        accountSwitchConfirmTarget = null
+        if (AppController.overlay === "account-switch-confirm")
+            AppController.showOverlay("")
+    }
+
+    function continuePendingAccountSwitch() {
+        if (!pendingAccountSwitch || accountSwitchEndsSession(pendingAccountSwitch) || streamStopRequestId !== "")
+            return
+        const target = pendingAccountSwitch
+        pendingAccountSwitch = null
+        continueAccountChoice(target, "", false)
+    }
+
+    function beginAccountSignIn(account) {
+        const idpId = String(account && account.providerIdpId || "")
+        if (idpId !== "" && providers.some(provider => provider.idpId === idpId))
+            selectedProviderIdpId = idpId
+        beginAddAccount()
     }
 
     function refreshAccountServices() {
@@ -1520,6 +1664,7 @@ QtObject {
         cancelDeviceLogin()
         if (ready && accountSwitchRequestId === "") {
             accountMessage = ""
+            accountSwitchTargetUserId = String(userId || "")
             accountSwitchRequestId = CoreClient.request("auth.accounts.switch", {
                 userId: userId,
                 pin: pin || ""
@@ -2010,7 +2155,7 @@ QtObject {
         const adState = activeSession.adState || ({})
         const ads = adState.sessionAds || adState.ads || []
         if ((adState.sessionAdsRequired || adState.isAdsRequired) && ads.length > 0
-                && ["queue-ad", "desktop-stream-exit-confirm", "application-quit-confirm"]
+                && ["queue-ad", "desktop-stream-exit-confirm", "application-quit-confirm", "account-switch-confirm"]
                     .indexOf(AppController.overlay) < 0)
             AppController.showOverlay("queue-ad")
         if (streamState === "ready" || streamState === "streaming") {
@@ -3649,6 +3794,7 @@ QtObject {
             } else if (requestId === root.settingsRequestId && result.settings) {
                 settingsOwner.acceptSettings(result)
                 root.resolveDirectLaunch()
+                root.showSavedAccountSelection()
                 root.syncDiscordPresence()
                 root.refreshStreamerDetection()
             } else if (requestId === root.consoleSurfaceRequestId) {
@@ -3783,6 +3929,7 @@ QtObject {
             } else if (requestId === root.accountsRequestId) {
                 root.savedAccounts = result.accounts || []
                 root.accountsRequestId = ""
+                root.accountsLoaded = true
                 root.showSavedAccountSelection()
             } else if (requestId === root.accountSwitchRequestId) {
                 root.resetRegionPing()
@@ -3791,16 +3938,14 @@ QtObject {
                 root.sessionPersistence = result.persistence || "os-credential-store"
                 root.authState = root.authSession ? "signed-in" : "error"
                 root.accountSwitchRequestId = ""
+                root.accountSwitchTargetUserId = ""
                 if (root.sessionPersistenceMessage !== "")
                     root.accessibilityMessage = root.sessionPersistenceMessage
                 root.reloadCatalogForSession()
                 root.refreshAccountServices()
+                root.refreshSavedAccounts(true)
                 root.pinMessage = qsTr("")
-                if (root.authSession && root.activeSession && root.sessionOwnerSignedIn()
-                        && ["accounts", "profile-pin"].indexOf(AppController.route) >= 0)
-                    AppController.navigate("stream")
-                else if (AppController.route === "profile-pin")
-                    AppController.navigate("accounts")
+                root.settleRouteAfterAccountSwitch()
             } else if (requestId === root.accountRemoveRequestId) {
                 root.accountRemoveRequestId = ""
                 root.refreshSavedAccounts(true)
@@ -3978,6 +4123,7 @@ QtObject {
                 }
             } else if (requestId === root.streamStopRequestId) {
                 root.streamStopRequestId = ""
+                Qt.callLater(root.continuePendingAccountSwitch)
                 const wasForceNewAfterStop = root.forceNewAfterStop
                 root.remoteSessions = []
                 root.acceptStreamingSession(result.session || null)
@@ -3991,9 +4137,9 @@ QtObject {
                         root.createPendingSession()
                     else if (AppController.route === "inserting")
                         AppController.navigate("home")
-                } else if (AppController.route !== "game-detail")
+                } else if (!root.pendingAccountSwitch && AppController.route !== "game-detail")
                     AppController.navigateFromLastPrimary("game-detail")
-                if (!wasForceNewAfterStop && Boolean(root.settings.showSessionReport)
+                if (!wasForceNewAfterStop && !root.pendingAccountSwitch && Boolean(root.settings.showSessionReport)
                         && root.lastSessionReport)
                     AppController.showOverlay("session-report")
             } else if (requestId === root.streamerPrepareRequestId) {
@@ -4097,8 +4243,10 @@ QtObject {
                 accountServicesOwner.failRegionPing(message)
             } else if (requestId === root.accountsRequestId) {
                 root.accountsRequestId = ""
+                root.accountsLoaded = true
             } else if (requestId === root.accountSwitchRequestId) {
                 root.accountSwitchRequestId = ""
+                root.accountSwitchTargetUserId = ""
                 root.pinMessage = message
                 root.accountMessage = message
             } else if (requestId === root.accountRemoveRequestId) {
@@ -4214,6 +4362,10 @@ QtObject {
                 root.handleStreamPollFailure(code, message)
             } else if (requestId === root.streamStopRequestId) {
                 root.streamStopRequestId = ""
+                if (root.pendingAccountSwitch) {
+                    root.pendingAccountSwitch = null
+                    root.accountMessage = message
+                }
                 root.forceNewAfterStop = false
                 root.streamState = root.conflictSession ? "conflict" : "error"
                 root.streamMessage = qsTr("The previous game hasn't closed. Try again in a moment. We won't start another game until it has ended.")

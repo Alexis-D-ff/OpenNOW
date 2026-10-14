@@ -1065,6 +1065,7 @@ impl GfnService {
                 ),
                 Ok(_) => {
                     self.defer_refresh();
+                    self.mark_needs_sign_in(&current.user.user_id);
                     (
                         None,
                         json!({"attempted":true,"outcome":"expired","message":"The required authentication token was not renewed. Sign in again."}),
@@ -1103,6 +1104,9 @@ impl GfnService {
                 Err(error) => {
                     self.defer_refresh();
                     eprintln!("auth: expired session could not refresh: {}", error.message);
+                    if error.code == "http_unauthorized" {
+                        self.mark_needs_sign_in(&current.user.user_id);
+                    }
                     (
                         None,
                         json!({"attempted":true,"outcome":"expired","message":"Saved session expired. Sign in again if this continues."}),
@@ -1131,6 +1135,12 @@ impl GfnService {
             )
         };
         Ok((session, refresh))
+    }
+
+    fn mark_needs_sign_in(&self, user_id: &str) {
+        if let Err(error) = self.vault.mark_needs_sign_in(user_id) {
+            eprintln!("auth: expired account state could not be saved: {error}");
+        }
     }
 
     fn defer_refresh(&self) {
@@ -1327,17 +1337,34 @@ impl GfnService {
             code: "credential_store_error",
             message,
         })?;
+        let (active_user_id, providers) = {
+            let state = self.state.lock().expect("GFN state poisoned");
+            (
+                state
+                    .session
+                    .as_ref()
+                    .map(|session| session.user.user_id.clone()),
+                state.providers.clone(),
+            )
+        };
         for account in &mut accounts {
             let user_id = account["userId"].as_str().unwrap_or_default();
             account["hasPin"] = Value::Bool(self.profiles.has_pin(user_id));
+            let code = account["providerCode"]
+                .as_str()
+                .filter(|code| !code.is_empty())
+                .unwrap_or("NVIDIA")
+                .to_owned();
+            let discovered = providers
+                .iter()
+                .find(|provider| provider.code == code)
+                .map(|provider| provider.display_name.as_str());
+            let name =
+                provider_display_name(&code, account["providerName"].as_str().or(discovered))
+                    .unwrap_or_else(|| code.clone());
+            account["providerName"] = Value::String(name);
+            account["alliance"] = Value::Bool(is_alliance_provider(&code));
         }
-        let active_user_id = self
-            .state
-            .lock()
-            .expect("GFN state poisoned")
-            .session
-            .as_ref()
-            .map(|session| session.user.user_id.clone());
         Ok(
             json!({"accounts":accounts,"activeUserId":active_user_id,"generation":self.auth_generation()}),
         )
@@ -3006,6 +3033,27 @@ fn is_definitive_auth_revocation(error: &ServiceError) -> bool {
         || message.contains("revoked")
 }
 
+/// Partners whose discovery label is not the brand their members know.
+const PROVIDER_DISPLAY_OVERRIDES: &[(&str, &str)] = &[("BPC", "bro.game")];
+
+pub(crate) fn is_alliance_provider(code: &str) -> bool {
+    code != "NVIDIA"
+}
+
+/// The one place a provider code becomes the name shown to people.
+pub(crate) fn provider_display_name(code: &str, discovered: Option<&str>) -> Option<String> {
+    PROVIDER_DISPLAY_OVERRIDES
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map(|(_, name)| (*name).to_owned())
+        .or_else(|| {
+            discovered
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+}
+
 fn parse_providers(payload: &Value) -> Vec<LoginProvider> {
     let mut providers = payload["gfnServiceInfo"]["gfnServiceEndpoints"]
         .as_array()
@@ -3017,12 +3065,10 @@ fn parse_providers(payload: &Value) -> Vec<LoginProvider> {
                 LoginProvider {
                     idp_id: entry["idpId"].as_str()?.to_owned(),
                     code: code.to_owned(),
-                    display_name: if code == "BPC" {
-                        "bro.game"
-                    } else {
-                        entry["loginProviderDisplayName"].as_str()?
-                    }
-                    .to_owned(),
+                    display_name: provider_display_name(
+                        code,
+                        entry["loginProviderDisplayName"].as_str(),
+                    )?,
                     streaming_service_url: entry["streamingServiceUrl"].as_str()?.to_owned(),
                     priority: entry["loginProviderPriority"].as_i64().unwrap_or(0),
                 }
@@ -3580,7 +3626,7 @@ fn bug_report_identity(user: &AuthUser, provider: &LoginProvider) -> Value {
         "providerName": provider.display_name,
         "reporter": reporter,
         "reporterBasis": basis,
-        "alliancePartner": provider.code != "NVIDIA",
+        "alliancePartner": is_alliance_provider(&provider.code),
         "membershipTier": user.membership_tier
     })
 }
@@ -4851,6 +4897,70 @@ pub(crate) mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["id"], "digital_store");
         assert_eq!(groups[0]["options"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn provider_codes_map_to_one_display_name() {
+        assert_eq!(
+            provider_display_name("BPC", Some("BPC")).as_deref(),
+            Some("bro.game")
+        );
+        assert_eq!(
+            provider_display_name("BPC", None).as_deref(),
+            Some("bro.game")
+        );
+        assert_eq!(
+            provider_display_name("DIG", Some(" Digevo ")).as_deref(),
+            Some("Digevo")
+        );
+        assert_eq!(provider_display_name("NEW", Some("  ")), None);
+        assert_eq!(provider_display_name("NEW", None), None);
+        assert!(!is_alliance_provider("NVIDIA"));
+        assert!(is_alliance_provider("BPC"));
+        assert!(is_alliance_provider("UNKNOWN"));
+    }
+
+    #[test]
+    fn saved_accounts_name_partners_and_report_expired_sign_ins() {
+        let (service, path) = test_service("http://127.0.0.1:9");
+        let mut partner = auth_fixture("partner");
+        partner.provider.code = "BPC".into();
+        partner.provider.idp_id = "bpc-idp".into();
+        partner.provider.display_name = "bro.game".into();
+        service.vault.save(&partner).unwrap();
+        service.vault.save(&auth_fixture("nvidia")).unwrap();
+        service.vault.mark_needs_sign_in("partner").unwrap();
+        service.state.lock().unwrap().providers.push(LoginProvider {
+            idp_id: "dig-idp".into(),
+            code: "DIG".into(),
+            display_name: "Digevo".into(),
+            streaming_service_url: "https://dig.example/".into(),
+            priority: 3,
+        });
+        let mut legacy = auth_fixture("legacy");
+        legacy.provider.code = "DIG".into();
+        legacy.provider.display_name = String::new();
+        service.vault.save(&legacy).unwrap();
+        let result = service.saved_accounts().unwrap();
+        let accounts = result["accounts"].as_array().unwrap();
+        let by_id = |id: &str| {
+            accounts
+                .iter()
+                .find(|item| item["userId"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_id("partner")["providerName"], "bro.game");
+        assert_eq!(by_id("partner")["providerIdpId"], "bpc-idp");
+        assert_eq!(by_id("partner")["alliance"], true);
+        assert_eq!(by_id("partner")["needsSignIn"], true);
+        assert_eq!(by_id("nvidia")["providerName"], "NVIDIA");
+        assert_eq!(by_id("nvidia")["alliance"], false);
+        assert_eq!(by_id("nvidia")["needsSignIn"], false);
+        assert_eq!(by_id("legacy")["providerName"], "Digevo");
+        assert!(accounts.iter().all(|item| item.get("tokens").is_none()));
+        assert!(!result.to_string().contains("test-access"));
+        std::fs::remove_dir_all(path).ok();
     }
 
     #[test]

@@ -454,6 +454,23 @@ private slots:
         QVERIFY(responses.isEmpty());
     }
 
+    void rejectsCoreWithoutAccountPickerCapability()
+    {
+        const auto previous = qgetenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY");
+        const auto restore = qScopeGuard([previous] {
+            if (previous.isNull()) qunsetenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY");
+            else qputenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY", previous);
+        });
+        qputenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY", "1");
+        QStringList errors;
+        CoreClient client;
+        connect(&client, &CoreClient::lastErrorChanged, &client, [&] { errors.append(client.lastError()); });
+        QVERIFY(client.start(fakeCorePath()));
+        QTRY_COMPARE_WITH_TIMEOUT(client.state(), QStringLiteral("failed"), 2'000);
+        QVERIFY(errors.contains(QStringLiteral("The packaged core lacks a required capability: auth.accountPicker.v1")));
+        QVERIFY(client.request(QStringLiteral("auth.accounts.list")).isEmpty());
+    }
+
     void rejectsCatalogRequestsDuringHandshakeAndProtocolFailure()
     {
         const auto previous = qgetenv("OPENNOW_TEST_OLD_CORE");

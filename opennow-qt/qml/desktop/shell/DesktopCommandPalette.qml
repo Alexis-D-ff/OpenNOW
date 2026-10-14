@@ -187,9 +187,36 @@ FocusScope {
         return qsTr("Available on GeForce NOW")
     }
 
+    readonly property var accountActions: {
+        if (!ShellStore.signedIn)
+            return []
+        const accounts = ShellStore.savedAccounts || []
+        const result = []
+        for (let index = 0; index < accounts.length; ++index) {
+            const account = accounts[index]
+            if (ShellStore.isActiveAccount(account))
+                continue
+            const tier = String(account.membershipTier || "")
+            result.push({
+                icon: "desktop-users.svg",
+                name: qsTr("Switch to %1").arg(account.displayName || qsTr("NVIDIA profile")),
+                detail: account.needsSignIn ? qsTr("Sign-in expired · sign in again")
+                    : [tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase(), String(account.providerName || "")]
+                        .filter(part => part !== "").join(" · "),
+                account: account,
+                route: "",
+                key: index < 9 ? "Ctrl+" + (index + 1) : ""
+            })
+        }
+        if (accounts.length > 0)
+            result.push({ icon: "desktop-pencil.svg", name: qsTr("Manage accounts"),
+                detail: qsTr("Add, remove or lock saved accounts"), route: "accounts", key: "" })
+        return result
+    }
+
     function matchedActions() {
         const q = root.query.trim().toLocaleLowerCase()
-        return root.actions.filter(item =>
+        return root.actions.concat(root.accountActions).filter(item =>
             q === "" || String(item.name + " " + item.detail).toLocaleLowerCase().indexOf(q) >= 0)
     }
 
@@ -253,8 +280,11 @@ FocusScope {
             return
         }
         const action = root.actionList[index - root.gameList.length]
-        root.routeRequested(action.route)
         root.closeRequested()
+        if (action.account)
+            ShellStore.chooseAccount(action.account, false)
+        else
+            root.routeRequested(action.route)
     }
 
     onQueryChanged: root.scheduleSearch()

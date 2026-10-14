@@ -115,7 +115,7 @@ ApplicationWindow {
     readonly property bool desktopRequested: effectiveLaunchMode === "desktop"
         || (effectiveLaunchMode !== "console" && !consolePreferred)
     readonly property bool desktopEligibleRoute: ["joining",
-        "accounts", "profile-pin", "game-accounts", "persistent-storage", "media",
+        "profile-pin", "game-accounts", "persistent-storage", "media",
         "diagnostics", "feedback", "theme-store"].indexOf(activeRoute) < 0
     readonly property bool targetDesktopSurface: streamSurfaceLocked
         ? lockedStreamDesktopSurface : onboardingVisible || (desktopRequested && desktopEligibleRoute)
@@ -199,6 +199,22 @@ ApplicationWindow {
             Qt.callLater(window.restoreConsoleModalFocus)
     }
     onDesktopSurfaceActiveChanged: ShellStore.desktopUiActive = desktopSurfaceActive
+
+    readonly property bool accountShortcutsEnabled: ShellStore.signedIn && ShellStore.savedAccounts.length > 1
+        && ["stream", "inserting", "joining", "sign-in", "profile-pin", "settings-shortcuts"].indexOf(activeRoute) < 0
+        && AppController.overlay === "" && !onboardingVisible && consoleModalFocusOwner === null
+    Instantiator {
+        model: 9
+        delegate: Shortcut {
+            required property int index
+            objectName: "accountSwitchShortcut" + (index + 1)
+            sequence: "Ctrl+" + (index + 1)
+            context: Qt.WindowShortcut
+            autoRepeat: false
+            enabled: window.accountShortcutsEnabled && index < ShellStore.savedAccounts.length
+            onActivated: ShellStore.chooseAccountAt(index)
+        }
+    }
 
     Shortcut {
         objectName: "shellFullscreenShortcut"
@@ -916,6 +932,19 @@ ApplicationWindow {
         }
     }
 
+    DesktopStreamExitConfirm {
+        objectName: "accountSwitchConfirmation"
+        anchors.fill: parent
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        switchTargetName: ShellStore.accountSwitchConfirmTarget
+            ? String(ShellStore.accountSwitchConfirmTarget.displayName || qsTr("this account")) : qsTr("this account")
+        opened: window.desktopSurfaceActive && AppController.overlay === "account-switch-confirm"
+        z: 1200
+        onCancelRequested: ShellStore.cancelAccountSwitch()
+        onConfirmRequested: ShellStore.confirmAccountSwitch()
+    }
+
     Item {
         readonly property real consoleScale: Math.min(window.width / 1920, window.height / 1080)
         visible: consoleSystemWarning.present
@@ -931,7 +960,10 @@ ApplicationWindow {
             id: consoleSystemWarning
             anchors.fill: parent
             readonly property bool quittingApplication: AppController.overlay === "application-quit-confirm"
-            readonly property bool endingSession: AppController.overlay === "desktop-stream-exit-confirm"
+            readonly property bool switchingAccount: AppController.overlay === "account-switch-confirm"
+            readonly property string switchTargetName: ShellStore.accountSwitchConfirmTarget
+                ? String(ShellStore.accountSwitchConfirmTarget.displayName || "") : ""
+            readonly property bool endingSession: AppController.overlay === "desktop-stream-exit-confirm" || switchingAccount
             readonly property bool waitingForSession: window.activeRoute === "inserting"
             objectName: !window.desktopSurfaceActive && quittingApplication
                 ? "applicationQuitConfirmation" : "consoleSystemWarning"
@@ -940,20 +972,23 @@ ApplicationWindow {
                     && ShellStore.updaterFailureMessage !== ""))
             panelSide: endingSession && !waitingForSession ? "left" : "right"
             panelInset: endingSession && !waitingForSession ? 48 : 0
-            eyebrow: quittingApplication ? qsTr("QUIT") : endingSession
+            eyebrow: quittingApplication ? qsTr("QUIT") : switchingAccount ? qsTr("END SESSION TO SWITCH") : endingSession
                 ? (waitingForSession ? qsTr("LEAVE QUEUE") : qsTr("END SESSION")) : qsTr("UPDATE")
-            title: quittingApplication ? qsTr("Quit OpenNOW?") : endingSession
+            title: quittingApplication ? qsTr("Quit OpenNOW?")
+                : switchingAccount ? qsTr("Switch to %1?").arg(switchTargetName) : endingSession
                 ? (waitingForSession ? qsTr("Leave this session request?") : qsTr("End this session?"))
                 : qsTr("Update could not be completed")
             message: quittingApplication
                 ? qsTr("OpenNOW will close and disconnect from any active cloud session.")
+                : switchingAccount
+                ? qsTr("Your game will close on the remote rig. This session cannot be resumed after it ends.")
                 : endingSession
                 ? (waitingForSession ? qsTr("Your session request will be cancelled and you will leave the queue.")
                     : qsTr("Your game will close on the remote rig. Unsaved progress may be lost. This session cannot be resumed after it ends."))
                 : ShellStore.updaterFailureMessage
             safeText: quittingApplication ? qsTr("Keep OpenNOW open") : endingSession
                 ? (waitingForSession ? qsTr("Keep waiting") : qsTr("Keep playing")) : qsTr("Close")
-            actionText: quittingApplication ? qsTr("Quit OpenNOW") : endingSession
+            actionText: quittingApplication ? qsTr("Quit OpenNOW") : switchingAccount ? qsTr("End and switch") : endingSession
                 ? (waitingForSession ? qsTr("Cancel session") : qsTr("End session")) : ""
             danger: quittingApplication || endingSession
             safeButtonObjectName: quittingApplication ? "quitConfirmKeepOpen" : endingSession
@@ -961,7 +996,9 @@ ApplicationWindow {
             actionButtonObjectName: quittingApplication ? "quitConfirmQuit" : "streamExitEndSession"
             signal confirmRequested()
             onSafeRequested: {
-                if (quittingApplication || endingSession)
+                if (switchingAccount)
+                    ShellStore.cancelAccountSwitch()
+                else if (quittingApplication || endingSession)
                     AppController.showOverlay(consoleOverlayHost.retainingQueueAd ? "queue-ad" : "")
                 else
                     ShellStore.updaterFailureMessage = ""
@@ -980,6 +1017,8 @@ ApplicationWindow {
                 if (quittingApplication) {
                     window.applicationCloseConfirmed = true
                     window.close()
+                } else if (switchingAccount) {
+                    ShellStore.confirmAccountSwitch()
                 } else if (endingSession) {
                     ShellStore.confirmStreamExit()
                 }
@@ -1110,6 +1149,7 @@ ApplicationWindow {
                 "stream": qsTr("Stream"),
                 "accounts": qsTr("Accounts"),
                 "profile-pin": qsTr("Profile security"),
+                "account-switch-confirm": qsTr("Switch account confirmation"),
                 "game-accounts": qsTr("Game accounts"),
                 "persistent-storage": qsTr("Persistent storage"),
                 "media": qsTr("Captures"),
@@ -1209,7 +1249,7 @@ ApplicationWindow {
     Component { id: joiningScreen; JoiningScreen {} }
     Component { id: insertingScreen; InsertingScreen {} }
     Component { id: streamScreen; StreamScreen {} }
-    Component { id: accountsScreen; AccountsScreen {} }
+    Component { id: accountsScreen; DesktopAccountPicker { consoleMode: true } }
     Component { id: profilePinScreen; ProfilePinScreen {} }
     Component { id: gameAccountsScreen; GameAccountsScreen {} }
     Component { id: persistentStorageScreen; PersistentStorageScreen {} }
