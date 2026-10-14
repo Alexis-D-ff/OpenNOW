@@ -74,8 +74,8 @@ pinned signing key need one manual upgrade. Checksums alone detect corrupted dow
 they do not verify who published a package.
 
 The [nightly guide](docs/qt-nightly-release.md) covers these packages. The signed
-1.0.0 candidate workflow currently builds Windows and Linux only; see the
-[release-candidate guide](docs/qt-release-candidate.md). The separate
+candidate workflow builds Windows and Linux, each on x64 and ARM64, and macOS
+on ARM64; see the [release-candidate guide](docs/qt-release-candidate.md). The separate
 [OpenNOW-Mac](https://github.com/OpenCloudGaming/OpenNOW-Mac) project is also available.
 
 ### Other platforms
