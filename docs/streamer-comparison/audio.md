@@ -28,8 +28,8 @@ are bounded by the existing eight-redundant-block RED receive limit. Duplicates
 and stale originals are discarded. An SSRC change clears queued packets and
 starts a new clock baseline. Sender timestamps, sequences, SSRCs, payloads, and
 arrival metadata are preserved. `audio-jitter` diagnostics report the target,
-queue depth, reordering, stale/overflow/invalid drops, source changes, and
-underflow observations once a second.
+queue depth, reordering, stale/overflow/invalid drops, source changes,
+underflow observations, and playout resyncs once a second.
 
 This introduces an explicit 45–200 ms network delay. The old 120 ms figure is a
 PCM queue capacity, not a fixed playout delay; its gentle backlog catch-up target
