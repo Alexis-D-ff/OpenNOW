@@ -113,7 +113,10 @@ Column {
             if (!ShellStore.activeSession
                     || String((ShellStore.streamer || {}).status || "") !== "streaming") return
             root.antiAfkNotice = true
-            antiAfkAnimation.restart()
+            if (root.active)
+                antiAfkAnimation.restart()
+            else
+                antiAfkAnimation.stop()
         }
     }
     onActiveChanged: {
@@ -121,6 +124,10 @@ Column {
         if (active) {
             observeTelemetry()
             observeColorFormat()
+            if (antiAfkNotice)
+                antiAfkAnimation.restart()
+        } else if (antiAfkNotice) {
+            antiAfkAnimation.stop()
         }
     }
     onSessionIdChanged: {
