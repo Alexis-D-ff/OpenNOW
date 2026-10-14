@@ -7,8 +7,8 @@ presentation; OpenGL is not an embedded streaming backend.
 Auto never switches to software decoding on its own, including after a failed
 hardware start. When no hardware decoder is available, choose **Software (CPU)** in
 Stream settings to decode with the bundled FFmpeg software decoder. That path accepts
-8-bit 4:2:0 SDR only: HDR, 10-bit, and 4:4:4 are refused before CloudMatch instead of
-being downgraded, and frames are copied through a bounded CPU NV12 upload. Expect
+8-bit 4:2:0 SDR only: HDR, 10-bit, and 4:4:4 are downgraded to 8-bit 4:2:0 SDR before
+CloudMatch, and frames are copied through a bounded CPU NV12 upload. Expect
 higher CPU load and lower frame rates than hardware decoding.
 
 If a VA-API decoder opens but its driver cannot export decoded frames as DMA-BUFs,
