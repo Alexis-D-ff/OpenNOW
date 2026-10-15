@@ -49,7 +49,7 @@ impl StoreDefinition {
         let provider = normalize_store(&self.store);
         let known = matches!(
             provider.as_str(),
-            "UPLAY" | "BATTLENET" | "EPIC" | "GAIJIN" | "STEAM" | "XBOX"
+            "UPLAY" | "BATTLENET" | "EPIC" | "GAIJIN" | "GOG" | "STEAM" | "XBOX"
         );
         json!({
             "provider":provider,"store":self.store,"label":self.label,"sortOrder":self.sort_order,
@@ -212,6 +212,23 @@ pub fn filter_expression(value: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gog_connection_capabilities_follow_server_features() {
+        for supported in [false, true] {
+            let store: StoreDefinition = serde_json::from_value(json!({
+                "store":"GOG","label":"GOG","features":[
+                    {"__typename":"AccountLinkingSso","supported":supported},
+                    {"__typename":"AccountGamesSyncing","supported":supported}
+                ]
+            }))
+            .unwrap();
+            let connection = store.connection_definition();
+            assert_eq!(connection["provider"], "GOG");
+            assert_eq!(connection["supportsLinking"], supported);
+            assert_eq!(connection["supportsSync"], supported);
+        }
+    }
 
     #[test]
     fn store_definitions_preserve_nullable_variant_scope_and_link_requirements() {

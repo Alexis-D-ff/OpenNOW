@@ -671,6 +671,7 @@ fn provider_definitions() -> Vec<Value> {
         json!({"provider":"BATTLENET","label":"Battle.net","sortOrder":101,"supportsLinking":true,"supportsSync":true,"isRequired":true}),
         json!({"provider":"EPIC","label":"Epic Games","sortOrder":104,"supportsLinking":true,"supportsSync":false,"isRequired":true}),
         json!({"provider":"GAIJIN","label":"Gaijin.net","sortOrder":105,"supportsLinking":true,"supportsSync":true,"isRequired":true}),
+        json!({"provider":"GOG","label":"GOG","sortOrder":106,"supportsLinking":true,"supportsSync":true,"isRequired":true}),
         json!({"provider":"STEAM","label":"Steam","sortOrder":108,"supportsLinking":false,"supportsSync":true,"isRequired":false}),
         json!({"provider":"XBOX","label":"Xbox","sortOrder":120,"supportsLinking":true,"supportsSync":true,"isRequired":true}),
     ]
@@ -890,6 +891,113 @@ mod tests {
             ensure_provider_feature(&provider_definitions(), "STEAM", "supportsLinking").is_err()
         );
         assert!(ensure_provider_feature(&provider_definitions(), "STEAM", "supportsSync").is_ok());
+    }
+
+    #[test]
+    fn gog_link_uses_als_and_confirms_connection_through_account_discovery() {
+        let (callback_sender, callback_receiver) = mpsc::channel();
+        let (url, worker) = crate::gfn::tests::mock_requests(
+            vec![
+                (200, json!({"login_url":"https://example.com/gog-sign-in"})),
+                (
+                    200,
+                    json!({"data":{"userAccount":{"subscriptions":[],"storesData":[{
+                        "store":"GOG","accountLinkingData":{"userDisplayName":"Fixture"}
+                    }]}}}),
+                ),
+            ],
+            move |index, request| {
+                if index == 0 {
+                    let target = request.split_whitespace().nth(1).unwrap();
+                    let url = Url::parse(&format!("http://localhost{target}")).unwrap();
+                    assert_eq!(url.path(), "/login_url");
+                    let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                    assert_eq!(query["platform"], "GOG");
+                    assert_eq!(query["client_id"], "gfn-pc");
+                    let callback = Url::parse(&query["redirect_uri"]).unwrap();
+                    assert_eq!(callback.host_str(), Some("localhost"));
+                    assert!(CALLBACK_PORTS.contains(&callback.port().unwrap()));
+                    callback_sender.send(callback).unwrap();
+                } else {
+                    assert!(request.starts_with("POST / HTTP/1.1\r\n"));
+                }
+            },
+        );
+        let service = AccountConnectionsService::new();
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let auth = crate::gfn::tests::auth_fixture("account-a");
+        let definitions = json!({"stores":{"status":"success","items":[{
+            "store":"GOG","label":"GOG","features":[
+                {"__typename":"AccountLinkingSso","supported":true},
+                {"__typename":"AccountGamesSyncing","supported":true}
+            ]
+        }]}});
+        let requests = crate::store_requests::StoreRequests::default();
+        let context = AccountContext {
+            client: &client,
+            auth: &auth,
+            generation: 1,
+            graphql: &url,
+            als: &url,
+            definitions: &definitions,
+            requests: &requests,
+            check: &|| Ok(()),
+        };
+        let result = service
+            .start_link(&json!({"provider":"gog"}), &context)
+            .unwrap();
+        assert_eq!(result["provider"], "GOG");
+        assert_eq!(result["loginUrl"], "https://example.com/gog-sign-in");
+        let attempt_id = result["attemptId"].as_str().unwrap();
+        assert_eq!(
+            service
+                .poll_link(&json!({"attemptId":attempt_id}), &context)
+                .unwrap()["status"],
+            "pending"
+        );
+        let callback = client
+            .get(callback_receiver.recv().unwrap())
+            .query(&[("platform", "GOG")])
+            .send()
+            .unwrap();
+        assert_eq!(callback.status().as_u16(), 302);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let result = loop {
+            let result = service
+                .poll_link(&json!({"attemptId":attempt_id}), &context)
+                .unwrap();
+            if result["status"] != "pending" {
+                break result;
+            }
+            assert!(Instant::now() < deadline, "GOG callback was not observed");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(result["status"], "complete");
+        assert_eq!(result["account"]["accounts"][0]["supportsSync"], true);
+        assert!(service.attempts.lock().unwrap().is_empty());
+        worker.join().unwrap();
+
+        let mut disabled = definitions.clone();
+        disabled["stores"]["items"][0]["features"] = json!([]);
+        let context = AccountContext {
+            definitions: &disabled,
+            ..context
+        };
+        let params = json!({"provider":"GOG"});
+        assert!(service.start_link(&params, &context).is_err());
+        assert!(service.sync(&params, &context).is_err());
+        assert!(service.unlink(&params, &context).is_err());
+        let context = AccountContext {
+            definitions: &Value::Null,
+            ..context
+        };
+        assert!(service.start_link(&params, &context).is_err());
+        assert!(service.sync(&params, &context).is_err());
     }
 
     fn account(date: &str, state: &str) -> Value {
