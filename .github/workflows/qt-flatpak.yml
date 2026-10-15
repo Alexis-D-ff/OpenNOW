@@ -82,7 +82,7 @@ jobs:
         env:
           FLATPAK_BUNDLE: ${{ steps.identity.outputs.bundle }}
         run: |
-          flatpak-builder --user --force-clean --jobs=4 \
+          flatpak-builder --user --force-clean --jobs="$(nproc)" \
             --state-dir=build/flatpak/state --repo=build/flatpak/repo \
             build/flatpak/app opennow-qt/packaging/flatpak/io.github.opencloudgaming.OpenNOW.generated.json
           flatpak build-bundle build/flatpak/repo "$FLATPAK_BUNDLE" \
