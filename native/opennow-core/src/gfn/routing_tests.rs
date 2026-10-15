@@ -486,6 +486,144 @@ fn launch_metadata() -> Vec<(u16, Value)> {
 }
 
 #[test]
+fn native_session_end_releases_owned_seat_before_next_allocation() {
+    let mut responses = launch_metadata();
+    responses.push((
+        200,
+        json!({"requestStatus":{"statusCode":1},"session":{
+            "sessionId":"replacement-seat","status":1
+        }}),
+    ));
+    let (url, worker) = mock_requests(responses, |index, request| {
+        if index == 6 {
+            assert!(request.starts_with("POST /v2/session?"), "{request}");
+        }
+        assert!(!request.starts_with("DELETE "));
+    });
+    let (mut service, path) = service(&url);
+    service
+        .cloudmatch
+        .set_test_control_base(url::Url::parse(&url).unwrap());
+    let seat = json!({"sessionId":"ended-seat","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(auth_fixture("account-a"), 7, &seat, None).unwrap());
+    let notification = json!({"sessionId":"ended-seat","ownerScope":{
+        "userId":"account-a","providerIdpId":DEFAULT_IDP_ID,"generation":7
+    }});
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    assert!(
+        service
+            .session_routing
+            .lock()
+            .unwrap()
+            .active_owner
+            .is_none()
+    );
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        false
+    );
+    let created = service
+        .create_session(&launch_params("123"), &json!({}))
+        .unwrap();
+    assert_eq!(created["session"]["sessionId"], "replacement-seat");
+    service
+        .finish_session_create("replacement-seat", true)
+        .unwrap();
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        false
+    );
+    assert_eq!(
+        service.cloudmatch.active()["session"]["sessionId"],
+        "replacement-seat"
+    );
+    worker.join().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn native_session_end_rejects_stale_owners_and_preserves_pending_handoffs() {
+    let (service, path) = service("http://127.0.0.1:1");
+    let mut owner = auth_fixture("account-a");
+    owner.tokens.expires_at = 0;
+    owner.tokens.id_token_expires_at = Some(0);
+    let seat = json!({"sessionId":"ended-seat","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(owner, 7, &seat, None).unwrap());
+    let notification = json!({"sessionId":"ended-seat","ownerScope":{
+        "userId":"account-a","providerIdpId":DEFAULT_IDP_ID,"generation":7
+    }});
+    for (key, value) in [
+        ("userId", json!("other")),
+        ("providerIdpId", json!("other")),
+        ("generation", json!(8)),
+    ] {
+        let mut stale = notification.clone();
+        stale["ownerScope"][key] = value;
+        assert_eq!(
+            service.acknowledge_session_end(&stale).unwrap()["cleared"],
+            false
+        );
+        assert_eq!(
+            service.cloudmatch.active()["session"]["sessionId"],
+            "ended-seat"
+        );
+    }
+    for invalid in [
+        json!({}),
+        json!({"sessionId":"ended-seat"}),
+        json!({"sessionId":"","ownerScope":notification["ownerScope"]}),
+        json!({"sessionId":"ended-seat","ownerScope":{"userId":"account-a","providerIdpId":DEFAULT_IDP_ID}}),
+    ] {
+        assert_eq!(
+            service.acknowledge_session_end(&invalid).unwrap_err().code,
+            "invalid_params"
+        );
+    }
+    service
+        .session_routing
+        .lock()
+        .unwrap()
+        .active_owner
+        .as_mut()
+        .unwrap()
+        .allocation_generation = Some(7);
+    assert_eq!(
+        service
+            .acknowledge_session_end(&notification)
+            .unwrap_err()
+            .code,
+        "session_update_busy"
+    );
+    assert_eq!(
+        service.cloudmatch.active()["session"]["sessionId"],
+        "ended-seat"
+    );
+    service
+        .session_routing
+        .lock()
+        .unwrap()
+        .active_owner
+        .as_mut()
+        .unwrap()
+        .allocation_generation = None;
+    service.state.lock().unwrap().session = None;
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn owned_ad_reports_preserve_event_fields_without_accepting_foreign_session_routing() {
     let response =
         json!({"requestStatus":{"statusCode":1},"session":{"sessionId":"seat-a","status":2}});

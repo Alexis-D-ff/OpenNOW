@@ -1325,7 +1325,7 @@ impl CloudMatchService {
         Ok(())
     }
 
-    fn clear_active(&self, session_id: &str) {
+    pub(crate) fn clear_active(&self, session_id: &str) {
         let mut active = self.active.lock().expect("CloudMatch state poisoned");
         if active
             .as_ref()

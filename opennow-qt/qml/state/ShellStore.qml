@@ -835,6 +835,7 @@ QtObject {
         return ""
     }
     readonly property bool streamBusy: streamCreateRequestId !== "" || streamStopRequestId !== ""
+        || pendingSessionEnd !== null
         || remoteSessionsRequestId !== "" || sessionClaimRequestId !== "" || launchInspectRequestId !== ""
         || queueSelector.opened || queueLaunchWaitingForSubscription
         || settingsOwner.settingWrites.webrtcCompatibilityMode !== undefined
@@ -898,6 +899,16 @@ QtObject {
         repeat: true
         running: false
         onTriggered: root.pollStreamingSession()
+    }
+
+    property var pendingSessionEnd: null
+    property string sessionEndRequestId: ""
+    property string nativeEndedSessionId: ""
+    property Timer sessionEndRetryTimer: Timer {
+        interval: 1000
+        repeat: true
+        running: root.ready && root.pendingSessionEnd !== null && root.sessionEndRequestId === ""
+        onTriggered: root.flushPendingSessionEnd()
     }
 
     property Timer remoteSessionRefreshTimer: Timer {
@@ -2111,6 +2122,8 @@ QtObject {
     }
 
     function acceptStreamingSession(session) {
+        if (session && String(session.sessionId) === nativeEndedSessionId)
+            return
         if (session && Number(session.status) === 7) {
             finishRemoteSession(session.termination || {source: "cloudmatch-session-status", status: 7, sessionId: session.sessionId,
                                 resumable: false})
@@ -2479,6 +2492,12 @@ QtObject {
                 || (termination.source === "nvst-server" && termination.code === "server-terminated"))
     }
 
+    function flushPendingSessionEnd() {
+        if (!ready || !pendingSessionEnd || sessionEndRequestId !== "")
+            return
+        sessionEndRequestId = CoreClient.request("session.ended", pendingSessionEnd, 5000)
+    }
+
     function finishRemoteSession(termination, message, snapshot) {
         if (!activeSession || !isRemoteSessionTermination(termination))
             return
@@ -2493,6 +2512,14 @@ QtObject {
         streamPollRequestId = ""
         for (const id of pendingRequests)
             if (id !== "") CoreClient.cancel(id)
+        if (termination.source === "nvst-server") {
+            nativeEndedSessionId = String(activeSession.sessionId)
+            if (activeSession.ownerScope) {
+                pendingSessionEnd = {sessionId: nativeEndedSessionId,
+                    ownerScope: activeSession.ownerScope}
+                flushPendingSessionEnd()
+            }
+        }
         acceptStreamingSession(null)
         streamIdleWarning = null
         if (termination.source === "nvst-server") {
@@ -4072,9 +4099,12 @@ QtObject {
                 const ads = state.sessionAds || state.ads || []
                 if (!(state.sessionAdsRequired || state.isAdsRequired) || ads.length === 0)
                     AppController.showOverlay("")
+            } else if (requestId === root.sessionEndRequestId) {
+                root.sessionEndRequestId = ""
+                root.pendingSessionEnd = null
             } else if (requestId === root.activeSessionRequestId) {
                 root.activeSessionRequestId = ""
-                if (!root.activeSession)
+                if (!root.activeSession && !root.pendingSessionEnd)
                     root.acceptStreamingSession(result.session || null)
             } else if (requestId === root.remoteSessionDiscoveryRequestId) {
                 root.remoteSessionDiscoveryRequestId = ""
@@ -4203,6 +4233,10 @@ QtObject {
             }
         }
         function onRequestFailed(requestId, code, message) {
+            if (requestId === root.sessionEndRequestId && requestId !== "") {
+                root.sessionEndRequestId = ""
+                return
+            }
             if (settingsOwner.acceptFailure(requestId, message)) return
             if (onboardingOwner.acceptFailure(requestId, message)) {
                 return

@@ -20,6 +20,8 @@ bool prepareLaunchGuards(QJSEngine &engine)
         var desktopUiActive=false, queueLaunchWaitingForSubscription=false;
         var remoteSessionsRequestId='', streamerPrepareRequestId='';
         var coreSessionRestoreId='', sessionStopIntentId='';
+        var nativeEndedSessionId='';
+        var pendingSessionEnd=null, sessionEndRequestId='';
         var queueSelector={opened:false,begin:function(title){return false}};
         var bugReports={observeTelemetry:function(){},observeFrameDrops:function(){},reportStreamError:function(){}};
         var launchRequestedAtMs=0;
@@ -2196,6 +2198,66 @@ private slots:
             acceptStreamingSession({sessionId:'seat-b',status:2,phase:'ready'});
             streamStartedAtMs === 50000;
         )JS"));
+    }
+
+    void terminalSessionCleanupNotifiesCoreBeforeAnotherLaunch()
+    {
+        QJSEngine engine;
+        const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
+        const auto setup = engine.evaluate(QStringLiteral(R"JS(
+            var activeSession = {sessionId:'ended-seat', ownerScope:{
+                userId:'owner', providerIdpId:'provider', generation:7}};
+            var ready = true, pendingSessionEnd = null, sessionEndRequestId = '';
+            var streamerPrepareRequestId = '', streamPollRequestId = '', streamIdleWarning = null;
+            var streamer = {status:'streaming'}, lastError = '', accessibilityMessage = '';
+            var calls = [], ended = 0;
+            var CoreClient = {request:function(method, params) {
+                calls.push({method:method, params:params, sessionBeforeClear:activeSession});
+                return 'end-request';
+            }, cancel:function() {}};
+            var AppController = {route:'stream', showOverlay:function() {},
+                navigateFromLastPrimary:function(route) {this.route = route;}};
+            function qsTr(text) {return text;}
+            function reportSessionEnd() {ended++;}
+            function acceptStreamingSession(session) {activeSession = session;}
+        )JS"));
+        QVERIFY2(!setup.isError(), qPrintable(setup.toString()));
+        for (const auto &name : {"isRemoteSessionTermination", "finishRemoteSession", "flushPendingSessionEnd"}) {
+            const auto match = QRegularExpression(QStringLiteral(
+                "    function %1\\([^\\n]*\\) \\{.*?\\n    \\}").arg(QString::fromLatin1(name)),
+                QRegularExpression::DotMatchesEverythingOption).match(shell);
+            QVERIFY2(match.hasMatch(), name);
+            const auto result = engine.evaluate(match.captured(0));
+            QVERIFY2(!result.isError(), qPrintable(result.toString()));
+        }
+        const auto result = engine.evaluate(QStringLiteral(R"JS(
+            finishRemoteSession({source:'nvst-server',code:'server-terminated',resumable:false,
+                sessionId:'ended-seat'}, 'Server ended the session');
+            calls.length === 1 && calls[0].method === 'session.ended'
+                && calls[0].params.sessionId === 'ended-seat'
+                && calls[0].params.ownerScope.userId === 'owner'
+                && calls[0].params.ownerScope.generation === 7
+                && calls[0].sessionBeforeClear !== null
+                && activeSession === null && pendingSessionEnd !== null
+                && sessionEndRequestId === 'end-request';
+        )JS"));
+        QVERIFY2(!result.isError(), qPrintable(result.toString()));
+        QVERIFY(result.toBool());
+        QVERIFY(shell.contains(QStringLiteral("|| pendingSessionEnd !== null")));
+        QVERIFY(engine.evaluate(QStringLiteral(R"JS(
+            finishRemoteSession({source:'nvst-server',code:'server-terminated',resumable:false});
+            flushPendingSessionEnd();
+            calls.length === 1 && ended === 1;
+        )JS")).toBool());
+        QVERIFY(engine.evaluate(QStringLiteral(R"JS(
+            sessionEndRequestId = ''; ready = false;
+            flushPendingSessionEnd();
+            calls.length === 1 && pendingSessionEnd.sessionId === 'ended-seat';
+        )JS")).toBool());
+        QVERIFY(engine.evaluate(QStringLiteral(R"JS(
+            ready = true; flushPendingSessionEnd();
+            calls.length === 2 && calls[1].params.sessionId === 'ended-seat';
+        )JS")).toBool());
     }
 
     void mediaRecoveryIsBoundedUntilVideoActuallyStarts()
