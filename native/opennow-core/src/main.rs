@@ -12,6 +12,7 @@ mod credential_vault;
 mod device_identity;
 mod diagnostics;
 mod discord;
+mod dlss;
 mod frame_rate;
 mod gfn;
 mod language;

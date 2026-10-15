@@ -503,6 +503,9 @@ impl SettingsStore {
             }
         }
         normalize_choice(&mut self.values, "frameGeneration", &["off", "2x"], "off");
+        let dlss_overrides = crate::dlss::normalize(&self.values[crate::dlss::SETTING]);
+        self.values
+            .insert(crate::dlss::SETTING.to_owned(), dlss_overrides);
         normalize_choice(
             &mut self.values,
             "upscaling",
@@ -1206,6 +1209,13 @@ fn defaults() -> Map<String, Value> {
     })
     .as_object()
     .cloned()
+    .map(|mut values| {
+        values.insert(
+            crate::dlss::SETTING.to_owned(),
+            crate::dlss::default_overrides(),
+        );
+        values
+    })
     .expect("settings defaults are an object")
 }
 

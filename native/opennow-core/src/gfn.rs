@@ -1708,7 +1708,8 @@ impl GfnService {
             "notifyUserWhenTimeRemainingInMinutes":data["notifications"]["notifyUserWhenTimeRemainingInMinutes"],
             "notifyUserOnSessionWhenRemainingTimeInMinutes":data["notifications"]["notifyUserOnSessionWhenRemainingTimeInMinutes"],
             "state":data["currentSubscriptionState"]["state"],"isGamePlayAllowed":data["currentSubscriptionState"]["isGamePlayAllowed"],
-            "isUnlimited":data["subType"] == "UNLIMITED","entitledResolutions":resolutions,"storageAddon":storage_addon
+            "isUnlimited":data["subType"] == "UNLIMITED","entitledResolutions":resolutions,"storageAddon":storage_addon,
+            "dlssOverrides":crate::dlss::entitlements(&data)
         }}))
         })
     }

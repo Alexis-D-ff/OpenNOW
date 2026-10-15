@@ -104,6 +104,10 @@ Column {
             onSelected: value => page.settingsScreen.setChoice("colorQuality", value)
         }
     }
+    DesktopSettingsDlssOverrides {
+        width: parent.width
+        settingsScreen: page.settingsScreen
+    }
     DesktopSettingsPanel {
         width: parent.width; paperStyle: true
         DesktopSettingsSection { text: qsTr("IMAGE PROCESSING") }
