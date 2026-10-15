@@ -1657,6 +1657,21 @@ App availability, favorites, payment models, and GFN membership do not establish
 ownership of another variant. Visible detail metadata refreshes every 30 seconds;
 patch duration history is an estimate, not a promised completion time.
 
+Every game variant also carries `features`, an array of lowercase strings
+parsed from the variant's `gfn.features` key/value list: `rtx` from
+`RTX_ENABLED`, `hdr` from `HDR_ENABLED` or a non-empty
+`SUPPORTED_HDR_VERSION`, and `reflex` from `REFLEX_ENABLED`. Disabled, null,
+and unknown keys produce nothing, so the array is empty when the catalog does
+not declare a feature. The catalog has no per-game DLSS key, so no `dlss` value
+exists. Shells must not infer features from titles or genres.
+
+Every game also carries `requiresPaidMembership`, true when the catalog's
+`minimumMembershipTierLabel` names a tier other than Free (the catalog reports
+`Premium` today). It is the rule the core applies before a launch, so shells
+compare it with the account's `membershipTier` instead of parsing the label.
+Both fields are additive within protocol version 5; store-catalog cache scopes moved from
+`catalog-v2` to `catalog-v3` so cached cards are refetched with it.
+
 `catalog.definitions.get` returns independently fetched `stores`, `genres`, and
 `subscriptions` sections. Each section has `items`, `source`, `status`,
 `freshness`, `fetchedAt`, `expiresAt`, and nullable `error`. Static definitions

@@ -4239,5 +4239,32 @@
     "dlss_ray_reconstruction": "DLSS Ray Reconstruction",
     "ray_traced_games_only": "Ray-traced games only",
     "follows_the_model_preset_ray_traced_games_only": "Follows the model preset · ray-traced games only"
+  },
+  "gameLabels": {
+    "lockedDetails": "%1 needs a paid GeForce NOW membership. Your Free plan can't start it.",
+    "thisGame": "This game",
+    "launcherOwnedList": "%1 · owned",
+    "launcherOwnedSummary": "%1, owned",
+    "needsPaid": "Needs a paid membership",
+    "freePlanLocked": "Your Free plan can't start this game.",
+    "currentPlanLocked": "Your current plan can't start this game.",
+    "launchers": "LAUNCHERS",
+    "rtx": "RTX ray tracing",
+    "reflexBadge": "REFLEX",
+    "owned": "OWNED",
+    "whatIconsMean": "What the icons mean",
+    "iconGuide": "Icon guide",
+    "paletteDetail": "Launcher, feature and membership marks on game tiles",
+    "guideIntro": "Game tiles in Home, Library and Store use these marks. Hover or focus a game to see them spelled out.",
+    "guideLaunchers": "LAUNCHERS · BOTTOM LEFT",
+    "guideOwned": "A launcher you own",
+    "guideOwnedDetail": "Bright logo with a green dot. It comes first.",
+    "guideOther": "Another launcher you can play it from",
+    "guideOtherDetail": "Dimmed logo. Pick it in the game's details.",
+    "guideMore": "More launchers",
+    "guideMoreDetail": "A tile shows up to three logos, then a count.",
+    "guideFeatures": "FEATURES · BOTTOM RIGHT",
+    "guideFeaturesDetail": "Shown only when GeForce NOW's catalog lists the feature for that game.",
+    "guideMembership": "MEMBERSHIP · TOP RIGHT"
   }
 }

@@ -231,6 +231,13 @@ FocusScope {
         onPlayRequested: ShellStore.activateSelectedGame()
         onVariantSelected: index => ShellStore.selectGameVariant(index)
     }
+    DesktopIconGuide {
+        anchors.fill: parent
+        opened: root.shellVisible && AppController.overlay === "desktop-icon-guide"
+        z: 110
+        onCloseRequested: AppController.showOverlay("")
+        onOpenedChanged: if (!opened) Qt.callLater(root.restoreShellFocus)
+    }
     DesktopCommandPalette {
         objectName: "desktopCommandPalette"
         opened: root.commandOpen && root.shellVisible

@@ -615,6 +615,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-command-search"_s)
                      || m_arguments.contains(u"--smoke-game-details-layout"_s)
                      || m_arguments.contains(u"--smoke-ownership"_s)
+                     || m_arguments.contains(u"--smoke-game-labels"_s)
                      || m_arguments.contains(u"--smoke-catalog-sync"_s)
                      || m_arguments.contains(u"--smoke-library-error"_s)
                      || m_arguments.contains(u"--smoke-push-invalidation"_s)
@@ -652,6 +653,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/ColorFormatAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-ownership"_s)
             ? u"qrc:/acceptance/OwnershipAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-game-labels"_s)
+            ? u"qrc:/acceptance/GameLabelsAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-catalog-sync"_s)
             ? u"qrc:/acceptance/CatalogSyncAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-push-invalidation"_s)
@@ -833,6 +836,7 @@ int AcceptanceSession::startSmokeWorkload()
             if (ok && (m_arguments.contains(u"--smoke-collections"_s)
                        || m_arguments.contains(u"--smoke-queue-selector"_s)
                        || m_arguments.contains(u"--smoke-ownership"_s)
+                       || m_arguments.contains(u"--smoke-game-labels"_s)
                        || m_arguments.contains(u"--smoke-push-invalidation"_s)
                        || m_arguments.contains(u"--smoke-bug-reports"_s)
                        || m_arguments.contains(u"--smoke-catalog-sync"_s)
@@ -843,6 +847,7 @@ int AcceptanceSession::startSmokeWorkload()
                        || m_arguments.contains(u"--smoke-store-launch"_s))) {
                 QTimer::singleShot(250, this, [this, window, fixture] {
                     if (m_arguments.contains(u"--smoke-ownership"_s)
+                        || m_arguments.contains(u"--smoke-game-labels"_s)
                         || m_arguments.contains(u"--smoke-queue-selector"_s)
                         || m_arguments.contains(u"--smoke-library-error"_s)
                         || m_arguments.contains(u"--smoke-color-format"_s)

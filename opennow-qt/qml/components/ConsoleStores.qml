@@ -51,6 +51,26 @@ QtObject {
         return unique
     }
 
+    function launchers(game) {
+        const variants = game && game.variants || []
+        const result = []
+        const positions = {}
+        for (const variant of variants) {
+            const store = String(variant && variant.store || "").trim()
+            if (!store || store === "Unknown")
+                continue
+            const key = DesktopTokens.storeKey(store) || store.toUpperCase()
+            const owned = ownership(variant) === "owned"
+            if (positions[key] === undefined) {
+                positions[key] = result.length
+                result.push({store: store, owned: owned})
+            } else if (owned) {
+                result[positions[key]].owned = true
+            }
+        }
+        return result.filter(item => item.owned).concat(result.filter(item => !item.owned))
+    }
+
     function ownedStore(game) {
         if (!game)
             return ""

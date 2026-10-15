@@ -4878,6 +4878,7 @@ pub(crate) mod tests {
         assert_eq!(game["imageUrl"], "https://img.example/poster.jpg");
         assert_eq!(game["heroImageUrl"], "https://img.example/hero.jpg");
         assert!(STORE_PANELS_QUERY.contains("GAME_BOX_ART"));
+        assert!(STORE_PANELS_QUERY.contains("... on GfnSubscriptionFeatureValue { key value }"));
     }
 
     #[test]
@@ -5070,6 +5071,8 @@ pub(crate) mod tests {
             game["variants"][0]["supportsInGameSettingsPersistence"],
             true
         );
+        assert_eq!(game["variants"][0]["features"], json!([]));
+        assert_eq!(game["requiresPaidMembership"], false);
         assert!(game["imageUrl"].as_str().unwrap().ends_with(";f=jpg;w=900"));
         assert!(game["searchText"].as_str().unwrap().contains("valve"));
         assert!(!gfn_feature_enabled(
@@ -5084,14 +5087,15 @@ pub(crate) mod tests {
             "id":"cms-multi-store",
             "title":"Multi Store Game",
             "variants":[
-                {"id":"1001","appStore":"Steam","gfn":{"library":{"status":"PLATFORM_SYNC","selected":true}}},
+                {"id":"1001","appStore":"Steam","gfn":{"library":{"status":"PLATFORM_SYNC","selected":true},"features":[{"key":"RTX_ENABLED","value":"true"},{"key":"REFLEX_ENABLED","value":"true"}]}},
                 {"id":"1002","appStore":"Epic Games Store","gfn":{"library":{"status":"NOT_OWNED","selected":false}}},
                 {"id":"1003","appStore":"Xbox","gfn":{"library":{"status":"MANUAL","selected":false}}}
             ],
-            "gfn":{"playabilityState":"PLAYABLE"}
+            "gfn":{"playabilityState":"PLAYABLE","minimumMembershipTierLabel":"Premium"}
         }))
         .unwrap();
 
+        assert_eq!(game["requiresPaidMembership"], true);
         assert_eq!(
             game["availableStores"],
             json!(["Steam", "Epic Games Store", "Xbox"])
@@ -5100,6 +5104,8 @@ pub(crate) mod tests {
         assert_eq!(game["variants"][0]["inLibrary"], true);
         assert_eq!(game["variants"][1]["inLibrary"], false);
         assert_eq!(game["variants"][2]["inLibrary"], true);
+        assert_eq!(game["variants"][0]["features"], json!(["rtx", "reflex"]));
+        assert_eq!(game["variants"][1]["features"], json!([]));
     }
 
     #[test]

@@ -399,7 +399,26 @@ FocusScope {
                 width: parent.width
                 height: 30 + root.homeTileHeight
                 Text { text: qsTr("Jump back in"); color: "#FFFFFF"; font.family: Theme.displayFont; font.pixelSize: 16; font.weight: Font.Black; font.letterSpacing: -0.2 }
+                Row {
+                    objectName: "desktopHomeIconGuide"
+                    anchors.right: seeJumpLabel.left; anchors.rightMargin: 16; y: 1
+                    spacing: 5
+                    Image {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 12; height: 12
+                        source: "qrc:/qt/qml/OpenNOW/res/icons/desktop-info.svg"
+                        sourceSize: Qt.size(32, 32)
+                    }
+                    Text {
+                        text: qsTr("What the icons mean")
+                        color: iconGuideHover.hovered ? Qt.lighter(Theme.focus, 1.2) : Theme.focus
+                        font.family: Theme.bodyFont; font.pixelSize: 11; font.weight: Font.Bold
+                    }
+                    HoverHandler { id: iconGuideHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: AppController.showOverlay("desktop-icon-guide") }
+                }
                 Text {
+                    id: seeJumpLabel
                     anchors.right: parent.right; y: 1
                     text: root.games.length > 0 ? qsTr("See all %1  ›").arg(root.games.length) : qsTr("See all  ›")
                     color: seeJump.hovered ? "#B8FFFFFF" : "#80FFFFFF"
