@@ -13,31 +13,33 @@ builds macOS ARM64.
 - **Qt SDK:** `install-qt-action` already caches the downloaded SDK and Windows
   ARM64 host tools. That configuration is unchanged.
 - **Rust:** `Swatinem/rust-cache` caches Cargo downloads and compiled dependencies
-  for both native workspaces. CI includes their normal `target` directories for
-  Clippy/tests and the separate `rust-target` and `streamer-rust-target` directories
-  that CMake actually builds. Linux and Windows release candidates cache those
-  CMake directories only. The macOS candidate also caches the normal `target`
-  directories. The action keys dependencies by Rust toolchain, Cargo manifests,
+  for both native workspaces. Every package job, nightly and candidate alike,
+  caches the normal `target` directories and the separate `rust-target`,
+  `update-helper-rust-target`, and `streamer-rust-target` directories that CMake
+  builds. The action keys dependencies by Rust toolchain, Cargo manifests,
   lockfiles, and compiler environment, and removes workspace and incremental
   artifacts before saving. Application code is rebuilt, including release-version
   and update-public-key changes; final executables and signing material are not
   cache inputs.
 - **Qt C++:** `ccache-action` persists a compressed compiler cache. Check and
-  package jobs cap it at 1 GB. Linux release candidates stay at 500 MB; Windows
-  and macOS candidates use 1 GB. CMake uses `ccache` as its C/C++ compiler
-  launcher, including Windows Ninja Multi-Config builds.
+  package jobs, release candidates included, cap it at 1 GB. CMake uses `ccache`
+  as its C/C++ compiler launcher, including Windows Ninja Multi-Config builds.
 - **SDL3:** `actions/cache` persists only the Release installation. An exact hit
   skips cloning, configuring, compiling, and installing SDL. The key includes the
   target architecture, runner image family, SDL version, and workflow hash; changes
   to the build recipe invalidate it. There is deliberately no partial-key restore
   for this prebuilt dependency.
 
-CI and release-candidate caches have separate key namespaces. All compiler and
-dependency caches distinguish the target architecture, including cross-builds on
-the same host. Keep Blacksmith's **Branch Protected Caches** setting enabled to
-preserve GitHub-style branch isolation; workflow keys are not a security boundary.
-No cache is required for correctness: misses rebuild from source, and the test,
-packaging, smoke, and signing steps remain unchanged.
+Nightly package jobs and release candidates share one cache namespace per
+platform: a candidate restores the dependency and compiler caches the nightly
+package job saved for the same target, and a nightly build restores what a
+candidate saved. `opennow-qt/tests/test_ci_workflow.py` pins that alignment.
+All compiler and dependency caches distinguish the target architecture,
+including cross-builds on the same host. Keep Blacksmith's **Branch Protected
+Caches** setting enabled to preserve GitHub-style branch isolation; shared
+workflow keys are not a security boundary. No cache is required for correctness:
+misses rebuild from source, and the test, packaging, smoke, and signing steps
+remain unchanged.
 
 ## Verify the improvement
 
