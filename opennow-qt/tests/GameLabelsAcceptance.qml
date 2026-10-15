@@ -99,6 +99,21 @@ QtObject {
         ShellStore.subscription = {membershipTier:"ULTIMATE"}
         check(!child(lockedLabels, "desktopGameLock").visible, "the lock stayed after the tier changed")
 
+        const tipAnchor = collect(host, "desktopGameLabelTipAnchor", []).find(item => item.game && item.game.id === "labels-crowded" && item.visible)
+        check(tipAnchor, "the crowded tile has no label tip")
+        const tipLoader = child(tipAnchor, "desktopGameLabelTipLoader")
+        tipAnchor.shown = true
+        check(tipLoader.active, "the label tip did not open")
+        const tile = tipAnchor.parent
+        tile.visible = false
+        check(!tipAnchor.shown && !tipLoader.active, "the label tip stayed open after its tile was hidden")
+        tile.visible = true
+        check(!tipAnchor.shown, "the label tip reopened without a new hover")
+        tipAnchor.shown = true
+        tile.enabled = false
+        check(!tipAnchor.shown && !tipLoader.active, "the label tip stayed open after its tile was disabled")
+        tile.enabled = true
+
         const plainLabels = collect(host, "desktopGameLabels", []).find(item => item.game && item.game.id === "labels-plain")
         check(plainLabels && !plainLabels.visible, "a game without catalog labels draws an empty pill")
 
