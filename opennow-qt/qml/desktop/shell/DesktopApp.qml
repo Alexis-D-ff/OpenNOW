@@ -66,6 +66,19 @@ FocusScope {
         if (value === "settings-updates") return 13
         return 3
     }
+    // Selecting a category inside Settings does not change the route, so a
+    // shortcut to the current settings route must still select its page.
+    function openRoute(value) {
+        const unchanged = value === AppController.route
+        AppController.navigate(value)
+        if (unchanged && value !== "settings")
+            root.selectSettingsPage(value)
+    }
+    function selectSettingsPage(value) {
+        if ((value.indexOf("settings") === 0 || value === "updates") && pageLoader.item
+                && pageLoader.item.objectName === "desktopSettingsScreen")
+            pageLoader.item.selectedSection = root.settingsSection(value === "updates" ? "settings-updates" : value)
+    }
     function contentForRoute(value) {
         if (value === "store") return storeComponent
         if (value === "friends") return friendsComponent
@@ -152,7 +165,7 @@ FocusScope {
         subtitle: root.subtitleForRoute(root.contentRoute)
         searchText: root.searchText
         onSearchTextChanged: root.searchText = searchText
-        onRouteRequested: route => AppController.navigate(route)
+        onRouteRequested: route => root.openRoute(route)
         onConsoleModeRequested: root.toggleConsoleMode()
         onCommandPaletteRequested: root.commandOpen = true
         accountSwitcherAllowed: root.shellVisible && !root.commandOpen && AppController.overlay === ""
@@ -223,7 +236,7 @@ FocusScope {
         opened: root.commandOpen && root.shellVisible
         z: 120
         onCloseRequested: root.commandOpen = false
-        onRouteRequested: route => AppController.navigate(route)
+        onRouteRequested: route => root.openRoute(route)
         onGameRequested: game => { ShellStore.selectedGame = game; ShellStore.launchSelectedGame(false) }
     }
 
@@ -333,10 +346,7 @@ FocusScope {
             root.searchText = ""
             // A settings route chosen while Settings is open (the update panel's
             // "Open in Settings", the palette) selects its page in place.
-            const route = AppController.route
-            if ((route.indexOf("settings") === 0 || route === "updates") && pageLoader.item
-                    && pageLoader.item.objectName === "desktopSettingsScreen")
-                pageLoader.item.selectedSection = root.settingsSection(root.requestedContentRoute)
+            root.selectSettingsPage(AppController.route)
             Qt.callLater(root.restoreShellFocus)
         }
     }

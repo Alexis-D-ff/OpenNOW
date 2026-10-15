@@ -8,12 +8,17 @@ DesktopSettingsButton {
     id: root
     objectName: "updatePrimaryAction"
     readonly property var updater: ShellStore.updaterState || ({})
-    readonly property string nextAction: updater.status === "downloading" ? "downloading"
-        : updater.canInstall === true ? "install"
-        : updater.canDownload === true ? "download" : "check"
+    // Settings › Updates adds a second, install-only action when a staged
+    // package is older than the newly selected release.
+    property bool installOnly: false
+    // A newer selected release takes priority over an older staged package.
+    readonly property string nextAction: installOnly ? "install"
+        : updater.status === "downloading" ? "downloading"
+        : updater.canDownload === true ? "download"
+        : updater.canInstall === true ? "install" : "check"
     // The status-bar panel uses short labels; Settings › Updates spells them out.
     property bool panelLabels: false
-    primary: true
+    primary: !installOnly
     text: panelLabels ? (nextAction === "install" ? qsTr("Restart to install")
             : nextAction === "download" ? (ShellStore.updaterAttention === "error" ? qsTr("Retry") : qsTr("Download"))
             : nextAction === "downloading" ? qsTr("Downloading…")

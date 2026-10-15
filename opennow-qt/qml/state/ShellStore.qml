@@ -339,9 +339,9 @@ QtObject {
     // Settings › Updates. Empty means there is nothing to act on.
     readonly property string updaterAttention: updaterState.status === "downloading" ? "downloading"
         : ["preparing", "awaiting-exit", "applying", "restarting"].indexOf(updaterState.status) >= 0 ? "installing"
-        : updaterState.canInstall === true ? "ready"
         : updaterError !== "" || ["error", "failed", "rolled-back"].indexOf(updaterState.status) >= 0 ? "error"
-        : updaterState.canDownload === true ? "available" : ""
+        : updaterState.canDownload === true ? "available"
+        : updaterState.canInstall === true ? "ready" : ""
     // Received fraction of the signed package while the core downloads it, or -1.
     readonly property real updaterDownloadFraction: updaterState.status === "downloading" && updaterState.downloadProgress
         && Number(updaterState.downloadProgress.totalBytes) > 0

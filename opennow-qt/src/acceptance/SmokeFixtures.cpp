@@ -541,8 +541,10 @@ int AcceptanceSession::prepareWindow()
             }
             if (auto *updates = findControl(u"aboutOpenUpdates"_s)) {
                 exercised = true;
-                if (!QMetaObject::invokeMethod(updates, "clicked")
-                    || m_controller.route() != u"settings-updates"_s) return EXIT_FAILURE;
+                auto *settings = findControl(u"desktopSettingsScreen"_s);
+                if (!settings || !QMetaObject::invokeMethod(updates, "clicked")
+                    || m_controller.route() != u"settings-updates"_s
+                    || settings->property("selectedSection") != settings->property("updatesSection")) return EXIT_FAILURE;
             }
             if (auto *stats = findControl(u"desktopStatsSettings"_s)) {
                 if (!stats->setProperty("metricsOpen", true)) return EXIT_FAILURE;

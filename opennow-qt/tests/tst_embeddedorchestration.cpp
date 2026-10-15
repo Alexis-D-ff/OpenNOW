@@ -1567,6 +1567,8 @@ private slots:
         QCOMPARE(attention("({status:'available',canCheck:true,canDownload:true})"), QStringLiteral("available"));
         QCOMPARE(attention("({status:'downloading'})"), QStringLiteral("downloading"));
         QCOMPARE(attention("({status:'downloaded',canInstall:true,canCheck:true})"), QStringLiteral("ready"));
+        // A staged package must not hide a newer selected release.
+        QCOMPARE(attention("({status:'available',canInstall:true,canDownload:true,canCheck:true})"), QStringLiteral("available"));
         QCOMPARE(attention("({status:'preparing'})"), QStringLiteral("installing"));
         QCOMPARE(attention("({status:'error',canCheck:true})"), QStringLiteral("error"));
         QCOMPARE(attention("({status:'rolled-back',canCheck:true})"), QStringLiteral("error"));

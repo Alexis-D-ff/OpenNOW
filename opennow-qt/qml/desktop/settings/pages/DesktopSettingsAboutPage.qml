@@ -24,7 +24,10 @@ Column {
             DesktopSettingsButton {
                 objectName: "aboutOpenUpdates"
                 text: qsTr("Open Updates")
-                onClicked: AppController.navigate("settings-updates")
+                onClicked: {
+                    AppController.navigate("settings-updates")
+                    page.settingsScreen.selectedSection = page.settingsScreen.updatesSection
+                }
             }
         }
     }

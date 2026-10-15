@@ -94,6 +94,11 @@ Column {
                     width: parent.width
                     spacing: DesktopTokens.px(10)
                     DesktopUpdatePrimaryAction { id: primaryAction }
+                    DesktopUpdatePrimaryAction {
+                        objectName: "updatesPageInstallStaged"
+                        installOnly: true
+                        visible: primaryAction.nextAction === "download" && page.updater.canInstall === true
+                    }
                     DesktopSettingsButton {
                         objectName: "updatesPageCheck"
                         visible: primaryAction.nextAction !== "check"

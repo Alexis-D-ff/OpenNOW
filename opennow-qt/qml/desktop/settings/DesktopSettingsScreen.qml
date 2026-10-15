@@ -10,6 +10,7 @@ FocusScope {
     clip: true
 
     property int selectedSection: 3
+    readonly property int updatesSection: 13
     property string searchQuery: ""
     property bool advancedOpen: false
     // Isolated visual acceptance only; never selects alternate production UI.
@@ -34,7 +35,7 @@ FocusScope {
         {label: qsTr("Appearance"), detail: qsTr("Theme, accent, layout"), icon: "palette", page: 8, keywords: "theme accent interface language scale motion console sidebar tiles quit exit close confirm"},
         {label: qsTr("Console mode"), detail: qsTr("Gamepad-first interface"), icon: "controller", page: 9, keywords: "console fullscreen gamepad startup"},
         {label: qsTr("Account"), detail: qsTr("NVIDIA, stores, privacy"), icon: "person", page: 0, keywords: "profile subscription stores steam epic xbox ubisoft battle gaijin privacy"},
-        {label: qsTr("Updates"), detail: qsTr("Version, channel, notes"), icon: "reset", page: 13, keywords: "update updates version release notes changelog channel stable nightly download install restart"},
+        {label: qsTr("Updates"), detail: qsTr("Version, channel, notes"), icon: "reset", page: updatesSection, keywords: "update updates version release notes changelog channel stable nightly download install restart"},
         {label: qsTr("About & support"), detail: qsTr("Diagnostics, legal"), icon: "info", page: 11, keywords: "version diagnostics legal onboarding introduction replay setup restart reset"}
     ]
     readonly property var pageTitles: [qsTr("Account"), qsTr("Account"), qsTr("Account"), qsTr("Stream"), qsTr("Audio"), qsTr("Controls"), qsTr("Network"), qsTr("Appearance"), qsTr("Appearance"), qsTr("Console mode"), qsTr("Controls"), qsTr("About & support"), qsTr("Recording"), qsTr("Updates")]

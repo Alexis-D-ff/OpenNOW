@@ -1655,18 +1655,24 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT}
     )
-    foreach(notes_route updates settings-updates)
+    foreach(notes_route updates settings-advanced)
+        # Release notes moved from About & support to Settings › Updates; the
+        # test identifiers stay stable.
+        set(notes_target "${notes_route}")
+        if(notes_route STREQUAL "settings-advanced")
+            set(notes_target settings-updates)
+        endif()
         foreach(notes_width 960 1600)
             add_test(NAME "qml-release-notes-${notes_route}-${notes_width}"
                 COMMAND opennow-qt --smoke-test --allow-multiple-instances
-                    --desktop --route ${notes_route} --smoke-release-notes
+                    --desktop --route ${notes_target} --smoke-release-notes
                     --smoke-width ${notes_width} --reduced-motion)
             set_tests_properties("qml-release-notes-${notes_route}-${notes_width}" PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
         endforeach()
     endforeach()
     # Settings › Updates and the status-bar chip/panel for every updater state.
-    foreach(update_surface uptodate available progress ready error confirm other)
+    foreach(update_surface uptodate available staged progress ready error confirm other)
         add_test(NAME "qml-desktop-updates-${update_surface}"
             COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
                 --route settings-updates --smoke-update-surface ${update_surface} --reduced-motion

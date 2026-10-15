@@ -153,6 +153,15 @@ void presentUpdateSurface(QQmlApplicationEngine &engine, QQuickWindow *window, c
         state.insert(u"canCheck"_s, true);
         state.insert(u"canDownload"_s, true);
         state.insert(u"message"_s, u"OpenNOW 1.2.3 is available with signed update metadata."_s);
+    } else if (surface == u"staged"_s) {
+        state.insert(u"status"_s, u"available"_s);
+        state.insert(u"availableVersion"_s, u"1.2.4"_s);
+        state.insert(u"downloadedVersion"_s, u"1.2.3"_s);
+        state.insert(u"releaseUrl"_s, release);
+        state.insert(u"canCheck"_s, true);
+        state.insert(u"canDownload"_s, true);
+        state.insert(u"canInstall"_s, true);
+        state.insert(u"message"_s, u"OpenNOW 1.2.4 is available with signed update metadata."_s);
     } else if (surface == u"error"_s) {
         state.insert(u"status"_s, u"error"_s);
         state.insert(u"canCheck"_s, true);
@@ -1084,7 +1093,12 @@ int AcceptanceSession::startSmokeWorkload()
                             auto *chip = window->findChild<QQuickItem *>(u"desktopUpdateChip"_s);
                             auto *panel = window->findChild<QObject *>(u"desktopUpdatePanel"_s);
                             const bool chipExpected = surface != u"uptodate"_s && surface != u"other"_s;
-                            if (!chip || chip->isVisible() != chipExpected
+                            // A staged older package keeps its install action beside Download.
+                            auto *staged = window->findChild<QQuickItem *>(u"updatesPageInstallStaged"_s);
+                            const bool stagedVisible = staged && staged->isVisible();
+                            const bool stagedExpected = surface == u"staged"_s
+                                && m_controller.route() == u"settings-updates"_s;
+                            if (!chip || chip->isVisible() != chipExpected || stagedVisible != stagedExpected
                                     || (openPanel && (!panel || !panel->property("opened").toBool()))) {
                                 qCritical("Update chip or panel did not match the presented updater state");
                                 m_application.exit(EXIT_FAILURE);
