@@ -168,14 +168,17 @@ ApplicationWindow {
         onTriggered: {
             if (!window.geometryRestored || window.visibility !== ApplicationWindow.Windowed)
                 return
-            const savedWidth = Number(ShellStore.settings.windowWidth || 0)
-            const savedHeight = Number(ShellStore.settings.windowHeight || 0)
-            if (Math.round(window.width) !== savedWidth)
-                ShellStore.setSetting("windowWidth", Math.round(window.width))
-            if (Math.round(window.height) !== savedHeight)
-                ShellStore.setSetting("windowHeight", Math.round(window.height))
+            const geometry = {windowX: window.x, windowY: window.y,
+                windowWidth: window.width, windowHeight: window.height}
+            for (const key in geometry) {
+                if (Math.round(geometry[key]) !== ShellStore.settings[key])
+                    ShellStore.setSetting(key, Math.round(geometry[key]))
+            }
         }
     }
+
+    onXChanged: if (geometryRestored) geometrySaveTimer.restart()
+    onYChanged: if (geometryRestored) geometrySaveTimer.restart()
 
     onWidthChanged: {
         if (geometryRestored)
@@ -821,8 +824,12 @@ ApplicationWindow {
                 window.syncInputOwnership()
                 if (window.geometryRestored || !ShellStore.settings.windowWidth)
                     return
-                window.width = Number(ShellStore.settings.windowWidth)
-                window.height = Number(ShellStore.settings.windowHeight)
+                const settings = ShellStore.settings
+                const hasPosition = typeof settings.windowX === "number"
+                    && typeof settings.windowY === "number"
+                AppController.restoreWindowGeometry(window, Qt.rect(
+                    hasPosition ? settings.windowX : 0, hasPosition ? settings.windowY : 0,
+                    Number(settings.windowWidth), Number(settings.windowHeight)), hasPosition)
                 window.geometryRestored = true
             }
         }
