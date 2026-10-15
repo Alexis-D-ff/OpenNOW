@@ -333,6 +333,7 @@ struct LoadState {
     retry_at: u64,
     loading: bool,
     first_attempt_done: bool,
+    first_wait_claimed: bool,
 }
 
 #[derive(Default)]
@@ -373,7 +374,8 @@ impl DlssCatalog {
                 state.retry_at = now.saturating_add(RETRY_MS);
             }
         }
-        if state.index.is_none() && !state.first_attempt_done {
+        if state.index.is_none() && !state.first_attempt_done && !state.first_wait_claimed {
+            state.first_wait_claimed = true;
             state = self
                 .shared
                 .settled
@@ -685,6 +687,36 @@ mod tests {
                 .lookup("Fortnite")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn only_one_request_waits_for_a_slow_first_download() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/dlss.json", silent.local_addr().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = Arc::new(DlssCatalog::new(
+            Client::new(),
+            url,
+            Arc::new(StoreCache::new(directory.path().to_path_buf())),
+        ));
+        let started = std::time::Instant::now();
+        let concurrent = {
+            let catalog = catalog.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                let started = std::time::Instant::now();
+                assert!(catalog.index(&json!({})).is_none());
+                started.elapsed()
+            })
+        };
+        assert!(catalog.index(&json!({})).is_none());
+        assert!(started.elapsed() >= FIRST_LOAD_WAIT);
+        assert!(concurrent.join().unwrap() < Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        assert!(catalog.index(&json!({})).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(catalog.shared.state.lock().unwrap().loading);
+        drop(silent);
     }
 
     #[test]

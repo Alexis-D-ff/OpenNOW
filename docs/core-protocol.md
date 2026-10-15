@@ -1668,10 +1668,12 @@ The catalog has no per-game DLSS key, so the core, and only the core, derives a
 game-level `dlss` field from NVIDIA's published DLSS games list (the JSON behind
 NVIDIA's RTX games page) by title. Shells still must not infer features from
 titles or genres themselves, and a `"dlss"` string in a variant's `features`
-means nothing. Every game in `catalog.public.list`, `catalog.library.list`,
-`catalog.game.get`, `catalog.favorites.list`, the favorites and ownership
-mutation results, `catalog.store.local`, `catalog.store.list`, and
-`catalog.store.presentation` carries `dlss`, either null or:
+means nothing. Every game in every `catalog.*` result carries `dlss`, including
+`catalog.public.list`, `catalog.library.list`, `catalog.game.get`,
+`catalog.launch.inspect`, `catalog.launch.store.inspect`,
+`catalog.favorites.list`, the favorites and ownership mutation results,
+`catalog.store.local`, `catalog.store.list`, and `catalog.store.presentation`.
+The value is either null or:
 
 ```json
 {"superResolution":"native","frameGeneration":"override",
@@ -1699,7 +1701,7 @@ The core keeps the list in the store cache for 24 hours (stale copies are used
 when a refresh fails), rejects documents over 4 MiB or 5,000 rows, and applies
 it when a catalog response is sent, so cached catalog pages are unaffected and
 the scope stays `catalog-v3`. Fetching never fails or holds a catalog response:
-only the core's first attempt waits, for at most 1.5 seconds; a failed attempt
+only one request waits for the core's first attempt, for at most 1.5 seconds; a failed attempt
 retries on a catalog request at least 60 seconds later. The field is additive
 within protocol version 5.
 
