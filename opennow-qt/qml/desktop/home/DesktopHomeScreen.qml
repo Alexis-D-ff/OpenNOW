@@ -229,50 +229,63 @@ FocusScope {
                 width: parent.width
                 height: 262
 
-                Rectangle {
-                    id: heroMask
-                    anchors.fill: heroCard
-                    radius: 16
-                    color: "white"
-                    visible: false
-                    layer.enabled: true
-                }
-
                 Item {
                     id: heroCard
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.right: parent.right
                     height: 262
-                    layer.enabled: true
-                    layer.smooth: true
-                    layer.effect: MultiEffect {
-                        maskEnabled: true
-                        maskSource: heroMask
-                        maskThresholdMin: 0.25
-                        maskSpreadAtMin: 0.2
-                        shadowEnabled: true
-                        shadowColor: "#73000000"
-                        shadowBlur: 0.55
-                        shadowVerticalOffset: 10
-                    }
 
-                    Rectangle { anchors.fill: parent; color: "#171B27" }
-                    Image {
-                        anchors.fill: parent
-                        source: heroArtworkSource.resolvedUrl
-                        fillMode: Image.PreserveAspectCrop
-                        sourceSize: Qt.size(Math.ceil(width), Math.ceil(height))
-                        asynchronous: true
-                        cache: true
-                    }
                     Rectangle {
                         anchors.fill: parent
-                        gradient: Gradient {
-                            orientation: Gradient.Horizontal
-                            GradientStop { position: 0; color: "#EB060912" }
-                            GradientStop { position: 0.62; color: "#4D060912" }
-                            GradientStop { position: 1; color: "#1A060912" }
+                        radius: 16
+                        color: "#171B27"
+                        layer.enabled: true
+                        layer.effect: MultiEffect {
+                            shadowEnabled: true
+                            shadowColor: "#73000000"
+                            blurMax: 48
+                            shadowBlur: 1
+                            shadowVerticalOffset: 10
+                        }
+                    }
+
+                    Rectangle {
+                        id: heroMask
+                        anchors.fill: parent
+                        radius: 16
+                        color: "white"
+                        visible: false
+                        layer.enabled: true
+                    }
+
+                    Item {
+                        anchors.fill: parent
+                        layer.enabled: true
+                        layer.smooth: true
+                        layer.effect: MultiEffect {
+                            maskEnabled: true
+                            maskSource: heroMask
+                            maskThresholdMin: 0.25
+                            maskSpreadAtMin: 0.2
+                        }
+
+                        Image {
+                            anchors.fill: parent
+                            source: heroArtworkSource.resolvedUrl
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize: Qt.size(Math.ceil(width), Math.ceil(height))
+                            asynchronous: true
+                            cache: true
+                        }
+                        Rectangle {
+                            anchors.fill: parent
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0; color: "#EB060912" }
+                                GradientStop { position: 0.62; color: "#4D060912" }
+                                GradientStop { position: 1; color: "#1A060912" }
+                            }
                         }
                     }
                     Rectangle {
@@ -285,6 +298,7 @@ FocusScope {
 
                     Column {
                         x: 22
+                        width: parent.width - 44
                         anchors.bottom: parent.bottom
                         anchors.bottomMargin: 22
                         spacing: 14
@@ -299,8 +313,11 @@ FocusScope {
                         }
 
                         Column {
+                            width: parent.width
                             spacing: 6
                             Text {
+                                width: parent.width
+                                elide: Text.ElideRight
                                 text: root.heroGame ? String(root.heroGame.title || qsTr("Game")) : qsTr("No games yet")
                                 color: "#FFFFFF"
                                 font.family: Theme.displayFont
@@ -309,6 +326,8 @@ FocusScope {
                                 font.letterSpacing: -1
                             }
                             Text {
+                                width: parent.width
+                                elide: Text.ElideRight
                                 text: root.heroMeta()
                                 color: "#B8FFFFFF"
                                 font.family: Theme.bodyFont
@@ -332,7 +351,7 @@ FocusScope {
                                 Row {
                                     anchors.centerIn: parent
                                     spacing: 8
-                                    DesktopGlyph { width: 10; height: 12; icon: "desktop-play.svg" }
+                                    DesktopGlyph { anchors.verticalCenter: parent.verticalCenter; width: 11; height: 11; icon: "desktop-play.svg" }
                                     Text { text: qsTr("Start"); color: "#0B0F1A"; font.family: Theme.bodyFont; font.pixelSize: 14; font.weight: Font.ExtraBold }
                                     KeyboardGlyph { shortcut: "Enter"; keySize: 20; ink: "#0B0F1A"; Accessible.name: qsTr("ENTER") }
                                 }
