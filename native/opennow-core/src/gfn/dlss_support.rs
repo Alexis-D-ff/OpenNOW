@@ -284,7 +284,9 @@ pub fn annotate(value: &mut Value, index: Option<&DlssIndex>) {
                 {
                     match index {
                         Some(index) => {
-                            let dlss = index.lookup(title).map_or(Value::Null, DlssSupport::to_json);
+                            let dlss = index
+                                .lookup(title)
+                                .map_or(Value::Null, DlssSupport::to_json);
                             object.insert("dlss".to_owned(), dlss);
                         }
                         None => {
