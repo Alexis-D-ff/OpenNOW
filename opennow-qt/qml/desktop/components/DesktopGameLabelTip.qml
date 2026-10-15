@@ -4,20 +4,23 @@ import OpenNOW
 
 Item {
     id: root
+    objectName: "desktopGameLabelTipAnchor"
     property var game: null
     property bool requested: false
     readonly property bool hasContent: ConsoleStores.launchers(game).length > 0
         || DesktopTokens.gameFeatures(game).length > 0 || ShellStore.gameLockedByMembership(game)
     property bool shown: false
+    readonly property bool anchorUsable: visible && enabled
     readonly property bool tipHovered: tipLoader.item ? tipLoader.item.hovered : false
 
     onRequestedChanged: requested ? openDelay.restart() : closeDelay.restart()
+    onAnchorUsableChanged: if (!anchorUsable) { openDelay.stop(); shown = false }
     onTipHoveredChanged: if (!tipHovered) closeDelay.restart()
 
     Timer {
         id: openDelay
         interval: 300
-        onTriggered: root.shown = root.requested && root.hasContent && AppController.overlay === ""
+        onTriggered: root.shown = root.requested && root.hasContent && root.anchorUsable && AppController.overlay === ""
     }
     Timer {
         id: closeDelay
@@ -32,8 +35,9 @@ Item {
 
     Loader {
         id: tipLoader
+        objectName: "desktopGameLabelTipLoader"
         anchors.fill: parent
-        active: root.shown
+        active: root.shown && root.anchorUsable
         sourceComponent: Item {
             readonly property bool hovered: tipHover.hovered
 
