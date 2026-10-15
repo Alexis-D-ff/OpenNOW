@@ -227,7 +227,7 @@ FocusScope {
                 id: regionRow
                 objectName: "quickSettingsRegionRow"
                 title: qsTr("Region")
-                value: String(ShellStore.selectedRegion || qsTr("Automatic"))
+                value: ShellStore.selectedRegionName || qsTr("Automatic")
                 statusDot: true
                 KeyNavigation.down: bitrateRow
                 onTriggered: { AppController.showOverlay(""); AppController.navigate("settings-network") }

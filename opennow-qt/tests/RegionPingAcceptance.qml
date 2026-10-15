@@ -6,6 +6,7 @@ import OpenNOW
 QtObject {
     id: test
     property RegionChoicesAcceptance regionChoices: RegionChoicesAcceptance {}
+    property RegionDisplayAcceptance regionDisplay: RegionDisplayAcceptance {}
     property QtObject client: QtObject {
         property string state: "ready"
         property string lastError: ""
@@ -50,6 +51,7 @@ QtObject {
 
         ShellStore.authSession = {user: {id: "region-fixture", userId: "region-fixture", displayName: "Region Test"}, provider: {idpId:"region-alliance", code:"ALLIANCE"}}
         ShellStore.settings = {region: "", regionProviderIdpId:"region-alliance"}
+        regionDisplay.run(screen)
         invokePing(button)
         const discovery = ShellStore.regionsRequestId
         check(discovery !== "" && ShellStore.regionPingPending && !button.enabled, "queued discovery")

@@ -23,7 +23,7 @@ FocusScope {
     readonly property var variant: game.variants && Number(game.selectedVariantIndex) >= 0
         ? (game.variants[Number(game.selectedVariantIndex)] || null) : null
     readonly property string subtitle: [variant && variant.store ? DesktopTokens.storeLabel(variant.store) : "",
-        String(session.serverLocation || ShellStore.selectedRegion || "")].filter(part => part !== "").join(" · ")
+        String(session.serverLocation || ShellStore.selectedRegionName || "")].filter(part => part !== "").join(" · ")
     readonly property string profileLine: [
         profile.width && profile.height ? profile.width + " × " + profile.height : String(profile.resolution || ""),
         profile.fps ? qsTr("%1 FPS").arg(profile.fps) : "",

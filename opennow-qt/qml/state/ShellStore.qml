@@ -100,6 +100,12 @@ QtObject {
 
     property alias settings: settingsOwner.settings
     readonly property string selectedRegion: settingsOwner.selectedRegion
+    readonly property string selectedRegionName: {
+        if (!selectedRegion)
+            return ""
+        const region = regions.find(item => item.url === selectedRegion || item.name === selectedRegion)
+        return region ? String(region.name) : qsTr("Selected region")
+    }
     property alias keyboardLayoutItems: settingsOwner.keyboardLayoutItems
     property var onboardingAwdlController: MacAwdl
     readonly property bool onboardingAwdlReady: true
