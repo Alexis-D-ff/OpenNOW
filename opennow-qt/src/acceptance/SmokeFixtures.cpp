@@ -218,6 +218,7 @@ int AcceptanceSession::prepareWindow()
                     accounts.append(QVariantMap{
                         {u"provider"_s, providers.at(i)}, {u"label"_s, providers.at(i)},
                         {u"isConnected"_s, i < 3}, {u"supportsSync"_s, i < 3},
+                        {u"supportsLinking"_s, i >= 3},
                         {u"syncedGames"_s, 42},
                         {u"status"_s, i < 3 ? u"connected"_s : i == 3 ? u"expired"_s : u"disconnected"_s}});
                 }

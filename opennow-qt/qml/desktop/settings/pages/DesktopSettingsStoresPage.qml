@@ -8,14 +8,14 @@ DesktopSettingsPanel {
     objectName: "desktopStoresSettings"
     required property real availableWidth
     required property var settingsScreen
-    readonly property var orderedAccounts: ShellStore.gameAccounts.slice().sort((a, b) =>
+    readonly property var orderedAccounts: ShellStore.actionableGameAccounts.slice().sort((a, b) =>
         Number(a.sortOrder || 0) - Number(b.sortOrder || 0)
         || String(a.provider).localeCompare(String(b.provider)))
 
     width: page.availableWidth; paperStyle: true
     DesktopSettingsSection {
         text: qsTr("GAME STORES")
-        description: qsTr("%1 stores from your NVIDIA account").arg(ShellStore.gameAccounts.length)
+        description: qsTr("%1 stores from your NVIDIA account").arg(page.orderedAccounts.length)
         DesktopSettingsButton { text: qsTr("Refresh status"); enabled: ShellStore.gameAccountsState !== "loading"; onClicked: ShellStore.refreshGameAccounts() }
     }
     RowLayout {
