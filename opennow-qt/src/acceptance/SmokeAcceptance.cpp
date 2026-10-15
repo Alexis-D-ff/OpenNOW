@@ -7,6 +7,7 @@
 #include <QColor>
 #include <QGuiApplication>
 #include <QKeyEvent>
+#include <qpa/qwindowsysteminterface.h>
 #include <QDeadlineTimer>
 #include <QDateTime>
 #include <QQmlComponent>
@@ -690,6 +691,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-queue-selector"_s)
                      || m_arguments.contains(u"--smoke-command-search"_s)
                      || m_arguments.contains(u"--smoke-game-details-layout"_s)
+                     || m_arguments.contains(u"--smoke-game-dlss"_s)
                      || m_arguments.contains(u"--smoke-ownership"_s)
                      || m_arguments.contains(u"--smoke-game-labels"_s)
                      || m_arguments.contains(u"--smoke-catalog-sync"_s)
@@ -726,6 +728,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/QueueSelectorAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-game-details-layout"_s)
             ? u"qrc:/acceptance/GameDetailsLayoutAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-game-dlss"_s)
+            ? u"qrc:/acceptance/GameDlssAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-color-format"_s)
             ? u"qrc:/acceptance/ColorFormatAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-hdr-downgrade"_s)
@@ -809,6 +813,7 @@ int AcceptanceSession::startSmokeWorkload()
             || m_arguments.contains(u"--smoke-queue-selector"_s)
             || m_arguments.contains(u"--smoke-command-search"_s)
             || m_arguments.contains(u"--smoke-game-details-layout"_s)
+            || m_arguments.contains(u"--smoke-game-dlss"_s)
             || m_arguments.contains(u"--smoke-ownership"_s)
             || m_arguments.contains(u"--smoke-catalog-sync"_s)
             || m_arguments.contains(u"--smoke-library-error"_s)
@@ -877,6 +882,7 @@ int AcceptanceSession::startSmokeWorkload()
                        || m_arguments.contains(u"--smoke-shortcuts"_s)
                        || m_arguments.contains(u"--smoke-console-settings"_s)
                        || m_arguments.contains(u"--bug-report-notice-check"_s)
+                       || m_arguments.contains(u"--smoke-game-dlss"_s)
                        || m_arguments.contains(u"--smoke-game-details-layout"_s))) {
                 if (m_arguments.contains(u"--smoke-game-details-layout"_s)
                     && m_arguments.contains(u"--details-interactive"_s))
@@ -892,6 +898,19 @@ int AcceptanceSession::startSmokeWorkload()
                         QKeyEvent release(QEvent::KeyRelease, key, modifiers);
                         QGuiApplication::sendEvent(window, &press);
                         QGuiApplication::sendEvent(window, &release);
+                    }
+                    if (const auto clickValue = fixture->property("click"); clickValue.isValid()
+                            && clickValue.toPointF().x() >= 0) {
+                        const auto click = clickValue.toPointF();
+                        fixture->setProperty("click", QPointF(-1, -1));
+                        const auto global = window->mapToGlobal(click);
+                        using Delivery = QWindowSystemInterface::SynchronousDelivery;
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::NoButton, Qt::NoButton, QEvent::MouseMove);
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::LeftButton, Qt::LeftButton, QEvent::MouseButtonPress);
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::NoButton, Qt::LeftButton, QEvent::MouseButtonRelease);
                     }
                     QVariant state;
                     const bool advanced = QMetaObject::invokeMethod(fixture, "advance", Q_RETURN_ARG(QVariant, state));

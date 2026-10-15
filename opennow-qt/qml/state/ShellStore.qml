@@ -294,6 +294,10 @@ QtObject {
     property bool desktopUiActive: false
     property alias subscription: accountServicesOwner.subscription
     readonly property alias remainingPlaytimeHours: accountServicesOwner.remainingPlaytimeHours
+    readonly property alias dlssOverrideAvailability: accountServicesOwner.dlssOverrides
+    readonly property alias dlssFrameGenerationMultipliers: accountServicesOwner.dlssFrameGenerationMultipliers
+    readonly property alias dlssDynamicFrameGeneration: accountServicesOwner.dlssDynamicFrameGeneration
+    function dlssCapability(name) { return accountServicesOwner.dlssCapability(name) }
     property alias regions: accountServicesOwner.regions
     property alias regionPingResults: accountServicesOwner.regionPingResults
     property alias regionPingMessage: accountServicesOwner.regionPingMessage
