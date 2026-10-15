@@ -12,6 +12,17 @@ QtObject {
         return collect(host, "desktopGameLabels", []).find(item => item.game && item.game.id === id && item.visible)
     }
     function child(item, name) { return collect(item, name, [])[0] }
+    function effectiveVisible(item) {
+        for (let node = item; node; node = node.parent)
+            if (node.visible === false || node.opacity === 0) return false
+        return true
+    }
+    function visibleTexts(item, found) {
+        found = found || []
+        if (typeof item.text === "string" && effectiveVisible(item)) found.push(item)
+        for (const nested of item.children || []) visibleTexts(nested, found)
+        return found
+    }
     function polish(item) {
         for (const nested of item.children || []) polish(nested)
         if (typeof item.forceLayout === "function") item.forceLayout()
@@ -38,6 +49,9 @@ QtObject {
     readonly property var upscaled: game("labels-dlss", "DLSS listed", [variant("401", "Steam", true, ["rtx"])],
         {dlss:{superResolution:"override", frameGeneration:"native", multiFrameGeneration:{maxMultiplier:4},
             rayReconstruction:null, dlaa:null, source:"nvidia-rtx-games-list"}})
+    readonly property var stacked: game("labels-stacked", "Four features", [variant("501", "Steam", true, ["reflex", "rtx", "hdr"])],
+        {dlss:{superResolution:"override", frameGeneration:"native", multiFrameGeneration:null, rayReconstruction:null,
+            dlaa:null, source:"nvidia-rtx-games-list"}})
 
     function lockedFor(tier) {
         ShellStore.subscription = tier === null ? null : {membershipTier:tier}
@@ -60,6 +74,8 @@ QtObject {
             "variants with unknown (null) or empty features show feature labels")
         check(JSON.stringify(DesktopTokens.gameFeatures(upscaled)) === JSON.stringify(["rtx", "dlss"]),
             "a game with core DLSS data does not list DLSS after its catalog features")
+        check(JSON.stringify(DesktopTokens.gameFeatures(stacked)) === JSON.stringify(["rtx", "hdr", "reflex", "dlss"]),
+            "a game with three catalog features and DLSS does not list all four in fixed order")
         check(DesktopTokens.gameFeatures(Object.assign({}, upscaled, {dlss:null})).indexOf("dlss") < 0,
             "a game the DLSS list does not match shows DLSS")
         check(DesktopTokens.featureTip("dlss") === "DLSS — per NVIDIA's DLSS games list"
@@ -77,7 +93,7 @@ QtObject {
 
         const owner = ShellStore.catalogOwnerState
         ShellStore.settings = Object.assign({}, ShellStore.settings, {onboardingCompleted:true})
-        owner.catalogGames = [crowded, locked, plain, upscaled]
+        owner.catalogGames = [crowded, locked, plain, upscaled, stacked]
         owner.catalogState = "ready"
         owner.catalogComplete = true
         return true
@@ -106,6 +122,24 @@ QtObject {
         polish(crowdedLabels)
         check(crowdedLabels.shownLaunchers >= 1 && separated(), "the pills overlap on the narrowest Home tile")
 
+        const stackedLabels = labelsFor(host, "labels-stacked")
+        check(stackedLabels, "the four-feature tile labels were not rendered")
+        const stackedFeatures = child(stackedLabels, "desktopGameFeatures")
+        const stackedLaunchers = child(stackedLabels, "desktopGameLaunchers")
+        const stackedChip = child(stackedLabels, "desktopGameFeatureOverflow")
+        stackedLabels.width = Math.round(DesktopTokens.posterWidth * 1.5)
+        polish(stackedLabels)
+        check(stackedLabels.shownFeatures === 4 && !stackedChip.visible,
+            "the four-feature tile does not draw all four glyphs when the tile has room")
+        stackedLabels.width = DesktopTokens.posterWidth - 16
+        polish(stackedLabels)
+        check(stackedLabels.shownFeatures < 4 && stackedChip.visible
+            && stackedChip.text === "+" + (4 - stackedLabels.shownFeatures),
+            "a four-feature tile does not fall back to the +N chip on the narrowest Home tile")
+        check(stackedLaunchers.x + stackedLaunchers.width < stackedFeatures.x
+            && stackedFeatures.x + stackedFeatures.width <= stackedLabels.width + 0.5,
+            "the +N chip overlaps the launchers or overflows the narrowest Home tile")
+
         const lockedLabels = labelsFor(host, "labels-locked")
         check(lockedLabels && child(lockedLabels, "desktopGameLock").visible, "a paid game shows no lock for a Free account")
         check(lockedLabels.summary.indexOf("Needs a paid membership") === 0, "the lock is missing from the accessible description")
@@ -132,6 +166,18 @@ QtObject {
         const dlssMark = child(upscaledLabels, "desktopGameFeature-dlss")
         check(dlssMark && dlssMark.visible && dlssMark.status === Image.Ready, "game.dlss did not draw the DLSS mark")
         check(upscaledLabels.summary.indexOf("DLSS") >= 0, "DLSS is missing from the accessible description")
+
+        const dlssAnchor = collect(host, "desktopGameLabelTipAnchor", [])
+            .find(item => item.game && item.game.id === "labels-dlss" && item.visible)
+        check(dlssAnchor, "the DLSS tile has no label tip")
+        const dlssRows = () => visibleTexts(host).filter(item => item.text === DesktopTokens.featureTip("dlss"))
+        check(dlssRows().length === 0, "the DLSS row is painted before its tip opened")
+        const dlssLoader = child(dlssAnchor, "desktopGameLabelTipLoader")
+        dlssAnchor.shown = true
+        check(dlssLoader.active, "the label tip did not open on the DLSS tile")
+        const painted = dlssRows()
+        check(painted.length === 1, "the DLSS tile tip does not paint the DLSS row exactly once (found " + painted.length + ")")
+        dlssAnchor.shown = false
 
         const plainLabels = collect(host, "desktopGameLabels", []).find(item => item.game && item.game.id === "labels-plain")
         check(plainLabels && !plainLabels.visible, "a game without catalog labels draws an empty pill")
