@@ -17,8 +17,9 @@ FocusScope {
     // Game details are modal on desktop. Keep the route beneath the modal so
     // opening a Home or Store tile does not silently swap in the Library page.
     property string contentRoute: "home"
+    // The console Updates route opens Settings › Updates on desktop.
     readonly property string requestedContentRoute: route === "game-detail"
-        ? (AppController.backRoute || "library") : route
+        ? (AppController.backRoute || "library") : route === "updates" ? "settings-updates" : route
     onRequestedContentRouteChanged: {
         if (requestedContentRoute !== "inserting" && requestedContentRoute !== "stream")
             contentRoute = requestedContentRoute
@@ -35,7 +36,6 @@ FocusScope {
     readonly property bool shellVisible: !profileRouteVisible && !signInVisible && !sessionStartingVisible && !streamVisible
 
     function titleForRoute(value) {
-        if (value === "updates") return qsTr("Updates")
         if (value === "library" || value === "game-detail") return qsTr("Library")
         if (value === "store") return qsTr("Store")
         if (value === "friends") return qsTr("Friends")
@@ -43,7 +43,6 @@ FocusScope {
         return qsTr("Home")
     }
     function subtitleForRoute(value) {
-        if (value === "updates") return ""
         if (value === "library" || value === "game-detail") return qsTr("%1 games").arg(ShellStore.catalogTotalCount || ShellStore.catalogGames.length)
         if (value === "store") return qsTr("%1 in catalog").arg(ShellStore.storeTotalCount || ShellStore.storeGames.length)
         if (value === "friends") return qsTr("Coming soon")
@@ -64,10 +63,23 @@ FocusScope {
         if (value === "settings-shortcuts") return 10
         if (value === "settings-advanced" || value === "settings-advanced-dropdown") return 11
         if (value === "settings-account") return 0
+        if (value === "settings-updates") return 13
         return 3
     }
+    // Selecting a category inside Settings does not change the route, so a
+    // shortcut to the current settings route must still select its page.
+    function openRoute(value) {
+        const unchanged = value === AppController.route
+        AppController.navigate(value)
+        if (unchanged && value !== "settings")
+            root.selectSettingsPage(value)
+    }
+    function selectSettingsPage(value) {
+        if ((value.indexOf("settings") === 0 || value === "updates") && pageLoader.item
+                && pageLoader.item.objectName === "desktopSettingsScreen")
+            pageLoader.item.selectedSection = root.settingsSection(value === "updates" ? "settings-updates" : value)
+    }
     function contentForRoute(value) {
-        if (value === "updates") return updatesComponent
         if (value === "store") return storeComponent
         if (value === "friends") return friendsComponent
         if (value.indexOf("settings") === 0 || value === "controllers") return settingsComponent
@@ -153,7 +165,7 @@ FocusScope {
         subtitle: root.subtitleForRoute(root.contentRoute)
         searchText: root.searchText
         onSearchTextChanged: root.searchText = searchText
-        onRouteRequested: route => AppController.navigate(route)
+        onRouteRequested: route => root.openRoute(route)
         onConsoleModeRequested: root.toggleConsoleMode()
         onCommandPaletteRequested: root.commandOpen = true
         accountSwitcherAllowed: root.shellVisible && !root.commandOpen && AppController.overlay === ""
@@ -224,7 +236,7 @@ FocusScope {
         opened: root.commandOpen && root.shellVisible
         z: 120
         onCloseRequested: root.commandOpen = false
-        onRouteRequested: route => AppController.navigate(route)
+        onRouteRequested: route => root.openRoute(route)
         onGameRequested: game => { ShellStore.selectedGame = game; ShellStore.launchSelectedGame(false) }
     }
 
@@ -317,11 +329,10 @@ FocusScope {
         }
     }
     Component { id: friendsComponent; DesktopFriendsScreen {} }
-    Component { id: updatesComponent; DesktopUpdateScreen {} }
     Component {
         id: settingsComponent
         DesktopSettingsScreen {
-            selectedSection: root.settingsSection(root.route)
+            selectedSection: root.settingsSection(root.contentRoute)
             onSelectedSectionChanged: root.settingsSubtitle = pageTitles[selectedSection]
             onRequestConsoleMode: enabled => ShellStore.requestConsoleSurface(enabled)
             Component.onCompleted: root.settingsSubtitle = pageTitles[selectedSection]
@@ -333,6 +344,9 @@ FocusScope {
         function onRouteChanged() {
             root.commandOpen = false
             root.searchText = ""
+            // A settings route chosen while Settings is open (the update panel's
+            // "Open in Settings", the palette) selects its page in place.
+            root.selectSettingsPage(AppController.route)
             Qt.callLater(root.restoreShellFocus)
         }
     }

@@ -591,6 +591,7 @@ const QStringList &AppController::routes()
         u"settings-themes"_s,
         u"settings-advanced"_s,
         u"settings-advanced-dropdown"_s,
+        u"settings-updates"_s,
         u"game-detail"_s,
         u"game-detail-platform-dropdown"_s,
         u"sign-in"_s,

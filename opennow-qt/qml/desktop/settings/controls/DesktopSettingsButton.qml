@@ -15,6 +15,7 @@ Button {
     implicitWidth: Math.max(DesktopTokens.px(compact ? 68 : 84), (keySequence !== "" ? bindingGlyph.implicitWidth : label.implicitWidth) + leftPadding + rightPadding
         + (menu ? DesktopTokens.px(22) : 0) + (suffix !== "" ? suffixGlyph.implicitWidth + DesktopTokens.px(8) : 0))
     hoverEnabled: true
+    opacity: enabled ? 1 : 0.5
     padding: 0
     leftPadding: DesktopTokens.px(14)
     rightPadding: DesktopTokens.px(14)

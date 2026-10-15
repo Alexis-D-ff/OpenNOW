@@ -131,24 +131,68 @@ void presentUpdateSurface(QQmlApplicationEngine &engine, QQuickWindow *window, c
     const auto replacement = u"This OpenNOW installation is registered with Windows Installer. Replace it once with setup.exe. In-app updates do not run Windows Installer."_s;
     QVariantMap state{{u"currentVersion"_s, QGuiApplication::applicationVersion()},
                       {u"canCheck"_s, false}};
-    if (surface == u"confirm"_s) {
+    const auto release = u"https://github.com/OpenCloudGaming/OpenNOW/releases/tag/v1.2.3"_s;
+    if (surface == u"confirm"_s || surface == u"ready"_s) {
         state.insert(u"status"_s, u"downloaded"_s);
+        state.insert(u"availableVersion"_s, u"1.2.3"_s);
         state.insert(u"downloadedVersion"_s, u"1.2.3"_s);
+        state.insert(u"releaseUrl"_s, release);
         state.insert(u"canInstall"_s, true);
         state.insert(u"message"_s, u"OpenNOW 1.2.3 downloaded and verified. Ready to install."_s);
     } else if (surface == u"progress"_s) {
         state.insert(u"status"_s, u"downloading"_s);
         state.insert(u"availableVersion"_s, u"1.2.3"_s);
+        state.insert(u"releaseUrl"_s, release);
         state.insert(u"message"_s, u"Downloading OpenNOW 1.2.3…"_s);
+        state.insert(u"downloadProgress"_s, QVariantMap{{u"receivedBytes"_s, 40'524'930},
+                                                       {u"totalBytes"_s, 96'487'928}});
+    } else if (surface == u"available"_s) {
+        state.insert(u"status"_s, u"available"_s);
+        state.insert(u"availableVersion"_s, u"1.2.3"_s);
+        state.insert(u"releaseUrl"_s, release);
+        state.insert(u"canCheck"_s, true);
+        state.insert(u"canDownload"_s, true);
+        state.insert(u"message"_s, u"OpenNOW 1.2.3 is available with signed update metadata."_s);
+    } else if (surface == u"staged"_s) {
+        state.insert(u"status"_s, u"available"_s);
+        state.insert(u"availableVersion"_s, u"1.2.4"_s);
+        state.insert(u"downloadedVersion"_s, u"1.2.3"_s);
+        state.insert(u"releaseUrl"_s, release);
+        state.insert(u"canCheck"_s, true);
+        state.insert(u"canDownload"_s, true);
+        state.insert(u"canInstall"_s, true);
+        state.insert(u"message"_s, u"OpenNOW 1.2.4 is available with signed update metadata."_s);
+    } else if (surface == u"error"_s) {
+        state.insert(u"status"_s, u"error"_s);
+        state.insert(u"canCheck"_s, true);
+        state.insert(u"message"_s, u"Unable to reach GitHub Releases right now."_s);
+    } else if (surface == u"uptodate"_s) {
+        state.insert(u"status"_s, u"not-available"_s);
+        state.insert(u"canCheck"_s, true);
+        state.insert(u"lastCheckedAt"_s, u"1"_s);
+        state.insert(u"message"_s, u"OpenNOW is up to date."_s);
     } else {
         state.insert(u"status"_s, u"not-available"_s);
         state.insert(u"message"_s, replacement);
     }
     store->setProperty("updaterError", QString());
     store->setProperty("updaterState", state);
+    if (surface != u"error"_s && surface != u"other"_s) {
+        store->setProperty("releaseHighlights", QVariantMap{{u"version"_s, u"1.2.3"_s}, {u"title"_s, u"OpenNOW 1.2.3"_s},
+            {u"bodyMarkdown"_s, u"- Anti-AFK in desktop streams\n- Keep account chrome readable inside the window\n"
+                                "- Left-docked Ctrl+G drawer with per-controller tuning\n"
+                                "- Generic HID passthrough for HOTAS, flight controls and wheels\n"_s}});
+    }
     if (surface == u"confirm"_s && window) {
-        if (auto *dialog = window->findChild<QObject *>(u"updateInstallConfirmation"_s))
-            QMetaObject::invokeMethod(dialog, "open");
+        // Settings › Updates and the closed status-bar panel each own an install
+        // action; open the confirmation that belongs to the visible one.
+        for (auto *dialog : window->findChildren<QObject *>(u"updateInstallConfirmation"_s)) {
+            auto *owner = qobject_cast<QQuickItem *>(dialog->parent());
+            if (owner && owner->isVisible()) {
+                QMetaObject::invokeMethod(dialog, "open");
+                break;
+            }
+        }
     }
 }
 
@@ -1025,18 +1069,42 @@ int AcceptanceSession::startSmokeWorkload()
                 auto *window = m_engine.rootObjects().isEmpty()
                     ? nullptr
                     : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+                if (window && m_arguments.contains(u"--smoke-update-fullscreen"_s))
+                    window->showFullScreen();
                 presentUpdateSurface(m_engine, window, surface);
                 QTimer::singleShot(400, this, [this, screenshotPath, surface] {
                     auto *window = m_engine.rootObjects().isEmpty()
                         ? nullptr
                         : qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
                     presentUpdateSurface(m_engine, window, surface);
-                    QTimer::singleShot(350, this, [this, screenshotPath] {
+                    const bool openPanel = m_arguments.contains(u"--smoke-update-panel"_s);
+                    if (openPanel && window) {
+                        if (auto *panel = window->findChild<QObject *>(u"desktopUpdatePanel"_s))
+                            QMetaObject::invokeMethod(panel, "open");
+                    }
+                    QTimer::singleShot(350, this, [this, screenshotPath, surface, openPanel] {
                         if (m_engine.rootObjects().isEmpty() || m_qmlWarningOccurred) {
                             m_application.exit(EXIT_FAILURE);
                             return;
                         }
                         auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+                        // The desktop chip only appears when there is an update action to take.
+                        if (window && window->property("desktopSurfaceActive").toBool()) {
+                            auto *chip = window->findChild<QQuickItem *>(u"desktopUpdateChip"_s);
+                            auto *panel = window->findChild<QObject *>(u"desktopUpdatePanel"_s);
+                            const bool chipExpected = surface != u"uptodate"_s && surface != u"other"_s;
+                            // A staged older package keeps its install action beside Download.
+                            auto *staged = window->findChild<QQuickItem *>(u"updatesPageInstallStaged"_s);
+                            const bool stagedVisible = staged && staged->isVisible();
+                            const bool stagedExpected = surface == u"staged"_s
+                                && m_controller.route() == u"settings-updates"_s;
+                            if (!chip || chip->isVisible() != chipExpected || stagedVisible != stagedExpected
+                                    || (openPanel && (!panel || !panel->property("opened").toBool()))) {
+                                qCritical("Update chip or panel did not match the presented updater state");
+                                m_application.exit(EXIT_FAILURE);
+                                return;
+                            }
+                        }
                         const auto saved = window && window->grabWindow().save(screenshotPath);
                         m_application.exit(saved ? EXIT_SUCCESS : EXIT_FAILURE);
                     });
@@ -1097,11 +1165,6 @@ int AcceptanceSession::startSmokeWorkload()
             m_application.exit(EXIT_FAILURE);
         });
     } else if (m_arguments.contains(u"--smoke-release-notes"_s)) {
-        if (!m_engine.rootObjects().isEmpty()) {
-            auto *window = m_engine.rootObjects().first();
-            if (auto *about = window->findChild<QObject *>(u"desktopAboutSettings"_s))
-                about->setProperty("releaseNotesOpen", true);
-        }
         auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
         store->setProperty("updaterState", QVariantMap{
             {u"status"_s, u"available"_s}, {u"currentVersion"_s, QGuiApplication::applicationVersion()},
@@ -1114,8 +1177,9 @@ int AcceptanceSession::startSmokeWorkload()
             auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
             auto *notes = window->findChild<QObject *>(u"releaseNotesDocument"_s);
             const bool desktop = window->property("desktopSurfaceActive").toBool();
-            const bool correctRoute = m_controller.route() != u"updates"_s
-                || window->findChild<QObject *>(u"desktopUpdateScreen"_s);
+            const bool updatesRoute = m_controller.route() == u"updates"_s
+                || m_controller.route() == u"settings-updates"_s;
+            const bool correctRoute = !updatesRoute || window->findChild<QObject *>(u"desktopUpdatesSettings"_s);
             QString plain;
             const bool parsed = notes && QMetaObject::invokeMethod(notes, "getText",
                 Q_RETURN_ARG(QString, plain), Q_ARG(int, 0),

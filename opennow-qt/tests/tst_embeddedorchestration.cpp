@@ -1535,11 +1535,55 @@ private slots:
         const auto shell = source(QStringLiteral("qml/state/ShellStore.qml"));
         const auto highlights = shell.mid(shell.indexOf(QStringLiteral("else if (name === \"updater.highlights.show\")")));
         QVERIFY(!highlights.contains(QStringLiteral("AppController.navigate")));
-        for (const auto &path : {"qml/screens/UpdateScreen.qml", "qml/desktop/updates/DesktopUpdateScreen.qml"}) {
-            const auto screen = source(QString::fromLatin1(path));
-            QVERIFY(screen.contains(QStringLiteral("onAccepted: ShellStore.installUpdate(true)")));
-            QVERIFY(screen.contains(QStringLiteral("onClicked: installConfirmation.open()")));
+        const auto consoleScreen = source(QStringLiteral("qml/screens/UpdateScreen.qml"));
+        QVERIFY(consoleScreen.contains(QStringLiteral("onAccepted: ShellStore.installUpdate(true)")));
+        QVERIFY(consoleScreen.contains(QStringLiteral("onClicked: installConfirmation.open()")));
+        // Settings › Updates and the status-bar panel share one install action,
+        // and it only installs from the Qt confirmation's accept handler.
+        const auto desktopAction = source(QStringLiteral("qml/desktop/updates/DesktopUpdatePrimaryAction.qml"));
+        QVERIFY(desktopAction.contains(QStringLiteral("onAccepted: ShellStore.installUpdate(true)")));
+        QVERIFY(desktopAction.contains(QStringLiteral("installConfirmation.open()")));
+        QCOMPARE(desktopAction.count(QStringLiteral("installUpdate(")), 1);
+        for (const auto &path : {"qml/desktop/settings/pages/DesktopSettingsUpdatesPage.qml", "qml/desktop/updates/DesktopUpdatePanel.qml"}) {
+            const auto surface = source(QString::fromLatin1(path));
+            QVERIFY(surface.contains(QStringLiteral("DesktopUpdatePrimaryAction")));
+            QVERIFY(!surface.contains(QStringLiteral("installUpdate(")));
         }
+    }
+
+    void updaterAttentionDrivesTheDesktopChipFromAuthoritativeState()
+    {
+        QJSEngine engine;
+        QVERIFY(prepareLaunchGuards(engine));
+        QVERIFY(initializeUpdaterEngine(engine));
+        const auto attention = [&engine](const char *state) {
+            if (engine.evaluate(QStringLiteral("updaterState = %1").arg(QString::fromLatin1(state))).isError())
+                return QStringLiteral("<error>");
+            return engine.evaluate(QStringLiteral("updaterAttention")).toString();
+        };
+        QCOMPARE(attention("({status:'not-available',canCheck:true})"), QString());
+        QCOMPARE(attention("({status:'idle',canCheck:true})"), QString());
+        QCOMPARE(attention("({status:'unsupported'})"), QString());
+        QCOMPARE(attention("({status:'available',canCheck:true,canDownload:true})"), QStringLiteral("available"));
+        QCOMPARE(attention("({status:'downloading'})"), QStringLiteral("downloading"));
+        QCOMPARE(attention("({status:'downloaded',canInstall:true,canCheck:true})"), QStringLiteral("ready"));
+        // A staged package must not hide a newer selected release.
+        QCOMPARE(attention("({status:'available',canInstall:true,canDownload:true,canCheck:true})"), QStringLiteral("available"));
+        QCOMPARE(attention("({status:'preparing'})"), QStringLiteral("installing"));
+        QCOMPARE(attention("({status:'error',canCheck:true})"), QStringLiteral("error"));
+        QCOMPARE(attention("({status:'rolled-back',canCheck:true})"), QStringLiteral("error"));
+        QVERIFY(!engine.evaluate(QStringLiteral("updaterError = 'Update download failed verification'")).isError());
+        QCOMPARE(attention("({status:'available',canCheck:true,canDownload:true})"), QStringLiteral("error"));
+        QVERIFY(!engine.evaluate(QStringLiteral("updaterError = ''")).isError());
+
+        const auto fraction = [&engine](const char *state) {
+            return engine.evaluate(QStringLiteral("updaterState = %1; updaterDownloadFraction").arg(QString::fromLatin1(state))).toNumber();
+        };
+        QCOMPARE(fraction("({status:'downloading',downloadProgress:{receivedBytes:25,totalBytes:100}})"), 0.25);
+        QCOMPARE(fraction("({status:'downloading',downloadProgress:{receivedBytes:250,totalBytes:100}})"), 1.0);
+        QCOMPARE(fraction("({status:'downloading',downloadProgress:{receivedBytes:0,totalBytes:0}})"), -1.0);
+        QCOMPARE(fraction("({status:'downloading'})"), -1.0);
+        QCOMPARE(fraction("({status:'downloaded',downloadProgress:{receivedBytes:100,totalBytes:100}})"), -1.0);
     }
 
     void updaterInstallationFailuresRemainVisibleAfterBackgroundChecks()
@@ -2768,9 +2812,10 @@ private:
             var Qt = {callLater:function(callback) { callbacks.push(callback); }};
         )JS"));
         if (setup.isError()) return false;
-        for (const auto *name : {"updaterSessionSafe", "updaterBusy", "updaterCanInstall", "updaterNeedsReconciliation"}) {
+        for (const auto *name : {"updaterSessionSafe", "updaterBusy", "updaterCanInstall", "updaterNeedsReconciliation",
+                                 "updaterAttention", "updaterDownloadFraction"}) {
             const auto match = QRegularExpression(QStringLiteral(
-                "    readonly property bool %1: (.*?)(?=\\n    (?:property|readonly|on[A-Z]))").arg(QString::fromLatin1(name)),
+                "    readonly property (?:bool|string|real) %1: (.*?)(?=\\n    (?:property|readonly|on[A-Z]|//))").arg(QString::fromLatin1(name)),
                 QRegularExpression::DotMatchesEverythingOption).match(shell);
             if (!match.hasMatch()) return false;
             if (engine.evaluate(QStringLiteral("Object.defineProperty(this,'%1',{configurable:true,get:function(){return %2;}})")

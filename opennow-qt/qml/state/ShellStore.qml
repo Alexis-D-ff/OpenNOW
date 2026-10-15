@@ -335,6 +335,17 @@ QtObject {
     readonly property bool updaterCanInstall: ready && updaterSessionSafe && !updaterBusy && updaterState.canInstall === true
     readonly property bool updaterNeedsReconciliation: updaterReconciling || updaterInstallConfirmed
         || ["preparing", "awaiting-exit", "applying", "restarting", "managed-pending"].indexOf(updaterState.status) >= 0
+    // One attention state for the desktop status-bar chip, its panel and
+    // Settings › Updates. Empty means there is nothing to act on.
+    readonly property string updaterAttention: updaterState.status === "downloading" ? "downloading"
+        : ["preparing", "awaiting-exit", "applying", "restarting"].indexOf(updaterState.status) >= 0 ? "installing"
+        : updaterError !== "" || ["error", "failed", "rolled-back"].indexOf(updaterState.status) >= 0 ? "error"
+        : updaterState.canDownload === true ? "available"
+        : updaterState.canInstall === true ? "ready" : ""
+    // Received fraction of the signed package while the core downloads it, or -1.
+    readonly property real updaterDownloadFraction: updaterState.status === "downloading" && updaterState.downloadProgress
+        && Number(updaterState.downloadProgress.totalBytes) > 0
+        ? Math.min(1, Number(updaterState.downloadProgress.receivedBytes) / Number(updaterState.downloadProgress.totalBytes)) : -1
     onUpdaterSessionSafeChanged: {
         if (updaterSessionSafe && releaseHighlightsPending) {
             accessibilityMessage = qsTr("Release notes are available in Updates.")

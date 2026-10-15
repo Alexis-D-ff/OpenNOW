@@ -1142,7 +1142,10 @@ fn dispatch(
         }
         "updater.download" => core
             .updater
-            .download()
+            .download(&|state| {
+                let _ =
+                    output.send(json!({"type":"event", "name":"updater.changed", "payload":state}));
+            })
             .map(|value| (value, None))
             .map_err(|message| ("update_download_failed".to_owned(), message)),
         "updater.install" => {
