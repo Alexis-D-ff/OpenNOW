@@ -123,7 +123,7 @@ QtObject {
             xbox:"Xbox", gog:"GOG", gaijin:"Gaijin", ea:"EA app", nvidia:"NVIDIA"}
         return labels[storeKey(value)] || (String(value).toUpperCase() === "NONE" ? qsTr("Direct launch") : String(value))
     }
-    readonly property var gameFeatureKeys: ["rtx", "hdr", "reflex"]
+    readonly property var gameFeatureKeys: ["rtx", "hdr", "reflex", "dlss"]
     function gameFeatures(game) {
         const found = {}
         const variants = game && game.variants || []
@@ -132,6 +132,7 @@ QtObject {
             for (let j = 0; j < features.length; ++j)
                 found[features[j]] = true
         }
+        found.dlss = Boolean(game && game.dlss)
         return gameFeatureKeys.filter(key => found[key] === true)
     }
     function featureIconUrl(key) {
@@ -141,7 +142,11 @@ QtObject {
         if (key === "rtx") return qsTr("RTX ray tracing")
         if (key === "hdr") return qsTr("HDR")
         if (key === "reflex") return qsTr("Reflex low latency")
+        if (key === "dlss") return qsTr("DLSS")
         return ""
+    }
+    function featureTip(key) {
+        return key === "dlss" ? qsTr("DLSS — per NVIDIA's DLSS games list") : featureLabel(key)
     }
     function genreLabel(value) {
         return String(value).toLowerCase().replace(/_/g, " ").replace(/\b\w/g, letter => letter.toUpperCase())

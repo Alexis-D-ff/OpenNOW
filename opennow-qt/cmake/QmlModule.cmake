@@ -457,6 +457,7 @@ qt_add_qml_module(opennow-qt
         res/icons/desktop-rtx.svg
         res/icons/desktop-hdr.svg
         res/icons/desktop-reflex.svg
+        res/icons/desktop-dlss.svg
         res/icons/desktop-gamepad.svg
         res/icons/desktop-chevron-up.svg
         res/icons/desktop-chevron-down.svg

@@ -137,7 +137,9 @@ Item {
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: DesktopTokens.featureLabel(parent.modelData)
+                                width: tip.availableWidth - 20
+                                text: DesktopTokens.featureTip(parent.modelData)
+                                wrapMode: Text.Wrap
                                 color: "#E6FFFFFF"
                                 font.family: DesktopTokens.bodyFont
                                 font.pixelSize: 12

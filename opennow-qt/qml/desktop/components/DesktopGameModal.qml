@@ -153,6 +153,8 @@ FocusScope {
             add(qsTr("HDR"))
         if (root.features.indexOf("reflex") >= 0)
             add(qsTr("REFLEX"))
+        if (root.features.indexOf("dlss") >= 0)
+            add("DLSS")
         if (game.membershipTierLabel)
             add(String(game.membershipTierLabel))
         return labels

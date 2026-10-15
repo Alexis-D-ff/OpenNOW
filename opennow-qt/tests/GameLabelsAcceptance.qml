@@ -35,6 +35,9 @@ QtObject {
     readonly property var locked: game("labels-locked", "Paid membership", [variant("201", "Steam", true)],
         {requiresPaidMembership:true, membershipTierLabel:"Premium"})
     readonly property var plain: game("labels-plain", "No labels", [variant("301", "Unknown", false)])
+    readonly property var upscaled: game("labels-dlss", "DLSS listed", [variant("401", "Steam", true, ["rtx"])],
+        {dlss:{superResolution:"override", frameGeneration:"native", multiFrameGeneration:{maxMultiplier:4},
+            rayReconstruction:null, dlaa:null, source:"nvidia-rtx-games-list"}})
 
     function lockedFor(tier) {
         ShellStore.subscription = tier === null ? null : {membershipTier:tier}
@@ -52,6 +55,13 @@ QtObject {
             "features are not the data-backed set in fixed order")
         check(DesktopTokens.gameFeatures(plain).length === 0 && ConsoleStores.launchers(plain).length === 0,
             "a game without catalog data shows labels")
+        check(JSON.stringify(DesktopTokens.gameFeatures(upscaled)) === JSON.stringify(["rtx", "dlss"]),
+            "a game with core DLSS data does not list DLSS after its catalog features")
+        check(DesktopTokens.gameFeatures(Object.assign({}, upscaled, {dlss:null})).indexOf("dlss") < 0,
+            "a game the DLSS list does not match shows DLSS")
+        check(DesktopTokens.featureTip("dlss") === "DLSS — per NVIDIA's DLSS games list"
+            && DesktopTokens.featureTip("rtx") === DesktopTokens.featureLabel("rtx"),
+            "the DLSS tooltip does not name its source")
 
         ShellStore.authSession = {user:{userId:"labels-user", displayName:"Labels fixture"}, provider:{idpId:"fixture", code:"NVIDIA"}}
         check(lockedFor("FREE"), "a Free account is not locked out of a paid game")
@@ -64,7 +74,7 @@ QtObject {
 
         const owner = ShellStore.catalogOwnerState
         ShellStore.settings = Object.assign({}, ShellStore.settings, {onboardingCompleted:true})
-        owner.catalogGames = [crowded, locked, plain]
+        owner.catalogGames = [crowded, locked, plain, upscaled]
         owner.catalogState = "ready"
         owner.catalogComplete = true
         return true
@@ -82,7 +92,7 @@ QtObject {
         const second = child(crowdedLabels, "desktopGameLauncher1")
         check(second && second.opacity < 1 && !child(second, "desktopGameOwnedDot").visible, "an unowned launcher looks owned")
         check(!child(crowdedLabels, "desktopGameLock").visible, "an ungated game shows a lock")
-        check(!child(crowdedLabels, "desktopGameFeature-dlss"), "an unsupported feature was drawn")
+        check(!child(crowdedLabels, "desktopGameFeature-dlss"), "a variant's catalog features drew DLSS without game.dlss")
         const features = child(crowdedLabels, "desktopGameFeatures")
         const launcherPill = child(crowdedLabels, "desktopGameLaunchers")
         function separated() {
@@ -114,6 +124,12 @@ QtObject {
         check(!tipAnchor.shown && !tipLoader.active, "the label tip stayed open after its tile was disabled")
         tile.enabled = true
 
+        const upscaledLabels = labelsFor(host, "labels-dlss")
+        check(upscaledLabels, "the DLSS tile labels were not rendered")
+        const dlssMark = child(upscaledLabels, "desktopGameFeature-dlss")
+        check(dlssMark && dlssMark.visible && dlssMark.status === Image.Ready, "game.dlss did not draw the DLSS mark")
+        check(upscaledLabels.summary.indexOf("DLSS") >= 0, "DLSS is missing from the accessible description")
+
         const plainLabels = collect(host, "desktopGameLabels", []).find(item => item.game && item.game.id === "labels-plain")
         check(plainLabels && !plainLabels.visible, "a game without catalog labels draws an empty pill")
 
@@ -121,8 +137,12 @@ QtObject {
         const guide = collect(host, "desktopIconGuide", [])[0]
         check(guide && guide.opened, "the icon guide did not open")
         const listed = DesktopTokens.gameFeatureKeys.filter(key => child(guide, "desktopIconGuideFeature-" + key))
-        check(JSON.stringify(listed) === JSON.stringify(["rtx", "hdr", "reflex"]) && !child(guide, "desktopIconGuideFeature-dlss"),
-            "the icon guide lists features the catalog cannot back")
+        check(JSON.stringify(listed) === JSON.stringify(["rtx", "hdr", "reflex", "dlss"]),
+            "the icon guide does not list exactly the backed features")
+        const dlssEntry = child(guide, "desktopIconGuideFeature-dlss")
+        check(dlssEntry.label === "DLSS" && dlssEntry.detail.indexOf("NVIDIA's DLSS games list") >= 0
+            && child(guide, "desktopIconGuideFeature-rtx").detail === "",
+            "the icon guide does not say DLSS comes from NVIDIA's list")
         const close = child(guide, "desktopIconGuideClose")
         guide.restoreFocus()
         check(close.activeFocus, "the icon guide did not take focus")

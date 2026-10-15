@@ -212,7 +212,13 @@ fn run() -> Result<(), String> {
             let started = Instant::now();
             let result = requests::scope(permit.token.clone(), || {
                 requests::check().map_err(|error| (error.code.to_owned(), error.message))?;
-                dispatch(&method, &params, &worker_core, &worker_output)
+                dispatch(&method, &params, &worker_core, &worker_output).map(|(mut value, event)| {
+                    if method.starts_with("catalog.") {
+                        let settings = worker_core.settings.lock().expect("settings poisoned").all();
+                        worker_core.gfn.annotate_dlss(&mut value, &settings);
+                    }
+                    (value, event)
+                })
             });
             let outcome = match &result {
                 Ok(_) => "outcome=ok".to_owned(),

@@ -1398,6 +1398,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "httpdate",
+ "icu_normalizer",
  "keyring",
  "libc",
  "md5",

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) mod catalog;
 mod catalog_actions;
+mod dlss_support;
 mod store_launch;
 use catalog::*;
 
@@ -84,6 +85,7 @@ pub struct Endpoints {
     pub public_graphql: String,
     pub account_linking: String,
     pub subscription: String,
+    pub dlss_games: String,
     #[cfg(test)]
     server_info: Option<String>,
 }
@@ -104,6 +106,7 @@ impl Default for Endpoints {
             public_graphql: "https://public.games.geforce.com/graphql".into(),
             account_linking: "https://als.geforcenow.com/v1".into(),
             subscription: MES_URL.into(),
+            dlss_games: dlss_support::LIST_URL.into(),
             #[cfg(test)]
             server_info: None,
         }
@@ -464,7 +467,8 @@ pub struct GfnService {
     cloudmatch: CloudMatchService,
     account_connections: AccountConnectionsService,
     persistent_storage: PersistentStorageService,
-    store_cache: crate::store_cache::StoreCache,
+    store_cache: std::sync::Arc<crate::store_cache::StoreCache>,
+    dlss_games: dlss_support::DlssCatalog,
     catalog_revision: std::sync::atomic::AtomicU64,
     catalog_mutations: Mutex<std::collections::HashSet<catalog_actions::CatalogActionKey>>,
     server_vpc_cache: crate::server_vpc_cache::ServerVpcCache,
@@ -502,8 +506,14 @@ impl GfnService {
             Ok(_) => {}
             Err(error) => eprintln!("auth: Electron account migration was deferred: {error}"),
         }
-        let store_cache = crate::store_cache::StoreCache::new(data_dir.clone());
+        let store_cache =
+            std::sync::Arc::new(crate::store_cache::StoreCache::new(data_dir.clone()));
         let catalog_revision = store_cache.catalog_revision();
+        let dlss_games = dlss_support::DlssCatalog::new(
+            client.clone(),
+            endpoints.dlss_games.clone(),
+            store_cache.clone(),
+        );
         Self {
             cloudmatch: CloudMatchService::with_cleanup_path(
                 client.clone(),
@@ -518,6 +528,7 @@ impl GfnService {
             vault,
             profiles: ConsoleProfiles::load(&data_dir),
             store_cache,
+            dlss_games,
             catalog_revision: std::sync::atomic::AtomicU64::new(catalog_revision),
             catalog_mutations: Mutex::new(std::collections::HashSet::new()),
             server_vpc_cache: crate::server_vpc_cache::ServerVpcCache::default(),
