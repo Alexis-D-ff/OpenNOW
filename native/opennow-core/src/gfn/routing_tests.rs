@@ -548,6 +548,38 @@ fn native_session_end_releases_owned_seat_before_next_allocation() {
 }
 
 #[test]
+fn native_session_end_clears_the_same_seat_after_control_generation_changes() {
+    let (service, path) = service("http://127.0.0.1:1");
+    let seat = json!({"sessionId":"seat-a","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(auth_fixture("account-a"), 7, &seat, None).unwrap());
+    let old_snapshot = service.active_session().unwrap()["session"].clone();
+    service.state.lock().unwrap().generation = 8;
+    let restored = service
+        .reconcile_active_session(&reconciliation_hint(), &json!({}))
+        .unwrap();
+    assert_eq!(restored["session"]["ownerScope"]["generation"], 8);
+    assert_eq!(old_snapshot["ownerScope"]["generation"], 7);
+    let notification =
+        json!({"sessionId":old_snapshot["sessionId"],"ownerScope":old_snapshot["ownerScope"]});
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    assert!(
+        service
+            .session_routing
+            .lock()
+            .unwrap()
+            .active_owner
+            .is_none()
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn native_session_end_rejects_stale_owners_and_preserves_pending_handoffs() {
     let (service, path) = service("http://127.0.0.1:1");
     let mut owner = auth_fixture("account-a");
@@ -563,7 +595,6 @@ fn native_session_end_rejects_stale_owners_and_preserves_pending_handoffs() {
     for (key, value) in [
         ("userId", json!("other")),
         ("providerIdpId", json!("other")),
-        ("generation", json!(8)),
     ] {
         let mut stale = notification.clone();
         stale["ownerScope"][key] = value;
@@ -580,7 +611,7 @@ fn native_session_end_rejects_stale_owners_and_preserves_pending_handoffs() {
         json!({}),
         json!({"sessionId":"ended-seat"}),
         json!({"sessionId":"","ownerScope":notification["ownerScope"]}),
-        json!({"sessionId":"ended-seat","ownerScope":{"userId":"account-a","providerIdpId":DEFAULT_IDP_ID}}),
+        json!({"sessionId":"ended-seat","ownerScope":{"userId":"account-a","providerIdpId":""}}),
     ] {
         assert_eq!(
             service.acknowledge_session_end(&invalid).unwrap_err().code,

@@ -411,12 +411,12 @@ struct ActiveSeatOwner {
 #[serde(rename_all = "camelCase")]
 struct SessionReconciliationHint {
     session_id: String,
-    owner_scope: SessionReconciliationOwner,
+    owner_scope: SessionOwnerIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionReconciliationOwner {
+struct SessionOwnerIdentity {
     user_id: String,
     provider_idp_id: String,
 }
@@ -425,15 +425,7 @@ struct SessionReconciliationOwner {
 #[serde(rename_all = "camelCase")]
 struct SessionEndNotification {
     session_id: String,
-    owner_scope: SessionEndOwner,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionEndOwner {
-    user_id: String,
-    provider_idp_id: String,
-    generation: u64,
+    owner_scope: SessionOwnerIdentity,
 }
 
 impl ActiveSeatOwner {
@@ -1949,7 +1941,6 @@ impl GfnService {
             owner.session_id == notification.session_id
                 && owner.auth.user.user_id == notification.owner_scope.user_id
                 && owner.auth.provider.idp_id == notification.owner_scope.provider_idp_id
-                && owner.last_published_generation == notification.owner_scope.generation
         }) else {
             return Ok(json!({"sessionId":notification.session_id,"cleared":false}));
         };
