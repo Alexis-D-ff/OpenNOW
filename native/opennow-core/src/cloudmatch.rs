@@ -1661,7 +1661,7 @@ fn build_create_body(app_id: &str, params: &Value, settings: &Value, device_id: 
     // requestedStreamingFeatures, field-for-field with the official Bifrost request
     // builder: reflex, bitDepth, cloudGsync, enabledL4S, mouseMovementFlags, trueHdr,
     // supportedHidDevices, profile, fallbackToLogicalResolution, hidDevices,
-    // chromaFormat, prefilterMode/Sharpness/NoiseReduction, hudStreamingMode.
+    // chromaFormat, prefilterMode/Sharpness/NoiseReduction, hudStreamingMode, dlssOverrides.
     // Codec, bitrate ceiling, vsync, channel count, QoS policy, touch support, and the
     // dynamic quality policy are deliberately absent: the official client resolves the
     // codec locally and carries bitrate/policy purely in the RTSP ANNOUNCE.
@@ -1677,7 +1677,8 @@ fn build_create_body(app_id: &str, params: &Value, settings: &Value, device_id: 
         "prefilterMode":0,
         "prefilterSharpness":0,
         "prefilterNoiseReduction":0,
-        "hudStreamingMode":0
+        "hudStreamingMode":0,
+        "dlssOverrides":crate::dlss::session_request(settings)
     });
     features["mouseMovementFlags"] = json!(0);
     features["trueHdr"] = json!(false);
@@ -4127,6 +4128,21 @@ mod tests {
                 false
             );
         }
+    }
+
+    #[test]
+    fn create_request_carries_dlss_overrides_like_the_official_client() {
+        let default_body = build_create_body("123", &json!({}), &json!({}), "device");
+        assert_eq!(
+            default_body["sessionRequestData"]["requestedStreamingFeatures"]["dlssOverrides"],
+            json!({"srMode":0,"srModel":0,"srScale":100,"rrModel":0,"fgMode":0,"fgModel":0})
+        );
+        let settings = json!({"dlssOverrides":{"srMode":2,"srModel":1,"srScale":58,"rrModel":1,"fgMode":1,"fgModel":1,"fgMultiplier":4}});
+        let body = build_create_body("123", &json!({}), &settings, "device");
+        assert_eq!(
+            body["sessionRequestData"]["requestedStreamingFeatures"]["dlssOverrides"],
+            json!({"srMode":2,"srModel":1,"srScale":58,"rrModel":1,"fgMode":1,"fgModel":1,"fgMultiplier":4})
+        );
     }
 
     #[test]

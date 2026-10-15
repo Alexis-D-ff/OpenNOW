@@ -97,6 +97,17 @@ requirements, recorded store subscriptions, membership tier, and
 `isGamePlayAllowed` apply from the same account metadata the ordinary launch path
 uses.
 
+Cloud DLSS overrides follow the official client. The `dlssOverrides` setting stores
+the exact `requestedStreamingFeatures.dlssOverrides` wire object (`srMode`, `srModel`,
+`srScale`, `rrModel`, `fgMode`, `fgModel`, `fgMultiplier`), where `0` leaves a feature
+to the game. The core clamps unknown enum values to `0`, leaves a mode to the game
+when its model is, fixes `srScale` for every SR mode except Custom (33–100), and sends
+`fgMultiplier` only for Dynamic frame generation. Every create request carries the
+object. `subscription.dlssOverrides` reports `entitled` and `upsell` for
+`superResolution`, `frameGeneration`, and `rayReconstruction` from the MES
+`SUPPORTED_DLSS_OVERRIDE_*` features and `SUPPORT_DLSS_OVERRIDE_*` upsells, plus the
+entitled `frameGenerationMultipliers` from `SUPPORTED_DLSS_FG_MULTIPLIERS`.
+
 A platform client that the ordinary catalog resolution also returns is judged by
 that resolution's metadata, so catalog `playabilityState` and patch state are
 enforced there. When the ordinary resolution does not return the app, the store

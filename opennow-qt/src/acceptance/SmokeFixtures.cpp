@@ -350,14 +350,19 @@ int AcceptanceSession::prepareWindow()
             settings->setProperty("selectedSection", page.value());
             if (m_arguments.contains(u"--smoke-settings-advanced"_s))
                 settings->setProperty("advancedOpen", true);
-            if (page.value() == 0 && m_arguments.contains(u"--smoke-paper-design"_s)) {
+            if ((page.value() == 0 || page.value() == 3) && m_arguments.contains(u"--smoke-paper-design"_s)) {
                 auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
                 if (!store) return EXIT_FAILURE;
                 store->setProperty("authSession", QVariantMap{{u"user"_s, QVariantMap{
                     {u"displayName"_s, u"Demo player"_s}, {u"email"_s, u"player@example.invalid"_s}}}});
                 store->setProperty("subscription", QVariantMap{{u"membershipTier"_s, u"ULTIMATE"_s},
                     {u"remainingHours"_s, 42}, {u"entitledResolutions"_s, QVariantList{
-                        QVariantMap{{u"width"_s, 3840}, {u"height"_s, 2160}, {u"fps"_s, 120}}}}});
+                        QVariantMap{{u"width"_s, 3840}, {u"height"_s, 2160}, {u"fps"_s, 120}}}},
+                    {u"dlssOverrides"_s, QVariantMap{
+                        {u"superResolution"_s, QVariantMap{{u"entitled"_s, true}, {u"upsell"_s, false}}},
+                        {u"frameGeneration"_s, QVariantMap{{u"entitled"_s, true}, {u"upsell"_s, false}}},
+                        {u"rayReconstruction"_s, QVariantMap{{u"entitled"_s, false}, {u"upsell"_s, true}}},
+                        {u"frameGenerationMultipliers"_s, QVariantList{3, 4}}}}});
             }
         }
         const auto settingsScaleIndex = m_arguments.indexOf(u"--smoke-settings-scale"_s);
