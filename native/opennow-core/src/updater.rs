@@ -36,6 +36,12 @@ struct DownloadedUpdate {
     sha256: String,
 }
 
+#[derive(Clone, Copy)]
+struct DownloadProgress {
+    received_bytes: u64,
+    total_bytes: u64,
+}
+
 #[derive(Clone)]
 struct State {
     status: &'static str,
@@ -47,6 +53,7 @@ struct State {
     last_checked_at: Option<u128>,
     available: Option<AvailableUpdate>,
     downloaded: Option<DownloadedUpdate>,
+    download_progress: Option<DownloadProgress>,
     transaction: Option<update_apply::PreparedUpdate>,
 }
 
@@ -134,6 +141,7 @@ impl UpdaterService {
                 last_checked_at: None,
                 available: None,
                 downloaded: None,
+                download_progress: None,
                 transaction,
             }),
         })
@@ -321,9 +329,12 @@ impl UpdaterService {
         Ok(releases)
     }
 
-    pub fn download(&self) -> Result<Value, String> {
+    /// Downloads and verifies the available package. on_progress receives the
+    /// updater state each time the received byte count crosses another whole
+    /// percent of the signed size, so the shell can show determinate progress.
+    pub fn download(&self, on_progress: &dyn Fn(Value)) -> Result<Value, String> {
         let _operation = self.begin_operation()?;
-        let available = {
+        let (available, started) = {
             let mut state = self.state.lock().expect("updater state poisoned");
             let available = state
                 .available
@@ -333,10 +344,35 @@ impl UpdaterService {
             state.status = "downloading";
             state.transaction = None;
             state.message = format!("Downloading OpenNOW {}…", available.version);
-            available
+            state.download_progress = Some(DownloadProgress {
+                received_bytes: 0,
+                total_bytes: available.asset.size,
+            });
+            (available, state_json(&state))
         };
+        on_progress(started);
         let _ = fs::remove_file(self.staging_dir.join("active-apply.json"));
-        match self.download_verified(&available) {
+        let mut reported_percent = 0;
+        let result = self.download_verified(&available, &mut |received_bytes| {
+            let percent = download_percent(received_bytes, available.asset.size);
+            let snapshot = {
+                let mut state = self.state.lock().expect("updater state poisoned");
+                state.download_progress = Some(DownloadProgress {
+                    received_bytes,
+                    total_bytes: available.asset.size,
+                });
+                (percent > reported_percent).then(|| state_json(&state))
+            };
+            if let Some(snapshot) = snapshot {
+                reported_percent = percent;
+                on_progress(snapshot);
+            }
+        });
+        self.state
+            .lock()
+            .expect("updater state poisoned")
+            .download_progress = None;
+        match result {
             Ok(downloaded) => {
                 let mut state = self.state.lock().expect("updater state poisoned");
                 state.status = "downloaded";
@@ -444,7 +480,11 @@ impl UpdaterService {
         Ok(operation)
     }
 
-    fn download_verified(&self, available: &AvailableUpdate) -> Result<DownloadedUpdate, String> {
+    fn download_verified(
+        &self,
+        available: &AvailableUpdate,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<DownloadedUpdate, String> {
         let key = embedded_update_key()?;
         let manifest_response = self
             .client
@@ -476,7 +516,7 @@ impl UpdaterService {
         let final_path = self.staging_dir.join(&manifest.asset);
         let partial_path = self.staging_dir.join(format!(".{}.part", manifest.asset));
         let _ = fs::remove_file(&partial_path);
-        let result = write_verified_asset(response, &partial_path, &manifest);
+        let result = write_verified_asset(response, &partial_path, &manifest, progress);
         if let Err(error) = result {
             let _ = fs::remove_file(&partial_path);
             return Err(error);
@@ -521,6 +561,10 @@ fn state_json(state: &State) -> Value {
         "releaseUrl": state.release_url,
         "message": state.message,
         "lastCheckedAt": state.last_checked_at.map(|value| value.to_string()),
+        "downloadProgress": state.download_progress.map(|progress| json!({
+            "receivedBytes": progress.received_bytes,
+            "totalBytes": progress.total_bytes,
+        })),
         "canCheck": !matches!(state.status, "unsupported" | "checking" | "downloading" | "preparing" | "awaiting-exit" | "applying" | "restarting" | "installing" | "managed-pending" | "reboot-required"),
         "canDownload": can_download,
         "canInstall": matches!(state.status, "downloaded" | "error" | "available" | "not-available" | "failed" | "rolled-back") && state.downloaded.is_some(),
@@ -837,10 +881,18 @@ fn manifest_matches_release(manifest: &UpdateManifest, available: &AvailableUpda
         && manifest.size <= MAXIMUM_UPDATE_BYTES
 }
 
+fn download_percent(received_bytes: u64, total_bytes: u64) -> u64 {
+    if total_bytes == 0 {
+        return 0;
+    }
+    (u128::from(received_bytes.min(total_bytes)) * 100 / u128::from(total_bytes)) as u64
+}
+
 fn write_verified_asset(
-    mut response: Response,
+    mut response: impl Read,
     path: &Path,
     manifest: &UpdateManifest,
+    progress: &mut dyn FnMut(u64),
 ) -> Result<(), String> {
     let mut output = fs::File::create(path)
         .map_err(|error| format!("Could not create the staged update: {error}"))?;
@@ -864,6 +916,7 @@ fn write_verified_asset(
         output
             .write_all(&buffer[..count])
             .map_err(|error| format!("Could not write the staged update: {error}"))?;
+        progress(total);
     }
     output
         .sync_all()
@@ -1012,7 +1065,7 @@ mod tests {
         }
         updater.request_failed("A generic failure must not replace the update instruction");
         assert_eq!(updater.state()["message"], message);
-        assert_eq!(updater.download().unwrap_err(), message);
+        assert_eq!(updater.download(&|_| {}).unwrap_err(), message);
         assert_eq!(
             updater.install(&json!({"confirmed": true})).unwrap_err(),
             message
@@ -1407,7 +1460,7 @@ mod tests {
         let before = updater.state();
         for result in [
             updater.check(&json!({"channel":"invalid"})),
-            updater.download(),
+            updater.download(&|_| {}),
             updater.install(&json!({"confirmed":true})),
         ] {
             assert_eq!(
@@ -1421,7 +1474,7 @@ mod tests {
         updater.state.lock().unwrap().status = "installing";
         for result in [
             updater.check(&json!({"channel":"invalid"})),
-            updater.download(),
+            updater.download(&|_| {}),
             updater.install(&json!({"confirmed":true})),
         ] {
             assert_eq!(
@@ -1611,6 +1664,7 @@ mod tests {
             last_checked_at: None,
             available: None,
             downloaded: None,
+            download_progress: None,
             transaction: None,
         }
     }
@@ -1783,7 +1837,7 @@ mod tests {
             "unconfigured-fail-closed"
         );
         assert_eq!(
-            updater.download().unwrap_err(),
+            updater.download(&|_| {}).unwrap_err(),
             "This build has no pinned update signing key"
         );
         assert!(updater.state()["downloadedVersion"].is_null());
@@ -1908,5 +1962,48 @@ mod tests {
         verify_manifest(&manifest, &key).unwrap();
         manifest.size += 1;
         assert!(verify_manifest(&manifest, &key).is_err());
+    }
+
+    #[test]
+    fn verified_downloads_report_monotonic_byte_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = vec![7_u8; 300 * 1024];
+        let manifest = UpdateManifest {
+            schema_version: 1,
+            version: "1.0.0".to_owned(),
+            asset: "OpenNOW-Qt-1.0.0-Linux-x64.AppImage".to_owned(),
+            size: payload.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&payload)),
+            signature: String::new(),
+        };
+        let mut reported = Vec::new();
+        write_verified_asset(
+            std::io::Cursor::new(payload.clone()),
+            &directory.path().join("asset.part"),
+            &manifest,
+            &mut |received| reported.push(received),
+        )
+        .unwrap();
+        assert!(reported.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(reported.last().copied(), Some(manifest.size));
+        assert_eq!(download_percent(0, manifest.size), 0);
+        assert_eq!(download_percent(manifest.size / 2, manifest.size), 50);
+        assert_eq!(download_percent(manifest.size * 2, manifest.size), 100);
+        assert_eq!(download_percent(10, 0), 0);
+    }
+
+    #[test]
+    fn download_progress_is_reported_only_while_downloading() {
+        let directory = tempfile::tempdir().unwrap();
+        let updater = UpdaterService::new(directory.path()).unwrap();
+        assert!(updater.state()["downloadProgress"].is_null());
+        updater.state.lock().unwrap().download_progress = Some(DownloadProgress {
+            received_bytes: 40_500_000,
+            total_bytes: 96_487_928,
+        });
+        assert_eq!(
+            updater.state()["downloadProgress"],
+            json!({"receivedBytes":40_500_000_u64, "totalBytes":96_487_928_u64})
+        );
     }
 }

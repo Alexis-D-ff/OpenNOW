@@ -1233,7 +1233,15 @@ also check its local native-runtime state before requesting installation.
 `updater.state.get` is authoritative after an error or request timeout. The core
 emits `updater.changed` after update operations even if the original request was
 cancelled, because cancellation does not undo an installation already prepared
-by the native helper. Clients must not synthesize `canDownload`, `canInstall`, or
+by the native helper.
+
+While `updater.download` runs, the updater state carries the additive field
+`downloadProgress: {"receivedBytes": n, "totalBytes": n}`, where `totalBytes` is
+the signed asset size. It is `null` in every other state. The core emits
+`updater.changed` when the download starts and each time the received bytes cross
+another whole percent of the signed size, so a download produces at most about
+101 progress events before its response. Progress is advisory: hash and size
+verification still decide whether the download succeeds. Clients must not synthesize `canDownload`, `canInstall`, or
 `canCheck` from an error message. A failed check or a later release check does not
 discard an already verified download.
 

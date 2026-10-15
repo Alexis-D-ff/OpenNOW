@@ -388,8 +388,6 @@ int AcceptanceSession::prepareWindow()
                     stream->setProperty("statisticsOpen", true);
                 if (auto *stats = window->findChild<QObject *>(u"desktopStatsSettings"_s))
                     stats->setProperty("metricsOpen", true);
-                if (auto *about = window->findChild<QObject *>(u"desktopAboutSettings"_s))
-                    about->setProperty("releaseNotesOpen", true);
             });
         }
         const auto settingsScrollIndex = m_arguments.indexOf(u"--smoke-settings-scroll"_s);
@@ -540,6 +538,11 @@ int AcceptanceSession::prepareWindow()
                 if (!QMetaObject::invokeMethod(channel,"selected",Q_ARG(int,1),
                         Q_ARG(QVariant,QVariant(QVariantMap{{u"label"_s,u"Nightly"_s},{u"value"_s,u"nightly"_s}})))
                     || setting(u"updateChannel"_s).toString() != u"nightly"_s) return EXIT_FAILURE;
+            }
+            if (auto *updates = findControl(u"aboutOpenUpdates"_s)) {
+                exercised = true;
+                if (!QMetaObject::invokeMethod(updates, "clicked")
+                    || m_controller.route() != u"settings-updates"_s) return EXIT_FAILURE;
             }
             if (auto *stats = findControl(u"desktopStatsSettings"_s)) {
                 if (!stats->setProperty("metricsOpen", true)) return EXIT_FAILURE;

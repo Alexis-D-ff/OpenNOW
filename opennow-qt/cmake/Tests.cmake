@@ -1513,7 +1513,7 @@ if(BUILD_TESTING)
             --route settings-themes --smoke-paper-design --smoke-settings-panel interface --smoke-choice-open --reduced-motion)
     set_tests_properties(qml-renew-network-picker qml-renew-language-picker PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
-    foreach(route settings-network settings-advanced settings-themes settings-input)
+    foreach(route settings-network settings-advanced settings-updates settings-themes settings-input)
         add_test(NAME "qml-renew-actions-${route}"
             COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
                 --route "${route}" --smoke-paper-design --smoke-renew-settings-actions --reduced-motion)
@@ -1655,13 +1655,37 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT}
     )
-    foreach(notes_route updates settings-advanced)
+    foreach(notes_route updates settings-updates)
         foreach(notes_width 960 1600)
             add_test(NAME "qml-release-notes-${notes_route}-${notes_width}"
                 COMMAND opennow-qt --smoke-test --allow-multiple-instances
                     --desktop --route ${notes_route} --smoke-release-notes
                     --smoke-width ${notes_width} --reduced-motion)
             set_tests_properties("qml-release-notes-${notes_route}-${notes_width}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+        endforeach()
+    endforeach()
+    # Settings › Updates and the status-bar chip/panel for every updater state.
+    foreach(update_surface uptodate available progress ready error confirm other)
+        add_test(NAME "qml-desktop-updates-${update_surface}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route settings-updates --smoke-update-surface ${update_surface} --reduced-motion
+                --screenshot ${CMAKE_CURRENT_BINARY_DIR}/desktop-updates-${update_surface}.png)
+        set_tests_properties("qml-desktop-updates-${update_surface}" PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+    endforeach()
+    foreach(update_surface available progress ready error)
+        foreach(update_window windowed fullscreen)
+            set(update_window_args)
+            if(update_window STREQUAL "fullscreen")
+                list(APPEND update_window_args --smoke-update-fullscreen)
+            endif()
+            add_test(NAME "qml-desktop-update-panel-${update_surface}-${update_window}"
+                COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                    --route home --smoke-update-surface ${update_surface} --smoke-update-panel --reduced-motion
+                    ${update_window_args}
+                    --screenshot ${CMAKE_CURRENT_BINARY_DIR}/desktop-update-panel-${update_surface}-${update_window}.png)
+            set_tests_properties("qml-desktop-update-panel-${update_surface}-${update_window}" PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
         endforeach()
     endforeach()

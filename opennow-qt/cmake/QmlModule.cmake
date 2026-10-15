@@ -334,6 +334,7 @@ qt_add_qml_module(opennow-qt
         qml/desktop/settings/pages/DesktopSettingsStoresPage.qml
         qml/desktop/settings/pages/DesktopSettingsStreamPage.qml
         qml/desktop/settings/pages/DesktopSettingsSubscriptionPage.qml
+        qml/desktop/settings/pages/DesktopSettingsUpdatesPage.qml
         qml/desktop/shell/DesktopApp.qml
         qml/desktop/shell/DesktopAccountSwitcher.qml
         qml/desktop/shell/DesktopCommandPalette.qml
@@ -354,7 +355,11 @@ qt_add_qml_module(opennow-qt
         qml/desktop/stream/DesktopStreamStats.qml
         qml/desktop/stream/DesktopStreamToast.qml
         qml/desktop/stream/DesktopStreamToasts.qml
-        qml/desktop/updates/DesktopUpdateScreen.qml
+        qml/desktop/updates/DesktopUpdateChip.qml
+        qml/desktop/updates/DesktopUpdateHeadline.qml
+        qml/desktop/updates/DesktopUpdatePanel.qml
+        qml/desktop/updates/DesktopUpdatePrimaryAction.qml
+        qml/desktop/updates/DesktopUpdateProgress.qml
         qml/overlays/FriendsOverlay.qml
         qml/overlays/GuideOverlay.qml
         qml/overlays/OverlayHost.qml

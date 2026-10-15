@@ -158,8 +158,21 @@ FocusScope {
         { icon: "desktop-nav-friends.svg", name: qsTr("Friends and party"), detail: qsTr("See who is online"), route: "friends", key: "4" },
         { icon: "desktop-nav-settings.svg", name: qsTr("Settings"), detail: qsTr("Configure OpenNOW"), route: "settings", key: "," },
         { icon: "desktop-sliders.svg", name: qsTr("Stream settings"), detail: qsTr("Resolution, frame rate and codec"), route: "settings-streaming", key: "" },
+        { icon: "desktop-info.svg", name: qsTr("Updates"), detail: root.updateDetail(), route: "settings-updates", key: "" },
         { icon: "desktop-play-stroke.svg", name: qsTr("Start last game"), detail: qsTr("Resume your previous session"), route: "game-detail", key: "Enter" }
     ]
+
+    function updateDetail() {
+        const updater = ShellStore.updaterState || ({})
+        const attention = ShellStore.updaterAttention
+        if (attention === "ready")
+            return qsTr("Install %1 and restart").arg(updater.downloadedVersion || updater.availableVersion || "")
+        if (attention === "downloading")
+            return qsTr("Downloading OpenNOW %1").arg(updater.availableVersion || "")
+        if (attention === "available")
+            return qsTr("OpenNOW %1 is available").arg(updater.availableVersion || "")
+        return qsTr("Check for updates, channel and release notes")
+    }
 
     function matchedGames() {
         if (root.normalizedQuery !== "")

@@ -11,7 +11,7 @@ FocusScope {
     readonly property int footerHeight: DesktopTokens.px(40)
     property string title: qsTr("Home")
     property string subtitle: qsTr("Your library")
-    property bool searchVisible: route !== "settings" && route.indexOf("settings-") !== 0 && route !== "friends" && route !== "updates"
+    property bool searchVisible: route !== "settings" && route.indexOf("settings-") !== 0 && route !== "friends"
     property string searchText: ""
     readonly property bool railCollapsed: ShellStore.settings.desktopRailCollapsed !== false
     // A pinned sidebar reserves space; only transient hover expansion overlays.
@@ -187,8 +187,25 @@ FocusScope {
                 DesktopKeyHint { compact: footer.compactHints; keyText: qsTr("Ctrl K"); shortcut: "Ctrl K"; label: qsTr("Commands") }
                 DesktopKeyHint { compact: footer.compactHints; keyText: "?"; label: qsTr("All shortcuts") }
             }
-            Row { anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(24); anchors.verticalCenter: parent.verticalCenter; spacing: DesktopTokens.px(10)
-                visible: x >= shortcutHints.x + shortcutHints.width + DesktopTokens.px(16)
+            DesktopUpdateChip {
+                id: updateChip
+                anchors.right: sessionStatus.visible ? sessionStatus.left : parent.right
+                anchors.rightMargin: DesktopTokens.px(sessionStatus.visible ? 14 : 24)
+                anchors.verticalCenter: parent.verticalCenter
+                panelOpen: updatePanel.opened
+                onClicked: updatePanel.opened ? updatePanel.close() : updatePanel.open()
+                onVisibleChanged: if (!visible) updatePanel.close()
+                DesktopUpdatePanel {
+                    id: updatePanel
+                    x: updateChip.width - width
+                    y: -height - DesktopTokens.px(8)
+                    onSettingsRequested: root.routeRequested("settings-updates")
+                }
+            }
+            Row { id: sessionStatus; anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(24); anchors.verticalCenter: parent.verticalCenter; spacing: DesktopTokens.px(10)
+                visible: footer.width - DesktopTokens.px(24) - implicitWidth
+                    - (updateChip.visible ? updateChip.width + DesktopTokens.px(14) : 0)
+                    >= shortcutHints.x + shortcutHints.width + DesktopTokens.px(16)
                 Text {
                     objectName: "desktopRemainingPlaytime"
                     visible: text !== ""
