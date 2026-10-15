@@ -293,6 +293,7 @@ FocusScope {
             active: root.route === "home"
             onRouteRequested: route => AppController.navigate(route)
             onGameRequested: game => ShellStore.openGame(game)
+            onPlayRequested: game => { ShellStore.selectedGame = game; ShellStore.launchSelectedGame(false) }
         }
     }
     Component {

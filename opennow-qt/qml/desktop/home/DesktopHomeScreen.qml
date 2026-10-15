@@ -26,6 +26,7 @@ FocusScope {
 
     signal routeRequested(string route)
     signal gameRequested(var game)
+    signal playRequested(var game)
 
     anchors.fill: parent
     focus: active
@@ -400,6 +401,7 @@ FocusScope {
                             current: root.focusZone === 1 && root.focusIndex === index
                             onPointed: root.setSelection(1, index)
                             onActivated: root.openGame(modelData)
+                            onPlayRequested: root.playRequested(modelData)
                         }
                     }
                 }
@@ -431,6 +433,7 @@ FocusScope {
                             current: root.focusZone === 2 && root.focusIndex === index
                             onPointed: root.setSelection(2, index)
                             onActivated: root.openGame(modelData)
+                            onPlayRequested: root.playRequested(modelData)
                         }
                     }
                 }
@@ -462,6 +465,7 @@ FocusScope {
                             current: root.focusZone === 3 && root.focusIndex === index
                             onPointed: root.setSelection(3, index)
                             onActivated: root.openGame(modelData)
+                            onPlayRequested: root.playRequested(modelData)
                         }
                     }
                 }

@@ -25,7 +25,13 @@ DesktopSettingsPanel {
     DesktopSettingsRow {
         objectName: "renewUiSoundsRow"
         width: parent.width; paperStyle: true; glyph: "wave"; title: qsTr("UI sounds")
-        description: qsTr("Play the Game Mode startup sound"); showDivider: false
+        description: qsTr("Play the Game Mode startup sound")
         DesktopSettingsToggle { checked: page.settingsScreen.boolSetting("uiSoundsEnabled",true); onValueChangedByUser: value => page.settingsScreen.setSetting("uiSoundsEnabled",value) }
+    }
+    DesktopSettingsRow {
+        objectName: "confirmQuitWhenIdleRow"
+        width: parent.width; paperStyle: true; glyph: "close"; title: qsTr("Confirm before quitting")
+        description: qsTr("Ask before closing OpenNOW from the title bar · active sessions always ask"); showDivider: false
+        DesktopSettingsToggle { checked: page.settingsScreen.boolSetting("confirmQuitWhenIdle",true); onValueChangedByUser: value => page.settingsScreen.setSetting("confirmQuitWhenIdle",value) }
     }
 }

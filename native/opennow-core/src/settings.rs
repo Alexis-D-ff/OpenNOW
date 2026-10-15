@@ -1183,7 +1183,7 @@ fn defaults() -> Map<String, Value> {
         "controllerMode":true, "controllerModePromptDismissed":false, "forwardFlightControls":true,
         "controllerLeftStickDeadzone":5, "controllerRightStickDeadzone":5,
         "controllerVibrationIntensity":100, "controllerProfiles":{},
-        "reducedMotion":false, "uiSoundsEnabled":true,
+        "reducedMotion":false, "uiSoundsEnabled":true, "confirmQuitWhenIdle":true,
         "launchInConsoleMode":false, "startAsLastUsedAccount":false,
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
         "desktopBackgroundImage":"", "desktopBackgroundOpacity":30,
@@ -2755,6 +2755,11 @@ mod tests {
         assert_eq!(store.all()["transportMode"], json!("nvst"));
         assert_eq!(store.all()["desktopRailCollapsed"], json!(true));
         assert_eq!(store.all()["desktopSidebarHover"], json!(true));
+        assert_eq!(store.all()["confirmQuitWhenIdle"], json!(true));
+        assert_eq!(
+            store.set("confirmQuitWhenIdle", json!(false)).unwrap(),
+            json!(false)
+        );
         assert_eq!(store.all()["desktopBackground"], json!("art"));
         assert_eq!(
             store.set("desktopBackground", json!("gradient")).unwrap(),
@@ -2801,6 +2806,7 @@ mod tests {
         assert_eq!(store.set("desktopUiScale", json!(0)).unwrap(), json!(0.85));
         let preferences = SettingsStore::load(Some(directory.clone())).unwrap();
         assert_eq!(preferences.all()["desktopSidebarHover"], json!(false));
+        assert_eq!(preferences.all()["confirmQuitWhenIdle"], json!(false));
         assert_eq!(preferences.all()["statsShowFps"], json!(false));
         assert_eq!(preferences.all()["statsShowRegion"], json!(false));
         assert_eq!(preferences.all()["statsOverlayScale"], json!(1.5));

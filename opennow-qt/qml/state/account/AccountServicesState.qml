@@ -10,6 +10,8 @@ QtObject {
     required property var refreshAccountServices
     signal accessibilityAnnounced(string message)
     property var subscription: null
+    readonly property var remainingPlaytimeHours: subscription && subscription.isUnlimited !== true
+        && typeof subscription.remainingHours === "number" ? Math.max(0, subscription.remainingHours) : null
     property string subscriptionRequestId: ""
     property var regions: []
     property string regionsVpcId: ""

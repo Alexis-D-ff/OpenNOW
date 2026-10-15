@@ -537,7 +537,10 @@
     "s48": "Independent client",
     "s49": "OpenNOW is not affiliated with, endorsed by or supported by NVIDIA. GeForce NOW is a trademark of NVIDIA Corporation. You bring your own account and subscription.",
     "s50": "Filter options…",
-    "s51": "No matching options"
+    "s51": "No matching options",
+    "s52": "Confirm before quitting",
+    "s53": "Ask before closing OpenNOW from the title bar · active sessions always ask",
+    "s54": "%1 h playtime left"
   },
   "desktopRenew": {
     "additional1": "Advanced · subscription, profiles and privacy",

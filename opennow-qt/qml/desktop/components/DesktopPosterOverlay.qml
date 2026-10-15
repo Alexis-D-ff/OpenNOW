@@ -4,6 +4,7 @@ import OpenNOW
 Column {
     id: root
     required property var game
+    readonly property Item playButton: playButtonFace
     spacing: 7
 
     Text {
@@ -17,6 +18,8 @@ Column {
     }
 
     Rectangle {
+        id: playButtonFace
+        objectName: "desktopPosterPlay"
         width: parent.width
         height: 32
         radius: 8

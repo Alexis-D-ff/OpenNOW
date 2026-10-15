@@ -210,6 +210,27 @@ QtObject {
         check(heading.width > 0 && heading.x + heading.width <= searchField.x
             && searchField.x + searchField.width <= resumeButton.x,
             "header did not adapt to a narrower viewport")
+        const playtime = namedChild(shell, "desktopRemainingPlaytime")
+        const originalSubscription = ShellStore.subscription
+        ShellStore.subscription = {membershipTier:"PERFORMANCE", isUnlimited:false, remainingHours:42.25}
+        check(playtime.text === "42.3 H PLAYTIME LEFT", "remaining playtime was not shown: " + playtime.text)
+        ShellStore.subscription = {membershipTier:"PERFORMANCE", isUnlimited:false, remainingHours:null}
+        check(playtime.text === "", "unknown remaining playtime was shown")
+        ShellStore.subscription = {membershipTier:"ULTIMATE", isUnlimited:true, remainingHours:12}
+        check(playtime.text === "", "unlimited subscription showed a playtime budget")
+        ShellStore.subscription = originalSubscription
+        const sidebar = namedChild(shell, "desktopSidebar")
+        const railScrim = namedChild(shell, "desktopRailScrim")
+        check(!railScrim.visible, "pinned sidebar covered the page with a dismissal scrim")
+        sidebar.closeOverlay()
+        check(ShellStore.settings.desktopRailCollapsed === false && !sidebar.collapsed,
+            "dismissing the sidebar overlay collapsed the pinned sidebar")
+        ShellStore.applySetting("desktopRailCollapsed", true)
+        sidebar.hoverExpanded = true
+        check(sidebar.overlayOpen && railScrim.visible, "hover expansion did not offer outside-click dismissal")
+        sidebar.closeOverlay()
+        check(!sidebar.overlayOpen && !railScrim.visible && ShellStore.settings.desktopRailCollapsed === true,
+            "dismissing the hover overlay changed the collapsed preference")
         shell.destroy()
         headerHost.destroy()
         ShellStore.settings = originalSettings

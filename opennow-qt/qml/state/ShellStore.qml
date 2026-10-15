@@ -287,6 +287,7 @@ QtObject {
     property alias consoleSurfaceError: settingsOwner.consoleSurfaceError
     property bool desktopUiActive: false
     property alias subscription: accountServicesOwner.subscription
+    readonly property alias remainingPlaytimeHours: accountServicesOwner.remainingPlaytimeHours
     property alias regions: accountServicesOwner.regions
     property alias regionPingResults: accountServicesOwner.regionPingResults
     property alias regionPingMessage: accountServicesOwner.regionPingMessage
@@ -325,6 +326,8 @@ QtObject {
         && !pendingLaunchParams && !pendingDirectLaunch
         && ["idle", "error"].indexOf(streamState) >= 0
         && ["stopped", "error"].indexOf(streamerStatus) >= 0
+    readonly property bool applicationQuitNeedsConfirmation: settings.confirmQuitWhenIdle !== false
+        || !updaterSessionSafe || resumableSession !== null
     readonly property bool updaterBusy: updaterReconciling || updaterCheckRequestId !== ""
         || updaterDownloadRequestId !== "" || updaterInstallRequestId !== ""
         || ["checking", "downloading", "preparing", "awaiting-exit", "applying", "restarting"].indexOf(updaterState.status) >= 0

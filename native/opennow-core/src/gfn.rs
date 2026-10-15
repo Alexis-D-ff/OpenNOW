@@ -1668,7 +1668,7 @@ impl GfnService {
         let rolled = number_value(&data["rolledOverTimeInMinutes"]).unwrap_or(0.0);
         let total =
             number_value(&data["totalTimeInMinutes"]).unwrap_or(allotted + purchased + rolled);
-        let remaining = number_value(&data["remainingTimeInMinutes"]).unwrap_or(0.0);
+        let remaining = number_value(&data["remainingTimeInMinutes"]);
         let mut resolutions = data["features"]["resolutions"].as_array().into_iter().flatten()
             .filter(|resolution| resolution["isEntitled"].as_bool() == Some(true))
             .map(|resolution| json!({"width":resolution["widthInPixels"],"height":resolution["heightInPixels"],"fps":resolution["framesPerSecond"]}))
@@ -1701,7 +1701,8 @@ impl GfnService {
         Ok(json!({"subscription":{
             "membershipTier":membership,"subscriptionType":data["type"],"subscriptionSubType":data["subType"],
             "allottedHours":allotted/60.0,"purchasedHours":purchased/60.0,"rolledOverHours":rolled/60.0,
-            "usedHours":(total-remaining).max(0.0)/60.0,"remainingHours":remaining/60.0,"totalHours":total/60.0,
+            "usedHours":remaining.map(|remaining| (total-remaining).max(0.0)/60.0),
+            "remainingHours":remaining.map(|remaining| remaining/60.0),"totalHours":total/60.0,
             "firstEntitlementStartDateTime":data["firstEntitlementStartDateTime"],"serverRegionId":vpc_id,
             "currentSpanStartDateTime":data["currentSpanStartDateTime"],"currentSpanEndDateTime":data["currentSpanEndDateTime"],
             "notifyUserWhenTimeRemainingInMinutes":data["notifications"]["notifyUserWhenTimeRemainingInMinutes"],

@@ -189,6 +189,14 @@ FocusScope {
             }
             Row { anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(24); anchors.verticalCenter: parent.verticalCenter; spacing: DesktopTokens.px(10)
                 visible: x >= shortcutHints.x + shortcutHints.width + DesktopTokens.px(16)
+                Text {
+                    objectName: "desktopRemainingPlaytime"
+                    visible: text !== ""
+                    text: ShellStore.remainingPlaytimeHours === null ? ""
+                        : qsTr("%1 h playtime left").arg(ShellStore.remainingPlaytimeHours.toFixed(1)).toUpperCase()
+                    color: DesktopTokens.textBody; font.family: DesktopTokens.monoFont; font.pixelSize: DesktopTokens.px(11); font.weight: Font.DemiBold; font.letterSpacing: 0.4
+                }
+                Rectangle { visible: ShellStore.remainingPlaytimeHours !== null; width: 1; height: DesktopTokens.px(16); color: DesktopTokens.seam }
                 Rectangle { width: 8; height: 8; radius: 4; color: DesktopTokens.green }
                 Text { text: root.regionStatusText(); color: DesktopTokens.textBody; font.family: DesktopTokens.monoFont; font.pixelSize: DesktopTokens.px(11); font.weight: Font.DemiBold; font.letterSpacing: 0.4 }
                 Rectangle { width: 1; height: DesktopTokens.px(16); color: DesktopTokens.seam }
@@ -199,12 +207,13 @@ FocusScope {
 
     Rectangle {
         id: railScrim
+        objectName: "desktopRailScrim"
         x: root.contentInset
         width: root.width - root.contentInset
         height: root.height
         z: 20
         color: "transparent"
-        visible: sidebar.overlayOpen
+        visible: sidebar.hoverExpanded
         TapHandler { onTapped: sidebar.closeOverlay() }
     }
 
