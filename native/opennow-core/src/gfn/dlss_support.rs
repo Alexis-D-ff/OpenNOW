@@ -736,6 +736,21 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(catalog.index(&json!({})).is_none());
         assert!(started.elapsed() < Duration::from_millis(100));
-        assert!(catalog.shared.state.lock().unwrap().retry_at > now_ms());
+        let state = catalog
+            .shared
+            .settled
+            .wait_timeout_while(
+                catalog.shared.state.lock().unwrap(),
+                FETCH_TIMEOUT * 2,
+                |state| state.loading,
+            )
+            .unwrap()
+            .0;
+        assert!(!state.loading && state.index.is_none() && state.retry_at > now_ms());
+        drop(state);
+        let started = std::time::Instant::now();
+        assert!(catalog.index(&json!({})).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(!catalog.shared.state.lock().unwrap().loading);
     }
 }
