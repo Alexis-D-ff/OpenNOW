@@ -1152,6 +1152,35 @@ fn write_audio(
                 message: message.clone(),
             },
         );
+        let restarted = sink.restart().and_then(|restarted| {
+            if restarted {
+                sink.write(pcm, cancelled)?;
+            }
+            Ok(restarted)
+        });
+        if cancelled() {
+            return Err(AudioWriteError::Closed);
+        }
+        match restarted {
+            Ok(true) => {
+                emit(
+                    events,
+                    BackendEvent::AudioOutputRecovered {
+                        from: *backend,
+                        to: *backend,
+                    },
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => emit(
+                events,
+                BackendEvent::AudioOutputError {
+                    backend: *backend,
+                    message: error.to_string(),
+                },
+            ),
+        }
         match open_audio_fallback(config, *backend) {
             Ok(mut fallback) => {
                 let fallback_backend = fallback.backend();
@@ -2447,6 +2476,85 @@ mod tests {
         assert!(packets.is_closed());
         assert!(unavailable.load(Ordering::Acquire));
         worker.join().expect("audio worker thread");
+    }
+
+    #[test]
+    fn audio_output_restart_is_bounded_and_reports_only_accepted_output() {
+        struct RestartingSink {
+            accepts_restarted_output: bool,
+            restarts: Arc<std::sync::atomic::AtomicUsize>,
+            writes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl super::AudioSink for RestartingSink {
+            fn backend(&self) -> crate::AudioBackend {
+                crate::AudioBackend::PipeWire
+            }
+
+            fn write(&mut self, _: &[f32], _: &dyn Fn() -> bool) -> crate::Result<()> {
+                self.writes.fetch_add(1, Ordering::Relaxed);
+                if self.accepts_restarted_output && self.restarts.load(Ordering::Relaxed) > 0 {
+                    Ok(())
+                } else {
+                    Err(crate::Error::DeviceLost {
+                        subsystem: crate::Subsystem::PipeWire,
+                        reason: "stalled child".to_owned(),
+                    })
+                }
+            }
+
+            fn restart(&mut self) -> crate::Result<bool> {
+                self.restarts.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+        }
+
+        for accepts_restarted_output in [true, false] {
+            let events: super::EventQueue = Arc::new(super::BoundedQueue::new(32));
+            let config = super::AudioConfig {
+                output_device: "pipewire:fixed-output".to_owned(),
+                ..super::AudioConfig::default()
+            };
+            let restarts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut sink: Box<dyn super::AudioSink + Send> = Box::new(RestartingSink {
+                accepts_restarted_output,
+                restarts: Arc::clone(&restarts),
+                writes: Arc::clone(&writes),
+            });
+            let mut backend = crate::AudioBackend::PipeWire;
+            let result = super::write_audio(
+                &mut sink,
+                &mut backend,
+                &config,
+                &events,
+                &[0.0; 960],
+                &|| false,
+            );
+            assert_eq!(result.is_ok(), accepts_restarted_output);
+            assert_eq!(restarts.load(Ordering::Relaxed), 1);
+            assert_eq!(writes.load(Ordering::Relaxed), 2);
+            let observed = collect_events(&events);
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        super::BackendEvent::AudioOutputRecovered {
+                            from: crate::AudioBackend::PipeWire,
+                            to: crate::AudioBackend::PipeWire,
+                        }
+                    ))
+                    .count(),
+                usize::from(accepts_restarted_output),
+                "recovery requires accepted PCM, saw {observed:?}"
+            );
+            assert!(
+                !observed
+                    .iter()
+                    .any(|event| matches!(event, super::BackendEvent::StateChanged(_)))
+            );
+        }
     }
 
     #[test]

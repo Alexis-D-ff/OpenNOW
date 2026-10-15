@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::ptr::NonNull;
 use std::slice;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use libloading::Library;
 
@@ -20,6 +21,8 @@ const SND_PCM_STREAM_PLAYBACK: c_int = 0;
 const SND_PCM_ACCESS_RW_INTERLEAVED: c_int = 3;
 const SND_PCM_FORMAT_FLOAT_LE: c_int = 14;
 const SND_PCM_NONBLOCK: c_int = 1;
+const AUDIO_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+const PIPEWIRE_RESTART_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioBackend {
@@ -368,6 +371,9 @@ unsafe fn opus_error(strerror: OpusStrError, code: c_int) -> String {
 pub(crate) trait AudioSink {
     fn backend(&self) -> AudioBackend;
     fn write(&mut self, pcm: &[f32], cancelled: &dyn Fn() -> bool) -> Result<()>;
+    fn restart(&mut self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 pub(crate) fn open_audio_sink(config: &AudioConfig) -> Result<Box<dyn AudioSink + Send>> {
@@ -561,9 +567,16 @@ impl AudioSink for AlsaSink {
 
     fn write(&mut self, pcm: &[f32], cancelled: &dyn Fn() -> bool) -> Result<()> {
         let mut offset = 0;
+        let deadline = Instant::now() + AUDIO_WRITE_TIMEOUT;
         while offset < pcm.len() {
             if cancelled() {
                 return Err(Error::QueueClosed);
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::DeviceLost {
+                    subsystem: Subsystem::Alsa,
+                    reason: "PCM output did not complete within 250 ms".to_owned(),
+                });
             }
             let samples = &pcm[offset..pcm.len().min(offset + self.silence.len())];
             let samples = if self.muted.load(std::sync::atomic::Ordering::Acquire) {
@@ -583,6 +596,12 @@ impl AudioSink for AlsaSink {
                 if written as c_int == -libc::EAGAIN {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
+                }
+                if written as c_int == -libc::ESTRPIPE {
+                    return Err(Error::DeviceLost {
+                        subsystem: Subsystem::Alsa,
+                        reason: "PCM output was suspended".to_owned(),
+                    });
                 }
                 let recovered =
                     unsafe { (self.recover)(self.handle.as_ptr(), written as c_int, 1) };
@@ -633,6 +652,12 @@ unsafe fn alsa_error(strerror: SndStrError, code: c_int) -> String {
 struct PipeWireSink {
     muted: Arc<std::sync::atomic::AtomicBool>,
     silence: Vec<u8>,
+    command: Command,
+    process: Option<PipeWireProcess>,
+    last_restart: Option<Instant>,
+}
+
+struct PipeWireProcess {
     child: Child,
     stdin: ChildStdin,
 }
@@ -671,7 +696,7 @@ impl PipeWireSink {
                 "{\"node.dont-fallback\":true,\"node.dont-reconnect\":true}",
             ]);
         }
-        let mut child = command
+        command
             .args([
                 "--playback",
                 "--format",
@@ -684,36 +709,12 @@ impl PipeWireSink {
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Error::io(Subsystem::PipeWire, error))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| Error::backend(Subsystem::PipeWire, "pw-cat stdin was not created"))?;
-        let descriptor = std::os::fd::AsRawFd::as_raw_fd(&stdin);
-        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-        {
-            let error = io::Error::last_os_error();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::io(Subsystem::PipeWire, error));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| Error::io(Subsystem::PipeWire, error))?
-        {
-            return Err(Error::unavailable(
-                Subsystem::PipeWire,
-                format!("pw-cat exited during startup with {status}"),
-            ));
-        }
+            .stderr(Stdio::null());
+        let process = PipeWireProcess::spawn(&mut command)?;
         Ok(Self {
-            child,
-            stdin,
+            command,
+            process: Some(process),
+            last_restart: None,
             muted: Arc::clone(&config.muted),
             silence: vec![
                 0;
@@ -725,13 +726,85 @@ impl PipeWireSink {
     }
 }
 
+impl PipeWireProcess {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::io(Subsystem::PipeWire, error))?;
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::backend(
+                Subsystem::PipeWire,
+                "pw-cat stdin was not created",
+            ));
+        };
+        let mut process = Self { child, stdin };
+        let descriptor = std::os::fd::AsRawFd::as_raw_fd(&process.stdin);
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(Error::io(Subsystem::PipeWire, io::Error::last_os_error()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        if let Some(status) = process
+            .child
+            .try_wait()
+            .map_err(|error| Error::io(Subsystem::PipeWire, error))?
+        {
+            return Err(Error::unavailable(
+                Subsystem::PipeWire,
+                format!("pw-cat exited during startup with {status}"),
+            ));
+        }
+        Ok(process)
+    }
+}
+
 impl AudioSink for PipeWireSink {
     fn backend(&self) -> AudioBackend {
         AudioBackend::PipeWire
     }
 
     fn write(&mut self, pcm: &[f32], cancelled: &dyn Fn() -> bool) -> Result<()> {
-        write_pipewire_pcm(&mut self.stdin, pcm, &self.silence, &self.muted, cancelled)
+        let process = self.process.as_mut().ok_or_else(|| Error::DeviceLost {
+            subsystem: Subsystem::PipeWire,
+            reason: "pw-cat is not running".to_owned(),
+        })?;
+        if let Some(status) = process
+            .child
+            .try_wait()
+            .map_err(|error| Error::io(Subsystem::PipeWire, error))?
+        {
+            return Err(Error::DeviceLost {
+                subsystem: Subsystem::PipeWire,
+                reason: format!("pw-cat exited with {status}"),
+            });
+        }
+        write_pipewire_pcm(
+            &mut process.stdin,
+            pcm,
+            &self.silence,
+            &self.muted,
+            cancelled,
+        )
+    }
+
+    fn restart(&mut self) -> Result<bool> {
+        drop(self.process.take());
+        if self
+            .last_restart
+            .is_some_and(|last| last.elapsed() < PIPEWIRE_RESTART_INTERVAL)
+        {
+            return Err(Error::unavailable(
+                Subsystem::PipeWire,
+                "pw-cat failed again within the 5 second recovery interval",
+            ));
+        }
+        self.last_restart = Some(Instant::now());
+        self.process = Some(PipeWireProcess::spawn(&mut self.command)?);
+        Ok(true)
     }
 }
 
@@ -745,9 +818,16 @@ fn write_pipewire_pcm(
     let bytes = unsafe { slice::from_raw_parts(pcm.as_ptr().cast::<u8>(), mem::size_of_val(pcm)) };
     let mut offset = 0;
     let mut sample_muted = false;
+    let deadline = Instant::now() + AUDIO_WRITE_TIMEOUT;
     while offset < bytes.len() {
         if cancelled() {
             return Err(Error::QueueClosed);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::DeviceLost {
+                subsystem: Subsystem::PipeWire,
+                reason: "pw-cat input did not drain within 250 ms".to_owned(),
+            });
         }
         let partial_sample_bytes = offset % mem::size_of::<f32>();
         let end = if partial_sample_bytes == 0 {
@@ -785,9 +865,8 @@ fn write_pipewire_pcm(
     Ok(())
 }
 
-impl Drop for PipeWireSink {
+impl Drop for PipeWireProcess {
     fn drop(&mut self) {
-        let _ = self.stdin.flush();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -809,6 +888,187 @@ fn find_in_path(executable: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use opus::{Application, Channels, Encoder as OpusEncoder};
+
+    fn pipewire_test_command(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn pipewire_test_sink(script: &str) -> PipeWireSink {
+        let mut command = pipewire_test_command(script);
+        let process = PipeWireProcess::spawn(&mut command).expect("audio child");
+        assert!(
+            unsafe {
+                libc::fcntl(
+                    std::os::fd::AsRawFd::as_raw_fd(&process.stdin),
+                    libc::F_SETPIPE_SZ,
+                    4096,
+                )
+            } > 0
+        );
+        PipeWireSink {
+            command,
+            process: Some(process),
+            last_restart: None,
+            muted: AudioConfig::default().muted,
+            silence: vec![0; 46_080],
+        }
+    }
+
+    fn assert_child_reaped(pid: u32) {
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn alsa_backpressure_and_suspend_do_not_pin_the_audio_worker() {
+        static RECOVER_CALLS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+
+        unsafe extern "C" fn blocked(
+            _: *mut c_void,
+            _: *const c_void,
+            _: libc::c_ulong,
+        ) -> libc::c_long {
+            -libc::EAGAIN as libc::c_long
+        }
+
+        unsafe extern "C" fn suspended(
+            _: *mut c_void,
+            _: *const c_void,
+            _: libc::c_ulong,
+        ) -> libc::c_long {
+            -libc::ESTRPIPE as libc::c_long
+        }
+
+        unsafe extern "C" fn recover(_: *mut c_void, _: c_int, _: c_int) -> c_int {
+            RECOVER_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            0
+        }
+
+        let mut sink = AlsaSink::open(&AudioConfig {
+            alsa_device: "null".to_owned(),
+            ..AudioConfig::default()
+        })
+        .expect("ALSA null output");
+        sink.recover = recover;
+        for writei in [blocked as SndPcmWriteI, suspended as SndPcmWriteI] {
+            sink.writei = writei;
+            let start = Instant::now();
+            let result = sink.write(&[0.0; 960], &|| start.elapsed() >= Duration::from_secs(1));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::DeviceLost {
+                        subsystem: Subsystem::Alsa,
+                        ..
+                    })
+                ),
+                "{result:?}"
+            );
+        }
+        assert_eq!(RECOVER_CALLS.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pipewire_stalled_child_is_reaped_before_replacement_and_on_shutdown() {
+        let mut sink = pipewire_test_sink("exec sleep 30");
+        let old_pid = sink.process.as_ref().unwrap().child.id();
+        let start = Instant::now();
+        let result = sink.write(&[0.25; 1920], &|| start.elapsed() >= Duration::from_secs(1));
+        assert!(
+            matches!(result, Err(Error::DeviceLost { .. })),
+            "{result:?}"
+        );
+        sink.command = pipewire_test_command("exec cat > /dev/null");
+        assert!(sink.restart().expect("replacement child"));
+        assert_child_reaped(old_pid);
+        sink.write(&[0.25; 1920], &|| false)
+            .expect("recovered output");
+        let new_pid = sink.process.as_ref().unwrap().child.id();
+        let start = Instant::now();
+        drop(sink);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_child_reaped(new_pid);
+    }
+
+    #[test]
+    fn pipewire_child_exit_is_detected_and_the_same_command_can_restart() {
+        let mut sink = pipewire_test_sink("exec cat > /dev/null");
+        let process = sink.process.as_mut().unwrap();
+        process.child.kill().unwrap();
+        process.child.wait().unwrap();
+        let result = sink.write(&[0.25; 1920], &|| false);
+        assert!(
+            matches!(result, Err(Error::DeviceLost { .. })),
+            "{result:?}"
+        );
+        assert!(sink.restart().expect("restart exited child"));
+        sink.write(&[0.25; 1920], &|| false)
+            .expect("recovered output");
+    }
+
+    #[test]
+    fn pipewire_failed_restart_leaves_no_old_child() {
+        let mut sink = pipewire_test_sink("exec sleep 30");
+        let pid = sink.process.as_ref().unwrap().child.id();
+        sink.command = pipewire_test_command("exit 7");
+        assert!(sink.restart().is_err());
+        assert_child_reaped(pid);
+        assert!(sink.process.is_none());
+        assert!(matches!(
+            sink.write(&[0.0; 960], &|| false),
+            Err(Error::DeviceLost { .. })
+        ));
+    }
+
+    #[test]
+    fn pipewire_persistent_stall_cannot_respawn_continuously() {
+        let mut sink = pipewire_test_sink("exec sleep 30");
+        for _ in 0..2 {
+            let start = Instant::now();
+            let result = sink.write(&[0.25; 48_000], &|| {
+                start.elapsed() >= Duration::from_secs(1)
+            });
+            assert!(
+                matches!(result, Err(Error::DeviceLost { .. })),
+                "{result:?}"
+            );
+            let pid = sink.process.as_ref().unwrap().child.id();
+            if sink.last_restart.is_none() {
+                assert!(sink.restart().expect("first restart"));
+            } else {
+                assert!(sink.restart().is_err());
+                assert!(sink.process.is_none());
+            }
+            assert_child_reaped(pid);
+        }
+    }
+
+    #[test]
+    fn pipewire_stalled_child_observes_shutdown_cancellation() {
+        let mut sink = pipewire_test_sink("exec sleep 30");
+        let pid = sink.process.as_ref().unwrap().child.id();
+        let start = Instant::now();
+        let result = sink.write(&[0.25; 1920], &|| {
+            start.elapsed() >= Duration::from_millis(20)
+        });
+        assert!(matches!(result, Err(Error::QueueClosed)), "{result:?}");
+        drop(sink);
+        assert_child_reaped(pid);
+    }
 
     fn encoded_frame(
         encoder: &mut OpusEncoder,
@@ -1138,6 +1398,114 @@ mod tests {
     }
 
     #[test]
+    fn pipewire_stalled_writes_report_device_loss_before_cancellation() {
+        struct StalledWriter;
+
+        impl Write for StalledWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let start = std::time::Instant::now();
+        let result = write_pipewire_pcm(
+            &mut StalledWriter,
+            &[0.0; 960],
+            &[0; 3840],
+            &AudioConfig::default().muted,
+            &|| start.elapsed() >= std::time::Duration::from_secs(1),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::DeviceLost {
+                    subsystem: Subsystem::PipeWire,
+                    ..
+                })
+            ),
+            "a stalled output must report device loss, got {result:?}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn pipewire_trickling_writes_cannot_extend_the_write_budget() {
+        struct TricklingWriter;
+
+        impl Write for TricklingWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(2));
+                Ok(1)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let start = Instant::now();
+        let result = write_pipewire_pcm(
+            &mut TricklingWriter,
+            &[0.0; 960],
+            &[0; 3840],
+            &AudioConfig::default().muted,
+            &|| start.elapsed() >= Duration::from_secs(1),
+        );
+        assert!(
+            matches!(result, Err(Error::DeviceLost { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn pipewire_transient_backpressure_preserves_pcm() {
+        struct BackpressuredWriter {
+            attempts: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for BackpressuredWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.attempts += 1;
+                if self.attempts <= 3 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = BackpressuredWriter {
+            attempts: 0,
+            bytes: Vec::new(),
+        };
+        let samples = [0.25f32, -0.25, 0.5, -0.5];
+        write_pipewire_pcm(
+            &mut writer,
+            &samples,
+            &[0; 16],
+            &AudioConfig::default().muted,
+            &|| false,
+        )
+        .expect("temporary backpressure");
+        assert_eq!(
+            writer.bytes,
+            samples
+                .into_iter()
+                .flat_map(f32::to_ne_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn pipewire_playback_mute_preserves_source_and_consumes_silently() {
         let config = AudioConfig::default();
         let mut bytes = Vec::new();
@@ -1250,6 +1618,31 @@ mod tests {
 
     #[test]
     #[ignore = "requires an isolated PipeWire server with opennow_test_output sink"]
+    fn pipewire_output_restart_recovers_a_stopped_child() {
+        let config = AudioConfig {
+            output_device: "pipewire:opennow_test_output".to_owned(),
+            ..AudioConfig::default()
+        };
+        let mut sink = PipeWireSink::open(&config).expect("selected PipeWire output");
+        let pid = sink.process.as_ref().unwrap().child.id();
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) }, 0);
+        let start = Instant::now();
+        let result = sink.write(&[0.25; 48_000], &|| {
+            start.elapsed() >= Duration::from_secs(2)
+        });
+        assert!(
+            matches!(result, Err(Error::DeviceLost { .. })),
+            "{result:?}"
+        );
+        assert!(sink.restart().expect("restart stopped pw-cat"));
+        assert_child_reaped(pid);
+        let start = Instant::now();
+        sink.write(&[0.25; 1920], &|| start.elapsed() >= Duration::from_secs(2))
+            .expect("PCM after pw-cat restart");
+    }
+
+    #[test]
+    #[ignore = "requires an isolated PipeWire server with opennow_test_output sink"]
     fn selected_pipewire_output_opens_and_survives_enumeration() {
         let config = AudioConfig {
             output_device: "pipewire:opennow_test_output".to_owned(),
@@ -1260,7 +1653,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         sink.write(&[0.0; 960], &|| std::time::Instant::now() >= deadline)
             .expect("initial PCM write");
-        let pid = sink.child.id();
+        let pid = sink.process.as_ref().expect("running pw-cat").child.id();
         loop {
             let bytes = crate::audio_devices::bounded_command_output(
                 &mut Command::new("pw-dump"),

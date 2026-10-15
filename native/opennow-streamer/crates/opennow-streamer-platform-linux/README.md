@@ -12,6 +12,12 @@ Runtime probing opens the real device or service. A compiled feature or a shared
 
 Standalone presentation stays on the caller's window-system thread. Construct `NativeSurface::borrow_x11` or `NativeSurface::borrow_wayland` from handles that the caller owns, then create `VulkanPresenter` and feed it frames returned by the session. The standalone development runtime obtains either pair from SDL's raw window handles: X11 is reparented into the host-owned surface, while Wayland remains a compositor-managed top-level surface. The presenter owns its Vulkan instance, device, swapchain, and `VkSurfaceKHR`; it never destroys the borrowed X11 window, Xlib display, `wl_surface`, or `wl_display`. Its lifetime is tied to `NativeSurface`, and it is intentionally not `Send`.
 
+## Audio output recovery
+
+PipeWire and ALSA use nonblocking output with a 250 ms write budget, longer than the maximum 120 ms Opus frame. A full pipe or persistent backpressure becomes an audio device-loss event instead of pinning the worker. Suspended ALSA output is treated as device loss rather than entering ALSA's blocking resume loop.
+
+On PipeWire output failure, the audio worker kills and reaps its `pw-cat` child before starting one replacement with the same output selection. It reports recovery only after the replacement accepts PCM. A second failure within five seconds forbids another restart, preventing a permanently stalled sink from continuously spawning children. Failed recovery uses the existing backend fallback policy, or disables audio alone when fallback is forbidden or fails. Cancellation interrupts pending writes; shutdown kills and reaps the child without draining its pipe. The receive and video workers do not wait for audio output.
+
 ## Embedded shared Vulkan decode
 
 `SharedVulkanDevice::create` creates an owned Vulkan Video device when both `ffmpeg` and `vulkan` are enabled. The Qt shell obtains it through streamer FFI ABI 5, adopts the returned instance, device, and graphics queue, and passes the opaque owner into engine creation. The runtime clones the same `Arc<SharedVulkanDevice>` into `SessionConfig::vulkan_device`; it does not open an unrelated decode device for the embedded session.
