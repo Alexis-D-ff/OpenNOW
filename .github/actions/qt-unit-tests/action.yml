@@ -95,7 +95,7 @@ runs:
         shared-key: qt-checks-${{ inputs.label }}
         cache-bin: false
         cache-on-failure: true
-        save-if: true
+        save-if: ${{ github.event_name == 'push' }}
         workspaces: |
           native/opennow-core -> target
           native/opennow-streamer -> target
@@ -132,7 +132,7 @@ runs:
         restore-keys: qt-checks-${{ inputs.label }}
         max-size: 1G
         evict-old-files: job
-        save: true
+        save: ${{ github.event_name == 'push' }}
         verbose: 1
     - name: Build and cache SDL3 test dependency
       uses: ./.github/actions/sdl3
