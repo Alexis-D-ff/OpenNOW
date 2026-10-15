@@ -411,14 +411,21 @@ struct ActiveSeatOwner {
 #[serde(rename_all = "camelCase")]
 struct SessionReconciliationHint {
     session_id: String,
-    owner_scope: SessionReconciliationOwner,
+    owner_scope: SessionOwnerIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionReconciliationOwner {
+struct SessionOwnerIdentity {
     user_id: String,
     provider_idp_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionEndNotification {
+    session_id: String,
+    owner_scope: SessionOwnerIdentity,
 }
 
 impl ActiveSeatOwner {
@@ -1916,6 +1923,38 @@ impl GfnService {
         self.cloudmatch
             .stop(&params, settings, &session, &self.device_id)
             .map(|result| scoped_result(result, &session, generation))
+    }
+
+    pub fn acknowledge_session_end(&self, params: &Value) -> Result<Value, ServiceError> {
+        let notification: SessionEndNotification = serde_json::from_value(params.clone())
+            .map_err(|_| ServiceError::invalid("Session end requires sessionId and ownerScope"))?;
+        if notification.session_id.is_empty()
+            || notification.session_id.len() > 256
+            || notification.owner_scope.user_id.is_empty()
+            || notification.owner_scope.user_id.len() > 1024
+            || notification.owner_scope.provider_idp_id.is_empty()
+            || notification.owner_scope.provider_idp_id.len() > 1024
+        {
+            return Err(ServiceError::invalid("Invalid ended session identity"));
+        }
+        let mut routing = crate::store_requests::lock(&self.session_routing)?;
+        let Some(owner) = routing.active_owner.as_ref().filter(|owner| {
+            owner.session_id == notification.session_id
+                && owner.auth.user.user_id == notification.owner_scope.user_id
+                && owner.auth.provider.idp_id == notification.owner_scope.provider_idp_id
+        }) else {
+            return Ok(json!({"sessionId":notification.session_id,"cleared":false}));
+        };
+        if owner.allocation_generation.is_some() {
+            return Err(ServiceError {
+                code: "session_update_busy",
+                message: "The session allocation handoff is still completing. Retry cleanup."
+                    .into(),
+            });
+        }
+        self.cloudmatch.clear_active(&notification.session_id);
+        routing.active_owner = None;
+        Ok(json!({"sessionId":notification.session_id,"cleared":true}))
     }
 
     pub fn reconcile_active_session(

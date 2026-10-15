@@ -57,6 +57,7 @@ int main(int argc, char **argv)
                       << ",\"capabilities\":[\"settings\",\"catalog.libraryPages.v1\",\"catalog.metadata.v1\",\"account.syncObservation.v1\",\"catalog.languages.v1\",\"nativeStreamer.v7\",\"nativeStreamer.ownedNvstNegotiation\""
                       << (std::getenv("OPENNOW_TEST_NO_QUEUE_CAPABILITY") ? "" : ",\"queue.servers.v1\"")
                       << (std::getenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY") ? "" : ",\"auth.accountPicker.v1\"")
+                      << (std::getenv("OPENNOW_TEST_NO_TERMINAL_CLEANUP_CAPABILITY") ? "" : ",\"session.terminalCleanup.v1\"")
                       << "]}}\n" << std::flush;
         } else if (method == "updater.startup.ack") {
             ++startupAcknowledgements;

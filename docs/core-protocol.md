@@ -286,6 +286,28 @@ released on every pre-ID error; after allocation the exact seat remains reserved
 handoff or compensation completes. Cleanup records are read through a 16-KiB limit plus
 one overflow-detection byte before parsing, including for corrupt or oversized files.
 
+The `session.terminalCleanup.v1` capability adds `session.ended`. The Qt client
+requires this capability during the handshake so an older packaged core cannot
+silently retain an ended seat. The JSON protocol version remains 5.
+
+After an authoritative, non-resumable `nvst-server` termination, the shell sends
+`session.ended` with `{sessionId, ownerScope: {userId, providerIdpId}}`
+from the ended session. This local acknowledgement makes no network request and
+requires no valid authentication token. It releases only the exact accepted seat
+whose account and provider match. An extra `ownerScope.generation` is ignored:
+control reconciliation can change the core generation before the shell consumes
+its response, but it does not change the remote seat's identity.
+Pending allocation handoffs and cleanup records are not released.
+A matching pending handoff returns
+`session_update_busy` so the shell retries after handoff. The response is
+`{sessionId, cleared}`; duplicate or stale notifications return `cleared: false`
+without changing another seat.
+No `session.changed` event is emitted, so a late acknowledgement cannot clear a
+replacement session in the shell. The shell blocks another launch until the
+acknowledgement arrives and retries after transient RPC failure or core restart.
+Late session snapshots cannot revive the natively terminated seat.
+Transport EOF and other failures with unknown resumability do not send this request.
+
 Raw CloudMatch status 7 is `phase: "finished"`, with a `termination` object containing
 `source: "cloudmatch-session-status"`, `status: 7`, and `resumable: false`. This proves
 the seat is terminal, not whether the game exited successfully; no vendor reason is
@@ -475,6 +497,7 @@ and artwork only near the viewport, using the section's local category ID
 - `session.create`
 - `session.poll`
 - `session.stop`
+- `session.ended`
 - `session.active.get`
 - `session.remote.list`, `session.claim`, `session.ad.report`
 - `streamer.detect`

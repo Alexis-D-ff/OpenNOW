@@ -509,6 +509,56 @@ QtObject {
         }
         ShellStore.savedAccounts = []
     }
+    function checkTerminalSessionCleanup() {
+        client.state = "ready"
+        const owner = {generation:7,userId:"terminal-owner",providerIdpId:"terminal-provider"}
+        ShellStore.activeSession = {sessionId:"terminal-seat",status:3,ownerScope:owner}
+        ShellStore.streamer = {sessionId:"terminal-seat",status:"streaming"}
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamCreateRequestId = ""
+        ShellStore.streamStopRequestId = ""
+        ShellStore.remoteSessionsRequestId = ""
+        ShellStore.sessionClaimRequestId = ""
+        ShellStore.launchInspectRequestId = ""
+        ShellStore.queueLaunchWaitingForSubscription = false
+        ShellStore.finishRemoteSession({source:"nvst-server",code:"server-terminated",
+            sessionId:"terminal-seat",resumable:false})
+        let id = ShellStore.sessionEndRequestId
+        const call = client.calls.find(call => call.id === id)
+        check(id !== "" && call.method === "session.ended"
+            && call.params.sessionId === "terminal-seat" && call.params.ownerScope.generation === 7,
+            "native termination notifies the core with the exact ended seat and owner")
+        check(ShellStore.activeSession === null && ShellStore.streamBusy,
+            "another launch waits for core cleanup even after the UI leaves the stream")
+        client.requestFailed(id, "busy", "Try again")
+        check(ShellStore.pendingSessionEnd !== null && ShellStore.sessionEndRequestId === ""
+            && ShellStore.streamBusy, "a failed acknowledgement retains cleanup ownership")
+        client.state = "stopped"
+        const beforeRestart = client.calls.length
+        ShellStore.sessionEndRetryTimer.triggered()
+        check(client.calls.length === beforeRestart && ShellStore.pendingSessionEnd !== null,
+            "cleanup stays pending while the core is offline")
+        client.state = "ready"
+        check(ShellStore.authSessionRequestId !== "" && ShellStore.activeSessionRequestId !== "",
+            "restarting the core initializes authentication and its local seat lookup")
+        client.responseReceived(ShellStore.authSessionRequestId, {session:null,generation:0})
+        client.responseReceived(ShellStore.activeSessionRequestId,
+            {session:{sessionId:"terminal-seat",status:3,ownerScope:owner}})
+        check(ShellStore.activeSession === null,
+            "a stale startup lookup cannot revive the ended seat during cleanup")
+        ShellStore.sessionEndRetryTimer.triggered()
+        id = ShellStore.sessionEndRequestId
+        check(id !== "" && client.calls[client.calls.length - 1].method === "session.ended",
+            "transient acknowledgement failure retries the same seat")
+        client.responseReceived(id, {sessionId:"terminal-seat",cleared:true})
+        check(ShellStore.pendingSessionEnd === null && ShellStore.sessionEndRequestId === ""
+            && !ShellStore.streamBusy, "core acknowledgement unblocks the next launch")
+        ShellStore.acceptStreamingSession({sessionId:"terminal-seat",status:3,ownerScope:owner})
+        check(ShellStore.activeSession === null,
+            "a late session snapshot cannot revive the natively terminated seat")
+        ShellStore.streamerStopRequestId = ""
+    }
+
     function checkQueuedPollRetries() {
         client.state = "ready"
         const queued = {sessionId:"queue-fixture",status:1,phase:"queued",queuePosition:21,
@@ -978,6 +1028,7 @@ QtObject {
         checkAuthenticationRecovery()
         checkSavedProfileBootstrap()
         checkRemoteTerminationReporting()
+        checkTerminalSessionCleanup()
         ShellStore.activeSession = null
         ShellStore.streamer = null
         beginLiveProfileUnlock(parent)
