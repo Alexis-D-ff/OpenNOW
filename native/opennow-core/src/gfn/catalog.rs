@@ -429,6 +429,13 @@ impl GfnService {
         })
     }
 
+    /// Sets `dlss` on every catalog game in a response from NVIDIA's DLSS games list.
+    /// An unavailable list leaves `dlss: null` and never fails the response.
+    pub fn annotate_dlss(&self, response: &mut Value, settings: &Value) {
+        let index = self.dlss_games.index(settings);
+        super::dlss_support::annotate(response, index.as_deref());
+    }
+
     pub(super) fn check_catalog_revision(&self, revision: u64) -> Result<(), ServiceError> {
         if self
             .catalog_revision

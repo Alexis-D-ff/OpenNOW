@@ -632,21 +632,30 @@ fn dispatch(
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .public_catalog(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.library.list" => {
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .library_catalog(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.game.get" => {
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .catalog_game(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.launch.inspect" => {
@@ -667,7 +676,10 @@ fn dispatch(
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .catalog_favorites(&settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.favorites.add"
@@ -678,7 +690,10 @@ fn dispatch(
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .catalog_mutate(method, params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.definitions.get" => {
@@ -699,21 +714,30 @@ fn dispatch(
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .store_local_catalog(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.store.list" => {
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .store_catalog(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "catalog.store.presentation" => {
             let settings = core.settings.lock().expect("settings poisoned").all();
             core.gfn
                 .store_presentation(params, &settings)
-                .map(|value| (value, None))
+                .map(|mut value| {
+                    core.gfn.annotate_dlss(&mut value, &settings);
+                    (value, None)
+                })
                 .map_err(gfn_error)
         }
         "artwork.resolve" => {

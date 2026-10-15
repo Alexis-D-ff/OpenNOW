@@ -231,6 +231,7 @@ FocusScope {
                         required property string modelData
                         objectName: "desktopIconGuideFeature-" + modelData
                         label: DesktopTokens.featureLabel(modelData)
+                        detail: modelData === "dlss" ? qsTr("From NVIDIA's DLSS games list, not the GeForce NOW catalog.") : ""
                         mark: Mark {
                             content: Image { width: 12; height: 12; source: DesktopTokens.featureIconUrl(featureEntry.modelData); sourceSize: Qt.size(32, 32) }
                         }

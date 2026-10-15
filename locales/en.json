@@ -4265,6 +4265,9 @@
     "guideMoreDetail": "A tile shows up to three logos, then a count.",
     "guideFeatures": "FEATURES · BOTTOM RIGHT",
     "guideFeaturesDetail": "Shown only when GeForce NOW's catalog lists the feature for that game.",
-    "guideMembership": "MEMBERSHIP · TOP RIGHT"
+    "guideMembership": "MEMBERSHIP · TOP RIGHT",
+    "dlss": "DLSS",
+    "dlssTip": "DLSS — per NVIDIA's DLSS games list",
+    "guideDlssDetail": "From NVIDIA's DLSS games list, not the GeForce NOW catalog."
   }
 }

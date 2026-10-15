@@ -1662,8 +1662,46 @@ parsed from the variant's `gfn.features` key/value list: `rtx` from
 `RTX_ENABLED`, `hdr` from `HDR_ENABLED` or a non-empty
 `SUPPORTED_HDR_VERSION`, and `reflex` from `REFLEX_ENABLED`. Disabled, null,
 and unknown keys produce nothing, so the array is empty when the catalog does
-not declare a feature. The catalog has no per-game DLSS key, so no `dlss` value
-exists. Shells must not infer features from titles or genres.
+not declare a feature.
+
+The catalog has no per-game DLSS key, so the core, and only the core, derives a
+game-level `dlss` field from NVIDIA's published DLSS games list (the JSON behind
+NVIDIA's RTX games page) by title. Shells still must not infer features from
+titles or genres themselves, and a `"dlss"` string in a variant's `features`
+means nothing. Every game in `catalog.public.list`, `catalog.library.list`,
+`catalog.game.get`, `catalog.favorites.list`, the favorites and ownership
+mutation results, `catalog.store.local`, `catalog.store.list`, and
+`catalog.store.presentation` carries `dlss`, either null or:
+
+```json
+{"superResolution":"native","frameGeneration":"override",
+ "multiFrameGeneration":{"maxMultiplier":4},"rayReconstruction":null,
+ "dlaa":"override","source":"nvidia-rtx-games-list"}
+```
+
+`superResolution`, `frameGeneration`, `rayReconstruction`, and `dlaa` are
+`native` when the game supports the technology itself, `override` when a DLSS
+override acts on it (the list's "NV, …" cells: an upgraded SR/RR/DLAA or frame
+generation model, or DLAA enabled through the SR mode override), and null when
+the list does not show it. `multiFrameGeneration` is null or the highest
+multiplier an override enables. `dlss` is null when the title has no match,
+when the matched row lists no DLSS technology, and when the list is unavailable.
+
+Matching removes ™, ®, ©, and zero-width characters, folds the title to ASCII
+with NFKD, lowercases it, spells `&` as "and", and collapses every other
+non-alphanumeric run to one space. An exact match wins; otherwise a loose match
+also drops the words "the" and "tm" and trailing edition words (game of the
+year, goty, definitive, enhanced, complete, deluxe, standard, ultimate,
+director's cut, anniversary, edition, pc). "Remastered" is never dropped,
+because remasters are listed separately. Only rows of type "Game" count.
+
+The core keeps the list in the store cache for 24 hours (stale copies are used
+when a refresh fails), rejects documents over 4 MiB or 5,000 rows, and applies
+it when a catalog response is sent, so cached catalog pages are unaffected and
+the scope stays `catalog-v3`. Fetching never fails or holds a catalog response:
+only the core's first attempt waits, for at most 1.5 seconds; a failed attempt
+retries on a catalog request at least 60 seconds later. The field is additive
+within protocol version 5.
 
 Every game also carries `requiresPaidMembership`, true when the catalog's
 `minimumMembershipTierLabel` names a tier other than Free (the catalog reports
