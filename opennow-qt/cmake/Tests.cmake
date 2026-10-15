@@ -445,7 +445,7 @@ if(BUILD_TESTING)
     set_tests_properties(opennow-streamcolor-tests PROPERTIES TIMEOUT 60)
     qt_add_resources(opennow-qt "region-ping-acceptance"
         PREFIX "/acceptance" BASE tests FILES tests/CatalogSyncAcceptance.qml tests/LibraryErrorAcceptance.qml tests/OwnershipAcceptance.qml tests/CommandSearchAcceptance.qml tests/GameDetailsLayoutAcceptance.qml tests/PushInvalidationAcceptance.qml
-        tests/GameLabelsAcceptance.qml)
+        tests/GameLabelsAcceptance.qml tests/GameDlssAcceptance.qml)
     foreach(details_size normal short)
         if(details_size STREQUAL "normal")
             set(details_width 1440)
@@ -465,6 +465,10 @@ if(BUILD_TESTING)
             endforeach()
         endforeach()
     endforeach()
+    add_test(NAME qml-game-details-dlss-1600 COMMAND opennow-qt
+        --smoke-test --allow-multiple-instances --desktop --route home --reduced-motion
+        --smoke-game-dlss --smoke-width 1600 --smoke-height 900)
+    set_tests_properties(qml-game-details-dlss-1600 PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     foreach(report_motion normal reduced)
         set(report_motion_args)
         if(report_motion STREQUAL "reduced")

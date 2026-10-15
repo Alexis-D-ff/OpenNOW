@@ -13,6 +13,11 @@ QtObject {
     readonly property var remainingPlaytimeHours: subscription && subscription.isUnlimited !== true
         && typeof subscription.remainingHours === "number" ? Math.max(0, subscription.remainingHours) : null
     property string subscriptionRequestId: ""
+    readonly property var dlssOverrides: subscription && subscription.dlssOverrides ? subscription.dlssOverrides : null
+    readonly property var dlssFrameGenerationMultipliers: dlssOverrides && dlssOverrides.frameGenerationMultipliers
+        ? dlssOverrides.frameGenerationMultipliers : []
+    readonly property bool dlssDynamicFrameGeneration: dlssCapability("frameGeneration").entitled === true
+        && dlssFrameGenerationMultipliers.length > 0
     property var regions: []
     property string regionsVpcId: ""
     property string regionsRequestId: ""
@@ -43,6 +48,9 @@ QtObject {
         return items.filter(item => active.indexOf(item.subscription) >= 0
             && (item.primaryStore === account.provider || (item.additionalStores || []).some(store => store.store === account.provider)))
             .map(item => item.label).join(", ")
+    }
+    function dlssCapability(name) {
+        return dlssOverrides && dlssOverrides[name] ? dlssOverrides[name] : ({entitled: false, upsell: false})
     }
     function gameAccountAction(account) {
         if (!account) return "none"

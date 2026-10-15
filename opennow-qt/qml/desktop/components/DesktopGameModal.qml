@@ -40,6 +40,8 @@ FocusScope {
         return ShellStore.selectedLaunchDecision.status === "ready"
     }
     readonly property var features: DesktopTokens.gameFeatures(root.game)
+    property bool dlssExpanded: false
+    DesktopGameDlss { id: dlssInfo; game: root.game }
     readonly property bool lockedByMembership: ShellStore.gameLockedByMembership(root.game)
     readonly property string lastPlayedText: {
         const game = root.game
@@ -248,6 +250,7 @@ FocusScope {
                 id: detailsColumn
                 width: parent.width
                 Item {
+                    objectName: "gameDetailsHero"
                     width: parent.width
                     height: Math.max(headerInfo.implicitHeight + DesktopTokens.px(48),
                         Math.min(DesktopTokens.px(280), root.maximumDialogHeight * 0.38))
@@ -286,6 +289,12 @@ FocusScope {
                                 color: Theme.textMuted; font.family: Theme.bodyFont; font.pixelSize: DesktopTokens.captionSize
                             }
                         }
+                        DesktopGameDlssChips {
+                            width: parent.width
+                            info: dlssInfo
+                            expanded: root.dlssExpanded
+                            onToggleRequested: root.dlssExpanded = !root.dlssExpanded
+                        }
                     }
                 }
                 Item {
@@ -297,6 +306,11 @@ FocusScope {
                         x: DesktopTokens.px(24)
                         width: parent.width - DesktopTokens.px(48)
                         spacing: DesktopTokens.px(20)
+                        DesktopGameDlssPanel {
+                            width: parent.width
+                            info: dlssInfo
+                            visible: root.dlssExpanded && (dlssInfo.listed || dlssInfo.notListed)
+                        }
                         Column {
                             objectName: "gameDetailsReadiness"
                             width: parent.width
