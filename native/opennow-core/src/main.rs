@@ -818,25 +818,29 @@ fn dispatch(
                 .authenticated_snapshot(gfn::TokenPurpose::ServiceId, false)
                 .map_err(gfn_error)?;
             let settings = cloudmatch::allocation_settings(&settings, &auth);
-            let settings = if !params["runtimeCapabilities"].is_null() {
-                let (resolved, fallbacks) = StreamerService::resolve_embedded_session(
-                    &settings,
-                    &params["runtimeCapabilities"],
-                )
-                .map_err(streamer_error)?;
-                for fallback in fallbacks {
-                    core.diagnostics
-                        .record("streamer", "stream_profile_fallback", fallback);
-                }
-                resolved
-            } else {
-                core.streamer
-                    .validate_codec(&settings)
-                    .map_err(streamer_error)?;
-                settings
+            let streamer_service_error = |error: streamer::StreamerError| gfn::ServiceError {
+                code: error.code,
+                message: error.message,
             };
             core.gfn
-                .create_session(params, &settings)
+                .create_session(params, &settings, |settings| {
+                    if params["runtimeCapabilities"].is_null() {
+                        core.streamer
+                            .validate_codec(settings)
+                            .map_err(streamer_service_error)?;
+                        return Ok(settings.clone());
+                    }
+                    let (resolved, fallbacks) = StreamerService::resolve_embedded_session(
+                        settings,
+                        &params["runtimeCapabilities"],
+                    )
+                    .map_err(streamer_service_error)?;
+                    for fallback in fallbacks {
+                        core.diagnostics
+                            .record("streamer", "stream_profile_fallback", fallback);
+                    }
+                    Ok(resolved)
+                })
                 .map(|value| (value.clone(), Some(("session.changed", value))))
                 .map_err(gfn_error)
         }

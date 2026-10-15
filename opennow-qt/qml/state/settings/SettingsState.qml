@@ -446,6 +446,16 @@ QtObject {
         return ["av1", "h264", "h265"].filter(codec => codecDisabledByProfile(codec))
     }
 
+    function hdrNoticeShown(gameId) {
+        return (settings.hdrNoticeShownAppIds || []).indexOf(gameId) >= 0
+    }
+
+    function rememberHdrNotice(gameId) {
+        if (!gameId || hdrNoticeShown(gameId))
+            return
+        setSetting("hdrNoticeShownAppIds", (settings.hdrNoticeShownAppIds || []).concat([gameId]).slice(-200))
+    }
+
     function hdrDecoderAvailable() {
         return nativeRuntimeReady && settings.decoderPreference !== "software"
             && codecNamesFromCapabilities(nativeRuntimeCapabilities, true).length > 0

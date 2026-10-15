@@ -841,7 +841,8 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
             "stateDetails":serde_json::from_value::<crate::catalog_types::PatchDetails>(variant["gfn"]["stateDetails"].clone()).ok(),
             "gfnStatus":variant["gfn"]["status"],
             "supportsInGameSettingsPersistence":supports_persistence,
-            "features":crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"]),
+            "features":matches!(variant["gfn"]["features"], Value::Array(_) | Value::Object(_))
+                .then(|| crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"])),
         }))
     }).collect::<Vec<_>>();
     let mut variant_ids = std::collections::HashSet::new();

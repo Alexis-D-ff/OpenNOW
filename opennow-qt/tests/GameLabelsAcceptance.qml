@@ -18,7 +18,7 @@ QtObject {
     }
     function variant(id, store, owned, features) {
         return {id:id, store:store, libraryStatus:owned ? "PLATFORM_SYNC" : "NOT_OWNED", inLibrary:owned,
-            gfnStatus:"AVAILABLE", playStatus:owned ? "PLAYABLE" : "UNKNOWN", features:features || []}
+            gfnStatus:"AVAILABLE", playStatus:owned ? "PLAYABLE" : "UNKNOWN", features:features === undefined ? null : features}
     }
     function game(id, title, variants, extra) {
         return Object.assign({id:id, uuid:id, title:title, playabilityState:"PLAYABLE", selectedVariantIndex:0,
@@ -55,6 +55,9 @@ QtObject {
             "features are not the data-backed set in fixed order")
         check(DesktopTokens.gameFeatures(plain).length === 0 && ConsoleStores.launchers(plain).length === 0,
             "a game without catalog data shows labels")
+        check(JSON.stringify(DesktopTokens.gameFeatures(game("labels-unknown", "Unknown features",
+                [variant("501", "Steam", true, null), variant("502", "Xbox", false, [])]))) === "[]",
+            "variants with unknown (null) or empty features show feature labels")
         check(JSON.stringify(DesktopTokens.gameFeatures(upscaled)) === JSON.stringify(["rtx", "dlss"]),
             "a game with core DLSS data does not list DLSS after its catalog features")
         check(DesktopTokens.gameFeatures(Object.assign({}, upscaled, {dlss:null})).indexOf("dlss") < 0,

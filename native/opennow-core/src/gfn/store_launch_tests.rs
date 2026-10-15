@@ -704,6 +704,7 @@ fn store_launch_preserves_the_active_seat_guard() {
             "storeLaunch":true,
             "scope":scoped_result(json!({}), &auth_fixture("fixture-account"), 0)["scope"]}),
         &json!({}),
+        |settings| Ok(settings.clone()),
     );
     assert_eq!(result.unwrap_err().code, "session_update_busy");
     assert_eq!(

@@ -716,6 +716,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-console-spacing"_s)
                      || m_arguments.contains(u"--smoke-queue-drops"_s)
                      || m_arguments.contains(u"--smoke-color-format"_s)
+                     || m_arguments.contains(u"--smoke-hdr-downgrade"_s)
                      || m_arguments.contains(u"--smoke-stream-recovery"_s))) {
         QQmlComponent component(&m_engine, QUrl(m_arguments.contains(u"--smoke-library-error"_s)
             ? u"qrc:/acceptance/LibraryErrorAcceptance.qml"_s
@@ -727,6 +728,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/GameDetailsLayoutAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-color-format"_s)
             ? u"qrc:/acceptance/ColorFormatAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-hdr-downgrade"_s)
+            ? u"qrc:/acceptance/HdrDowngradeAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-ownership"_s)
             ? u"qrc:/acceptance/OwnershipAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-game-labels"_s)
@@ -827,6 +830,7 @@ int AcceptanceSession::startSmokeWorkload()
         QTimer::singleShot(150, this, [this, fixture] {
             auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
             if (window && (m_arguments.contains(u"--smoke-color-format-fullscreen"_s)
+                    || m_arguments.contains(u"--smoke-hdr-downgrade-fullscreen"_s)
                     || m_arguments.contains(u"--smoke-store-launch-fullscreen"_s)
                     || m_arguments.contains(u"--smoke-stream-recovery-fullscreen"_s)))
                 window->showFullScreen();
@@ -918,6 +922,7 @@ int AcceptanceSession::startSmokeWorkload()
                        || m_arguments.contains(u"--smoke-catalog-sync"_s)
                        || m_arguments.contains(u"--smoke-library-error"_s)
                        || m_arguments.contains(u"--smoke-color-format"_s)
+                       || m_arguments.contains(u"--smoke-hdr-downgrade"_s)
                        || m_arguments.contains(u"--smoke-backend-availability"_s)
                        || m_arguments.contains(u"--smoke-queue-drops"_s)
                        || m_arguments.contains(u"--smoke-store-launch"_s))) {
@@ -927,6 +932,7 @@ int AcceptanceSession::startSmokeWorkload()
                         || m_arguments.contains(u"--smoke-queue-selector"_s)
                         || m_arguments.contains(u"--smoke-library-error"_s)
                         || m_arguments.contains(u"--smoke-color-format"_s)
+                        || m_arguments.contains(u"--smoke-hdr-downgrade"_s)
                         || m_arguments.contains(u"--smoke-store-launch"_s)
                         || m_arguments.contains(u"--smoke-push-invalidation"_s)
                         || m_arguments.contains(u"--smoke-bug-reports"_s)) {

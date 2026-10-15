@@ -486,6 +486,83 @@ fn launch_metadata() -> Vec<(u16, Value)> {
 }
 
 #[test]
+fn create_uses_the_launched_variant_hdr_metadata_without_saving_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store =
+        crate::settings::SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+    store.set("enableHdr", json!(true)).unwrap();
+    store.set("webrtcCompatibilityMode", json!("off")).unwrap();
+    let saved = store.all();
+    let capabilities = json!({"protocolVersion":7,"nativeHdrSupported":true,"videoBackends":[{
+        "backend":"d3d11","available":true,"codecs":[{"codec":"h265","available":true,
+            "hdrSupported":true,"colorQualities":["8bit_420","10bit_420"],
+            "hdrColorQualities":["10bit_420"]}]
+    }]});
+    for (features, expected_mode, expected_downgrade) in [
+        (
+            json!([{"key":"RTX_ENABLED","value":"true"}]),
+            0,
+            json!("game-unsupported"),
+        ),
+        (
+            json!([{"key":"SUPPORTED_HDR_VERSION","values":["HDR"]}]),
+            1,
+            Value::Null,
+        ),
+        (Value::Null, 1, Value::Null),
+    ] {
+        let mut responses = launch_metadata();
+        responses[1].1["data"]["apps"]["items"][0]["variants"][0]["gfn"]["features"] = features;
+        responses.push((
+            200,
+            json!({"requestStatus":{"statusCode":1},"session":{"sessionId":"hdr-seat","status":1}}),
+        ));
+        let (url, worker) = mock_requests(responses, move |index, request| {
+            if index == 6 {
+                let body: Value =
+                    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                assert_eq!(body["sessionRequestData"]["sdrHdrMode"], expected_mode);
+                assert_eq!(
+                    body["sessionRequestData"]["clientRequestMonitorSettings"][0]["sdrHdrMode"],
+                    expected_mode
+                );
+            }
+        });
+        let (mut service, path) = service(&url);
+        service
+            .cloudmatch
+            .set_test_control_base(url::Url::parse(&url).unwrap());
+        let mut params = launch_params("123");
+        params["runtimeCapabilities"] = capabilities.clone();
+        let settings =
+            crate::cloudmatch::allocation_settings(&store.all(), &auth_fixture("account-a"));
+        let created = service
+            .create_session(&params, &settings, |settings| {
+                crate::streamer::StreamerService::embedded_session_settings(settings, &capabilities)
+                    .map_err(|error| ServiceError {
+                        code: error.code,
+                        message: error.message,
+                    })
+            })
+            .unwrap();
+        assert_eq!(created["session"]["hdrDowngrade"], expected_downgrade);
+        assert_eq!(
+            service.cloudmatch.active()["session"]["hdrDowngrade"],
+            expected_downgrade
+        );
+        worker.join().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    assert_eq!(store.all(), saved);
+    assert_eq!(
+        crate::settings::SettingsStore::load(Some(directory.path().to_owned()))
+            .unwrap()
+            .all(),
+        saved
+    );
+}
+
+#[test]
 fn native_session_end_releases_owned_seat_before_next_allocation() {
     let mut responses = launch_metadata();
     responses.push((
@@ -529,7 +606,9 @@ fn native_session_end_releases_owned_seat_before_next_allocation() {
         false
     );
     let created = service
-        .create_session(&launch_params("123"), &json!({}))
+        .create_session(&launch_params("123"), &json!({}), |settings| {
+            Ok(settings.clone())
+        })
         .unwrap();
     assert_eq!(created["session"]["sessionId"], "replacement-seat");
     service
@@ -734,7 +813,9 @@ fn reject_concurrent_create_during(discovery: bool) {
     std::thread::scope(|threads| {
         let first = threads.spawn(|| {
             crate::requests::scope(permit.token.clone(), || {
-                service.create_session(&launch_params("123"), &json!({}))
+                service.create_session(&launch_params("123"), &json!({}), |settings| {
+                    Ok(settings.clone())
+                })
             })
         });
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -742,7 +823,11 @@ fn reject_concurrent_create_during(discovery: bool) {
         let service = &service;
         let second = threads.spawn(move || {
             result_tx
-                .send(service.create_session(&launch_params("456"), &json!({})))
+                .send(
+                    service.create_session(&launch_params("456"), &json!({}), |settings| {
+                        Ok(settings.clone())
+                    }),
+                )
                 .unwrap()
         });
         let rejected = result_rx.recv_timeout(Duration::from_secs(1));
@@ -1695,7 +1780,9 @@ fn durable_seat_republication_does_not_renew_allocation_receipt_authority() {
         .cloudmatch
         .set_test_control_base(url::Url::parse(&url).unwrap());
     service
-        .create_session(&launch_params("123"), &json!({}))
+        .create_session(&launch_params("123"), &json!({}), |settings| {
+            Ok(settings.clone())
+        })
         .unwrap();
     service.clear_cache();
     assert_eq!(service.active_session().unwrap()["scope"]["generation"], 8);

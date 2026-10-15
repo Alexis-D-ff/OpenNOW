@@ -513,6 +513,7 @@ fn fresh_create_rejects_unowned_variant_before_allocation() {
     let result = service.create_session(
         &scoped(json!({"catalogAppId":"parent-app","variantId":"456","appId":"456"})),
         &json!({}),
+        |settings| Ok(settings.clone()),
     );
     assert_eq!(result.unwrap_err().code, "launch_not_ready");
     assert!(service.cloudmatch.active()["session"].is_null());
@@ -528,7 +529,8 @@ fn create_rejects_mismatched_launch_identity_without_network() {
         service
             .create_session(
                 &json!({"catalogAppId":"parent-app","variantId":"456","appId":"123"}),
-                &json!({})
+                &json!({}),
+                |settings| Ok(settings.clone())
             )
             .is_err()
     );
@@ -682,7 +684,7 @@ fn held_mutation_remains_admitted_after_generation_change(switch_accounts: bool)
                     .code,
                 "catalog_mutation_busy"
             );
-            assert_eq!(service.create_session(&json!({"catalogAppId":"parent-app","variantId":"123","appId":"123","scope":scope}), &json!({})).unwrap_err().code, "catalog_mutation_busy");
+            assert_eq!(service.create_session(&json!({"catalogAppId":"parent-app","variantId":"123","appId":"123","scope":scope}), &json!({}), |settings| Ok(settings.clone())).unwrap_err().code, "catalog_mutation_busy");
         }
         release_tx.send(()).unwrap();
         assert_eq!(mutation.join().unwrap().unwrap_err().code, "stale_account");
