@@ -35,11 +35,12 @@ class FlatpakTests(unittest.TestCase):
                 application = manifest["modules"][-1]
                 self.assertEqual(application["config-opts"], [
                     "-DCMAKE_BUILD_TYPE=Release",
+                    "-DBUILD_TESTING=OFF",
                     f"-DOPENNOW_BUILD_VERSION={version}",
                     f"-DOPENNOW_UPDATE_ED25519_PUBLIC_KEY={public_key}",
                 ])
                 self.assertEqual(destination.parent, template.parent)
-                del application["config-opts"][1:]
+                del application["config-opts"][2:]
                 self.assertEqual(manifest, json.loads(original))
                 self.assertEqual(template.read_bytes(), original)
                 generated = destination.read_bytes()

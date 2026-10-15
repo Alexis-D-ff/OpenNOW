@@ -123,10 +123,10 @@ jobs:
         shell: bash
         run: sudo python3 .github/scripts/prepare-ubuntu-apt-https.py
 
-      - name: Enable Windows Media Foundation
+      - name: Start Windows Media Foundation installation
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .github/scripts/ensure-windows-media-foundation.ps1
+        run: .github/scripts/windows-media-foundation-background.ps1 Start
 
       - name: Map stable Windows workspace
         if: runner.os == 'Windows'
@@ -301,6 +301,7 @@ jobs:
           shared-key: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           cache-bin: false
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
           workspaces: |
             native/opennow-core -> target
             native/opennow-streamer -> target
@@ -314,6 +315,8 @@ jobs:
           key: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           restore-keys: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           max-size: 1G
+          evict-old-files: job
+          save: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
           verbose: 1
 
       - name: Build and cache SDL3
@@ -322,6 +325,13 @@ jobs:
           version: ${{ env.SDL_VERSION }}
           target-arch: ${{ endsWith(matrix.label, 'arm64') && 'arm64' || 'x64' }}
           parallel: ${{ matrix.build-parallel }}
+
+      - name: Finish Windows Media Foundation installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .github/scripts/windows-media-foundation-background.ps1 Wait
+          .github/scripts/ensure-windows-media-foundation.ps1
 
       - name: Windows decoder regression tests
         if: matrix.label == 'windows-x64'
