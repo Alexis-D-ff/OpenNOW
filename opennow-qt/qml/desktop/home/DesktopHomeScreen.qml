@@ -298,6 +298,7 @@ FocusScope {
 
                     Column {
                         x: 22
+                        width: parent.width - 44
                         anchors.bottom: parent.bottom
                         anchors.bottomMargin: 22
                         spacing: 14
@@ -312,8 +313,11 @@ FocusScope {
                         }
 
                         Column {
+                            width: parent.width
                             spacing: 6
                             Text {
+                                width: parent.width
+                                elide: Text.ElideRight
                                 text: root.heroGame ? String(root.heroGame.title || qsTr("Game")) : qsTr("No games yet")
                                 color: "#FFFFFF"
                                 font.family: Theme.displayFont
@@ -322,6 +326,8 @@ FocusScope {
                                 font.letterSpacing: -1
                             }
                             Text {
+                                width: parent.width
+                                elide: Text.ElideRight
                                 text: root.heroMeta()
                                 color: "#B8FFFFFF"
                                 font.family: Theme.bodyFont
