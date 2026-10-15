@@ -1178,6 +1178,10 @@ QtObject {
         return settingsOwner.tenBitAllowedByMembership()
     }
 
+    function gameLockedByMembership(game) {
+        return Boolean(game && game.requiresPaidMembership === true) && settingsOwner.membershipTierName() === "FREE"
+    }
+
     function canonicalFpsValues() {
         return settingsOwner.canonicalFpsValues()
     }

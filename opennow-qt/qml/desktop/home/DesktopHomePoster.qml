@@ -33,6 +33,7 @@ Item {
     z: highlighted || visual.scale !== 1 ? 20 : 0
     Accessible.role: Accessible.Button
     Accessible.name: game ? String(game.title || qsTr("Game")) : qsTr("Game")
+    Accessible.description: labels.summary
 
     Item {
         id: visual
@@ -45,7 +46,7 @@ Item {
         artwork: root.artwork
         fallbackColor: "#171B27"
         cornerRadius: 12
-        scrimStart: root.highlighted ? 0.48 : 1
+        scrimStart: root.highlighted ? 0.3 : 1
     }
 
     Rectangle {
@@ -75,7 +76,23 @@ Item {
         visible: root.highlighted
     }
 
+    DesktopGameLabels {
+        id: labels
+        x: 8
+        y: 8
+        width: root.tileWidth - 16
+        height: root.tileHeight - 16
+        game: root.game
+        liftedBottom: overlay.visible ? overlay.height + 10 : 0
+    }
+
     } // visual; hit-test handlers remain outside the transformed item
+
+    DesktopGameLabelTip {
+        anchors.fill: parent
+        game: root.game
+        requested: root.highlighted
+    }
 
     HoverHandler {
         id: hoverHandler

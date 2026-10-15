@@ -123,6 +123,26 @@ QtObject {
             xbox:"Xbox", gog:"GOG", gaijin:"Gaijin", ea:"EA app", nvidia:"NVIDIA"}
         return labels[storeKey(value)] || (String(value).toUpperCase() === "NONE" ? qsTr("Direct launch") : String(value))
     }
+    readonly property var gameFeatureKeys: ["rtx", "hdr", "reflex"]
+    function gameFeatures(game) {
+        const found = {}
+        const variants = game && game.variants || []
+        for (let i = 0; i < variants.length; ++i) {
+            const features = variants[i] && variants[i].features || []
+            for (let j = 0; j < features.length; ++j)
+                found[features[j]] = true
+        }
+        return gameFeatureKeys.filter(key => found[key] === true)
+    }
+    function featureIconUrl(key) {
+        return gameFeatureKeys.indexOf(key) >= 0 ? "qrc:/qt/qml/OpenNOW/res/icons/desktop-" + key + ".svg" : ""
+    }
+    function featureLabel(key) {
+        if (key === "rtx") return qsTr("RTX ray tracing")
+        if (key === "hdr") return qsTr("HDR")
+        if (key === "reflex") return qsTr("Reflex low latency")
+        return ""
+    }
     function genreLabel(value) {
         return String(value).toLowerCase().replace(/_/g, " ").replace(/\b\w/g, letter => letter.toUpperCase())
     }

@@ -23,6 +23,11 @@ pub(super) const STORE_PANELS_QUERY: &str = r#"query GetStorePanels($vpcId: Stri
               supportedControls
               gfn {
                 status
+                features {
+                  __typename
+                  ... on GfnSubscriptionFeatureValue { key value }
+                  ... on GfnSubscriptionFeatureValueList { key values }
+                }
                 library { status selected }
               }
             }
@@ -665,7 +670,7 @@ impl GfnService {
             vpc,
             self.catalog_revision
                 .load(std::sync::atomic::Ordering::Acquire),
-            "catalog-v2"
+            "catalog-v3"
         ]))
     }
 
@@ -829,6 +834,7 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
             "stateDetails":serde_json::from_value::<crate::catalog_types::PatchDetails>(variant["gfn"]["stateDetails"].clone()).ok(),
             "gfnStatus":variant["gfn"]["status"],
             "supportsInGameSettingsPersistence":supports_persistence,
+            "features":crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"]),
         }))
     }).collect::<Vec<_>>();
     let mut variant_ids = std::collections::HashSet::new();
@@ -912,7 +918,7 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
         .filter_map(|variant| variant["lastPlayedDate"].as_str())
         .next()
         .map(ToOwned::to_owned);
-    Some(json!({
+    let mut game = json!({
         "id":id,
         "uuid":id,
         "launchAppId":launch_id,
@@ -940,7 +946,9 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
         "isInLibrary":is_in_library,
         "selectedVariantIndex":selected_index,
         "variants":variants,
-    }))
+    });
+    game["requiresPaidMembership"] = json!(super::catalog_actions::requires_paid_membership(&game));
+    Some(game)
 }
 
 pub(super) fn bounded_id(

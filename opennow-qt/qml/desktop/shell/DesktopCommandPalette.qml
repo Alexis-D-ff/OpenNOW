@@ -159,6 +159,7 @@ FocusScope {
         { icon: "desktop-nav-settings.svg", name: qsTr("Settings"), detail: qsTr("Configure OpenNOW"), route: "settings", key: "," },
         { icon: "desktop-sliders.svg", name: qsTr("Stream settings"), detail: qsTr("Resolution, frame rate and codec"), route: "settings-streaming", key: "" },
         { icon: "desktop-info.svg", name: qsTr("Updates"), detail: root.updateDetail(), route: "settings-updates", key: "" },
+        { icon: "desktop-info.svg", name: qsTr("What the icons mean"), detail: qsTr("Launcher, feature and membership marks on game tiles"), route: "", overlay: "desktop-icon-guide", key: "" },
         { icon: "desktop-play-stroke.svg", name: qsTr("Start last game"), detail: qsTr("Resume your previous session"), route: "game-detail", key: "Enter" }
     ]
 
@@ -296,6 +297,8 @@ FocusScope {
         root.closeRequested()
         if (action.account)
             ShellStore.chooseAccount(action.account, false)
+        else if (action.overlay)
+            AppController.showOverlay(action.overlay)
         else
             root.routeRequested(action.route)
     }

@@ -444,7 +444,8 @@ if(BUILD_TESTING)
     endif()
     set_tests_properties(opennow-streamcolor-tests PROPERTIES TIMEOUT 60)
     qt_add_resources(opennow-qt "region-ping-acceptance"
-        PREFIX "/acceptance" BASE tests FILES tests/CatalogSyncAcceptance.qml tests/LibraryErrorAcceptance.qml tests/OwnershipAcceptance.qml tests/CommandSearchAcceptance.qml tests/GameDetailsLayoutAcceptance.qml tests/PushInvalidationAcceptance.qml)
+        PREFIX "/acceptance" BASE tests FILES tests/CatalogSyncAcceptance.qml tests/LibraryErrorAcceptance.qml tests/OwnershipAcceptance.qml tests/CommandSearchAcceptance.qml tests/GameDetailsLayoutAcceptance.qml tests/PushInvalidationAcceptance.qml
+        tests/GameLabelsAcceptance.qml)
     foreach(details_size normal short)
         if(details_size STREQUAL "normal")
             set(details_width 1440)
@@ -475,6 +476,17 @@ if(BUILD_TESTING)
             --smoke-width 1280 --smoke-height 800 ${report_motion_args})
         set_tests_properties(qml-desktop-session-report-focus-${report_motion} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    endforeach()
+    foreach(labels_width 960 1600)
+        if(labels_width EQUAL 960)
+            set(labels_height 600)
+        else()
+            set(labels_height 900)
+        endif()
+        add_test(NAME qml-game-labels-${labels_width} COMMAND opennow-qt
+            --smoke-test --allow-multiple-instances --desktop --route library --smoke-game-labels
+            --smoke-width ${labels_width} --smoke-height ${labels_height} --reduced-motion)
+        set_tests_properties(qml-game-labels-${labels_width} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     foreach(search_case compact normal scaled-light)
         if(search_case STREQUAL "normal")

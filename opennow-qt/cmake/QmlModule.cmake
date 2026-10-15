@@ -280,7 +280,10 @@ qt_add_qml_module(opennow-qt
         qml/desktop/components/DesktopButton.qml
         qml/desktop/components/DesktopGameModal.qml
         qml/desktop/components/DesktopQueueSelector.qml
+        qml/desktop/components/DesktopGameLabels.qml
+        qml/desktop/components/DesktopGameLabelTip.qml
         qml/desktop/components/DesktopGlyph.qml
+        qml/desktop/components/DesktopIconGuide.qml
         qml/desktop/components/DesktopKeyHint.qml
         qml/desktop/components/DesktopPoster.qml
         qml/desktop/components/DesktopPosterOverlay.qml
@@ -452,6 +455,8 @@ qt_add_qml_module(opennow-qt
         res/icons/desktop-clock.svg
         res/icons/desktop-coop.svg
         res/icons/desktop-rtx.svg
+        res/icons/desktop-hdr.svg
+        res/icons/desktop-reflex.svg
         res/icons/desktop-gamepad.svg
         res/icons/desktop-chevron-up.svg
         res/icons/desktop-chevron-down.svg
