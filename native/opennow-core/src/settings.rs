@@ -611,6 +611,8 @@ impl SettingsStore {
         clamp_number(&mut self.values, "statsOverlayScale", 0.85, 1.5, 1.0);
         clamp_number(&mut self.values, "statsOverlayOpacity", 40.0, 100.0, 85.0);
         normalize_optional_integer(&mut self.values, "recordingBitrateMbps", 1, 12);
+        normalize_optional_integer(&mut self.values, "windowX", -32768, 32767);
+        normalize_optional_integer(&mut self.values, "windowY", -32768, 32767);
         normalize_bounded_strings(&mut self.values);
         normalize_nested_settings(&mut self.values);
     }
@@ -1191,7 +1193,7 @@ fn defaults() -> Map<String, Value> {
         "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
         "showSessionReport":true, "showSessionTimeRemainingInStatsOverlay":false,
         "sessionClockShowEveryMinutes":60, "sessionClockShowDurationSeconds":30,
-        "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",
+        "windowX":null, "windowY":null, "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",
         "gameLanguage":"en_US", "enablePersistingInGameSettings":true, "enableL4S":false,
         "identifyAsSteamDeck":false, "steamBigPictureMode":false,
         "enableCloudGsync":false, "discordRichPresence":false,
@@ -1254,6 +1256,20 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn window_position_persists_across_monitors_and_rejects_non_integers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(store.all()["windowX"], Value::Null);
+        assert_eq!(store.all()["windowY"], Value::Null);
+        assert_eq!(store.set("windowX", json!(-1920)).unwrap(), json!(-1920));
+        assert_eq!(store.set("windowY", json!(99999)).unwrap(), json!(32767));
+        let reloaded = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(reloaded.all()["windowX"], json!(-1920));
+        assert_eq!(reloaded.all()["windowY"], json!(32767));
+        assert_eq!(store.set("windowX", json!("left")).unwrap(), Value::Null);
     }
 
     #[test]

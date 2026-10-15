@@ -956,6 +956,68 @@ private slots:
         QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
     }
 
+    void nativeWindowMoveLoopOwnsTheCursorUntilItExits()
+    {
+        CursorSession session;
+        QVERIFY(session.start());
+        StreamVideoItem item(session.window.contentItem());
+        item.m_usesMacPointerCapture = false;
+        item.setRenderCallback({});
+        item.setSize(session.window.size());
+        item.forceActiveFocus();
+        QTRY_VERIFY(session.runtime.inputAllowed());
+        QTRY_VERIFY(session.window.isActive());
+        QTRY_VERIFY(item.captureActive());
+        QCOMPARE(item.cursor().shape(), Qt::BlankCursor);
+
+#if defined(Q_OS_WIN)
+        MSG unrelated{};
+        unrelated.hwnd = reinterpret_cast<HWND>(session.window.winId());
+        unrelated.message = WM_SYSCOMMAND;
+        unrelated.wParam = SC_MOVE;
+        QVERIFY(!item.m_nativeWindowMoveLoopFilter.nativeEventFilter(
+            "windows_dispatcher_MSG", &unrelated, nullptr));
+        unrelated.hwnd = nullptr;
+        QVERIFY(!item.m_nativeWindowMoveLoopFilter.nativeEventFilter(
+            "windows_generic_MSG", &unrelated, nullptr));
+        unrelated.hwnd = reinterpret_cast<HWND>(session.window.winId());
+        unrelated.wParam = SC_MAXIMIZE;
+        QVERIFY(!item.m_nativeWindowMoveLoopFilter.nativeEventFilter(
+            "windows_generic_MSG", &unrelated, nullptr));
+        QVERIFY(item.captureActive());
+#endif
+        const auto moveLoop = [&](bool entering) {
+            item.setNativeWindowMoveLoop(entering);
+            QCOMPARE(item.m_nativeWindowMoveLoop, entering);
+        };
+
+        moveLoop(true);
+        QVERIFY(!item.captureActive());
+        QCOMPARE(item.cursor().shape(), Qt::ArrowCursor);
+        session.window.setPosition(session.window.position() + QPoint(40, 30));
+        item.forceActiveFocus();
+        item.resynchronizeInput();
+        QVERIFY(!item.captureActive());
+        QVERIFY(!item.m_cursorConfined);
+
+        moveLoop(false);
+        QVERIFY(!item.captureActive());
+        QTRY_VERIFY(item.captureActive());
+        QCOMPARE(item.cursor().shape(), Qt::BlankCursor);
+
+        item.setInputEnabled(false);
+        QVERIFY(!item.captureActive());
+        moveLoop(true);
+        item.setInputEnabled(true);
+        item.forceActiveFocus();
+        item.resynchronizeInput();
+        QTest::qWait(50);
+        QVERIFY(!item.captureActive());
+        QVERIFY(!item.m_cursorConfined);
+        moveLoop(false);
+        QTRY_VERIFY(item.captureActive());
+    }
+
     void cursorVisibilityPolicyIsTheSameAcrossPlatforms()
     {
         StreamVideoItem item;

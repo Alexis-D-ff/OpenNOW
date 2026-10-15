@@ -1,6 +1,9 @@
 #pragma once
 
+#include <QList>
+#include <QMargins>
 #include <QObject>
+#include <QRect>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -58,6 +61,12 @@ public:
     Q_INVOKABLE bool ensureDirectLaunchAssociation() const;
     Q_INVOKABLE void activateWindow();
     Q_INVOKABLE void requestWindowAttention(QWindow *window) const;
+    Q_INVOKABLE void restoreWindowGeometry(QWindow *window, const QRect &saved,
+                                           bool hasPosition) const;
+    [[nodiscard]] static QRect restorableWindowGeometry(const QRect &saved, bool hasPosition,
+                                                        const QMargins &frame,
+                                                        const QRect &fallbackScreen,
+                                                        const QList<QRect> &screens);
     Q_INVOKABLE void quitApplication();
     Q_INVOKABLE void restartApplication();
     Q_INVOKABLE bool handleArguments(const QStringList &arguments);

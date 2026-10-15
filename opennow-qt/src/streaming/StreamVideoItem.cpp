@@ -5,6 +5,7 @@
 #include "streaming/NativeStreamRuntime.h"
 #include "streaming/rendering/NativeStreamRenderCallback.h"
 
+#include <QCoreApplication>
 #include <QCursor>
 #include <QMetaObject>
 #include <QQmlEngine>
@@ -45,6 +46,9 @@ StreamVideoItem::StreamVideoItem(std::unique_ptr<MacPointerCapture> pointerCaptu
         if (m_captureActive && m_inputEnabled && m_relativeMouse && s_nativeRuntime)
             s_nativeRuntime->submitMouseRelative(x, y);
     });
+#if defined(Q_OS_WIN)
+    QCoreApplication::instance()->installNativeEventFilter(&m_nativeWindowMoveLoopFilter);
+#endif
     setFlag(ItemHasContents, true);
     setActiveFocusOnTab(true);
     setAcceptedMouseButtons(Qt::AllButtons);
