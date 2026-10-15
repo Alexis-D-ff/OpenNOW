@@ -325,6 +325,70 @@ class CIWorkflowTest(unittest.TestCase):
                     self.assertIn("verbose: 1", cache)
                     self.assertNotIn("append-timestamp: false", cache)
 
+    def test_release_candidates_reuse_the_nightly_package_caches(self):
+        def block(job, action):
+            return job.split(f"uses: {action}@", 1)[1].split("\n      -", 1)[0]
+
+        def key_expression(cache, name):
+            return re.search(rf"^\s+{name}: (.+)$", cache, re.MULTILINE).group(1)
+
+        nightly = jobs((WORKFLOWS / "qt-build.yml").read_text())["packages"]
+        candidates = jobs((WORKFLOWS / "qt-release-candidate.yml").read_text())
+
+        # Resolve the nightly package job's own key expression per matrix entry,
+        # so a rename in either workflow has to move both sides together.
+        nightly_rust = block(nightly, "Swatinem/rust-cache")
+        self.assertEqual(key_expression(nightly_rust, "shared-key"),
+                         key_expression(block(nightly, "hendrikmuhs/ccache-action"), "key"))
+        expression = key_expression(nightly_rust, "shared-key")
+        macos = re.search(r"runner\.os == 'macOS' && '(qt-ci-[^']+)'", expression)
+        template = re.search(r"format\('(\S+)', matrix\.os, matrix\.label\)", expression)
+        self.assertIsNotNone(macos, expression)
+        self.assertIsNotNone(template, expression)
+        platforms = {
+            label: macos[1] if "macos" in image
+            else template[1].replace("{0}", image).replace("{1}", label)
+            for label, image in re.findall(r"- label: (\S+)\n\s+os: (\S+)\n", nightly)
+        }
+        self.assertEqual(set(platforms), {
+            "linux-x64", "linux-arm64", "windows-x64", "windows-arm64", "macos-arm64",
+        })
+        # A candidate restores the nightly cache only when its own key pattern
+        # resolves to that platform's key.
+        linux = key_expression(block(candidates["linux"], "Swatinem/rust-cache"), "shared-key")
+        windows = key_expression(block(candidates["windows"], "Swatinem/rust-cache"), "shared-key")
+        self.assertEqual({
+            **{
+                f"linux-{arch}": linux.replace("${{ matrix.runner }}", runner)
+                                      .replace("${{ matrix.arch }}", arch)
+                for arch, runner in re.findall(r"- arch: (\S+)\n\s+runner: (\S+)\n", candidates["linux"])
+            },
+            **{
+                f"windows-{arch}": windows.replace("${{ matrix.arch }}", arch)
+                for arch in re.findall(r"- arch: (\S+)\n", candidates["windows"])
+            },
+            "macos-arm64": key_expression(block(candidates["macos"], "Swatinem/rust-cache"), "shared-key"),
+        }, platforms)
+
+        nightly_workspaces = nightly_rust.split("workspaces: |", 1)[1].strip()
+        self.assertIn("native/opennow-core -> ../../build/opennow-qt-release/rust-target", nightly_workspaces)
+        for name in ("linux", "windows", "macos"):
+            with self.subTest(candidate=name):
+                rust = block(candidates[name], "Swatinem/rust-cache")
+                ccache = block(candidates[name], "hendrikmuhs/ccache-action")
+                self.assertEqual(key_expression(rust, "shared-key"), key_expression(ccache, "key"))
+                self.assertEqual(rust.split("workspaces: |", 1)[1].strip(), nightly_workspaces)
+                self.assertEqual(key_expression(ccache, "restore-keys"), key_expression(ccache, "key"))
+                self.assertIn("max-size: 1G", ccache)
+
+        self.assertEqual(re.search(r"cache-key-prefix: (qt-target-.+)$", nightly, re.MULTILINE).group(1),
+                         "qt-target-${{ matrix.label }}")
+        for name, prefix in (("linux", "qt-target-linux-${{ matrix.arch }}"),
+                             ("windows", "qt-target-windows-${{ matrix.arch }}"),
+                             ("macos", "qt-target-macos-arm64")):
+            with self.subTest(candidate=name):
+                self.assertIn(f"cache-key-prefix: {prefix}\n", candidates[name])
+
     def test_relocated_core_probe_matches_shell_protocol(self):
         header = (ROOT / "opennow-qt/src/core/CoreClient.h").read_text()
         version = int(re.search(r"CurrentProtocolVersion = (\d+);", header).group(1))
