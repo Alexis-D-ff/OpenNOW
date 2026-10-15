@@ -24,6 +24,7 @@ Column {
     readonly property bool anyEntitled: srEntitled || fgEntitled || rrEntitled
     readonly property var multipliers: availability && availability.frameGenerationMultipliers
         ? availability.frameGenerationMultipliers : []
+    readonly property bool dynamicEntitled: fgEntitled && multipliers.length > 0
     readonly property int lowestMultiplier: multipliers.length ? multipliers[0] : 3
     readonly property int highestMultiplier: multipliers.length ? multipliers[multipliers.length - 1] : 3
     readonly property var upsellFeatures: [
@@ -50,9 +51,9 @@ Column {
         {key: "sharpest", glyph: "image", label: qsTr("Sharpest"),
             detail: srEntitled ? qsTr("DLAA · native resolution") : qsTr("Needs Super Resolution"), enabled: srEntitled},
         {key: "balanced", glyph: "star", label: qsTr("Balanced"),
-            detail: fgEntitled ? qsTr("Balanced · up to %1×").arg(lowestMultiplier) : qsTr("Needs Frame Generation"), enabled: fgEntitled},
+            detail: dynamicEntitled ? qsTr("Balanced · up to %1×").arg(lowestMultiplier) : qsTr("Needs Frame Generation"), enabled: dynamicEntitled},
         {key: "smoothest", glyph: "speed", label: qsTr("Smoothest"),
-            detail: fgEntitled ? qsTr("Performance · up to %1×").arg(highestMultiplier) : qsTr("Needs Frame Generation"), enabled: fgEntitled},
+            detail: dynamicEntitled ? qsTr("Performance · up to %1×").arg(highestMultiplier) : qsTr("Needs Frame Generation"), enabled: dynamicEntitled},
         {key: "custom", glyph: "sliders", label: qsTr("Custom"), detail: qsTr("Your own mix"), enabled: anyEntitled}
     ]
     readonly property string selectedTile: {
@@ -87,7 +88,7 @@ Column {
     function preset(key) {
         const sr = (mode) => srEntitled ? {srModel: 1, srMode: mode, srScale: srScaleFor(mode)} : {srModel: 0, srMode: 0, srScale: 100}
         const rr = {rrModel: rrEntitled ? 1 : 0}
-        const fg = (multiplier) => fgEntitled ? {fgModel: 1, fgMode: 1, fgMultiplier: multiplier} : {fgModel: 0, fgMode: 0, fgMultiplier: 0}
+        const fg = (multiplier) => dynamicEntitled ? {fgModel: 1, fgMode: 1, fgMultiplier: multiplier} : {fgModel: 0, fgMode: 0, fgMultiplier: 0}
         if (key === "sharpest") return Object.assign({}, defaults, sr(5), rr)
         if (key === "balanced") return Object.assign({}, defaults, sr(2), rr, fg(lowestMultiplier))
         if (key === "smoothest") return Object.assign({}, defaults, sr(1), rr, fg(highestMultiplier))
@@ -139,6 +140,8 @@ Column {
     }
 
     function setFgMode(mode) {
+        if (mode === 1 && !dynamicEntitled)
+            return
         const changes = {fgMode: mode, fgMultiplier: mode === 1
             ? (multipliers.indexOf(overrides.fgMultiplier) >= 0 ? overrides.fgMultiplier : lowestMultiplier) : 0}
         if (mode !== 0 && overrides.fgModel === 0) changes.fgModel = 1
@@ -360,7 +363,7 @@ Column {
                     : qsTr("The game's own frame generation setting applies")
                 DesktopSettingsSegmented {
                     objectName: "dlssFgModeSelector"
-                    options: [{label: qsTr("In-game"), value: 0}, {label: qsTr("Dynamic"), value: 1}]
+                    options: [{label: qsTr("In-game"), value: 0}, {label: qsTr("Dynamic"), value: 1, enabled: root.dynamicEntitled}]
                     optionWidth: 96; selectedIndex: options.findIndex(item => item.value === root.overrides.fgMode)
                     onSelected: (index, item) => root.setFgMode(item.value)
                 }
