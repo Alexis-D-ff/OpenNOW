@@ -842,7 +842,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     enable!(configure, "BUILD_VULKAN", "vulkan");
 
     // other external libraries
-    enable!(configure, "BUILD_LIB_DRM", "libdrm");
+    enable!(configure, "BUILD_DRM", "libdrm");
     if use_v4l2_request() {
         configure.args([
             "--enable-libdrm",

@@ -1897,6 +1897,20 @@ mod tests {
         assert!(!cpu_conversion_allowed(metadata, Pixel::NV12));
     }
 
+    #[cfg(feature = "ffmpeg-bundled")]
+    #[test]
+    fn bundled_vaapi_includes_drm_prime_interop() {
+        let configuration = unsafe { std::ffi::CStr::from_ptr(ffi::avutil_configuration()) }
+            .to_str()
+            .unwrap();
+        assert!(
+            configuration
+                .split_whitespace()
+                .any(|option| option == "--enable-libdrm"),
+            "bundled VAAPI requires libdrm support to export decoded frames as DMA-BUF"
+        );
+    }
+
     #[test]
     fn vaapi_export_failure_transfers_only_eight_bit_sdr() {
         let mut format = StreamFormat::video_default(1920, 1080).unwrap();
