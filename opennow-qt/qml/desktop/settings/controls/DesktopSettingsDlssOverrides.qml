@@ -16,22 +16,20 @@ Column {
 
     readonly property var defaults: ({srMode: 0, srModel: 0, srScale: 100, rrModel: 0, fgMode: 0, fgModel: 0, fgMultiplier: 0})
     readonly property var overrides: Object.assign({}, defaults, ShellStore.settings.dlssOverrides || {})
-    readonly property var availability: ShellStore.subscription && ShellStore.subscription.dlssOverrides
-        ? ShellStore.subscription.dlssOverrides : null
-    readonly property bool srEntitled: capability("superResolution").entitled === true
-    readonly property bool fgEntitled: capability("frameGeneration").entitled === true
-    readonly property bool rrEntitled: capability("rayReconstruction").entitled === true
+    readonly property var availability: ShellStore.dlssOverrideAvailability
+    readonly property bool srEntitled: ShellStore.dlssCapability("superResolution").entitled === true
+    readonly property bool fgEntitled: ShellStore.dlssCapability("frameGeneration").entitled === true
+    readonly property bool rrEntitled: ShellStore.dlssCapability("rayReconstruction").entitled === true
     readonly property bool anyEntitled: srEntitled || fgEntitled || rrEntitled
-    readonly property var multipliers: availability && availability.frameGenerationMultipliers
-        ? availability.frameGenerationMultipliers : []
-    readonly property bool dynamicEntitled: fgEntitled && multipliers.length > 0
+    readonly property var multipliers: ShellStore.dlssFrameGenerationMultipliers
+    readonly property bool dynamicEntitled: ShellStore.dlssDynamicFrameGeneration
     readonly property int lowestMultiplier: multipliers.length ? multipliers[0] : 3
     readonly property int highestMultiplier: multipliers.length ? multipliers[multipliers.length - 1] : 3
     readonly property var upsellFeatures: [
         {key: "superResolution", label: qsTr("Super Resolution")},
         {key: "frameGeneration", label: qsTr("Frame Generation")},
         {key: "rayReconstruction", label: qsTr("Ray Reconstruction")}
-    ].filter(feature => capability(feature.key).entitled !== true && capability(feature.key).upsell === true)
+    ].filter(feature => ShellStore.dlssCapability(feature.key).entitled !== true && ShellStore.dlssCapability(feature.key).upsell === true)
 
     readonly property var srModes: [
         {value: 0, label: qsTr("In-game"), scale: 100},
@@ -70,10 +68,6 @@ Column {
         if (models.every(model => model === 0)) return "inGame"
         if (models.every(model => model === 1)) return "recommended"
         return "custom"
-    }
-
-    function capability(name) {
-        return availability && availability[name] ? availability[name] : ({entitled: false, upsell: false})
     }
 
     function sameOverrides(left, right) {
