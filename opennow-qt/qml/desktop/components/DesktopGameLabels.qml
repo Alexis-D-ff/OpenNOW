@@ -10,11 +10,19 @@ Item {
     readonly property bool locked: ShellStore.gameLockedByMembership(game)
     readonly property bool hasContent: launchers.length > 0 || features.length > 0 || locked
     readonly property int maxLaunchers: 3
-    readonly property int shownLaunchers: Math.min(maxLaunchers, launchers.length)
     readonly property int pillPadding: 7
     readonly property int glyphSize: 12
     readonly property int glyphGap: 5
     readonly property int overflowWidth: 16
+    readonly property int shownLaunchers: {
+        const span = count => pillPadding * 2 + count * glyphSize + Math.max(0, count - 1) * 6
+            + (count < launchers.length ? 6 + overflowWidth : 0)
+        const reserve = features.length > 0 ? 6 + pillPadding * 2 + overflowWidth : 0
+        let count = Math.min(maxLaunchers, launchers.length)
+        while (count > 1 && span(count) + reserve > width)
+            --count
+        return count
+    }
     readonly property real featureRoom: width - (launcherPill.visible ? launcherPill.width + 6 : 0) - pillPadding * 2
     readonly property int shownFeatures: {
         const span = count => count * glyphSize + Math.max(0, count - 1) * glyphGap

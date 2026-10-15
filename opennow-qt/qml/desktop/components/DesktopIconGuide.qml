@@ -22,16 +22,21 @@ FocusScope {
             closeButton.forceActiveFocus()
     }
 
-    Keys.onPressed: event => {
-        if (event.key === Qt.Key_Escape || event.key === Qt.Key_Back) {
+    function handleKey(key) {
+        if (key === Qt.Key_Escape || key === Qt.Key_Back) {
             root.closeRequested()
-            event.accepted = true
-        } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
-            const step = event.key === Qt.Key_Up ? -DesktopTokens.px(40) : DesktopTokens.px(40)
+        } else if (key === Qt.Key_Tab || key === Qt.Key_Backtab) {
+            closeButton.forceActiveFocus()
+        } else if (key === Qt.Key_Up || key === Qt.Key_Down) {
+            const step = key === Qt.Key_Up ? -DesktopTokens.px(40) : DesktopTokens.px(40)
             guideBody.contentY = Math.max(0, Math.min(guideBody.contentHeight - guideBody.height, guideBody.contentY + step))
-            event.accepted = true
+        } else {
+            return false
         }
+        return true
     }
+
+    Keys.onPressed: event => event.accepted = root.handleKey(event.key)
 
     component Mark: Rectangle {
         property alias content: markRow.data

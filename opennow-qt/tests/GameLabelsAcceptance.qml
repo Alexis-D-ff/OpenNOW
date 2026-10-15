@@ -12,6 +12,10 @@ QtObject {
         return collect(host, "desktopGameLabels", []).find(item => item.game && item.game.id === id && item.visible)
     }
     function child(item, name) { return collect(item, name, [])[0] }
+    function polish(item) {
+        for (const nested of item.children || []) polish(nested)
+        if (typeof item.forceLayout === "function") item.forceLayout()
+    }
     function variant(id, store, owned, features) {
         return {id:id, store:store, libraryStatus:owned ? "PLATFORM_SYNC" : "NOT_OWNED", inLibrary:owned,
             gfnStatus:"AVAILABLE", playStatus:owned ? "PLAYABLE" : "UNKNOWN", features:features || []}
@@ -80,8 +84,14 @@ QtObject {
         check(!child(crowdedLabels, "desktopGameLock").visible, "an ungated game shows a lock")
         check(!child(crowdedLabels, "desktopGameFeature-dlss"), "an unsupported feature was drawn")
         const features = child(crowdedLabels, "desktopGameFeatures")
-        const edge = features.mapToItem(crowdedLabels, features.width, 0)
-        check(edge.x <= crowdedLabels.width + 0.5, "the feature pill overflows the tile")
+        const launcherPill = child(crowdedLabels, "desktopGameLaunchers")
+        function separated() {
+            return launcherPill.x + launcherPill.width < features.x && features.x + features.width <= crowdedLabels.width + 0.5
+        }
+        check(separated(), "the feature pill overlaps the launchers or overflows the tile")
+        crowdedLabels.width = DesktopTokens.posterWidth - 16
+        polish(crowdedLabels)
+        check(crowdedLabels.shownLaunchers >= 1 && separated(), "the pills overlap on the narrowest Home tile")
 
         const lockedLabels = labelsFor(host, "labels-locked")
         check(lockedLabels && child(lockedLabels, "desktopGameLock").visible, "a paid game shows no lock for a Free account")
@@ -98,7 +108,12 @@ QtObject {
         const listed = DesktopTokens.gameFeatureKeys.filter(key => child(guide, "desktopIconGuideFeature-" + key))
         check(JSON.stringify(listed) === JSON.stringify(["rtx", "hdr", "reflex"]) && !child(guide, "desktopIconGuideFeature-dlss"),
             "the icon guide lists features the catalog cannot back")
-        AppController.showOverlay("")
+        const close = child(guide, "desktopIconGuideClose")
+        guide.restoreFocus()
+        check(close.activeFocus, "the icon guide did not take focus")
+        check(guide.handleKey(Qt.Key_Tab) && close.activeFocus, "Tab left the icon guide")
+        check(guide.handleKey(Qt.Key_Backtab) && close.activeFocus, "Shift+Tab left the icon guide")
+        check(guide.handleKey(Qt.Key_Escape) && AppController.overlay === "", "Escape did not close the icon guide")
         check(!guide.opened, "the icon guide did not close")
         return true
     }
