@@ -8,7 +8,7 @@ Item {
     readonly property var variant: game && game.variants && Number(game.selectedVariantIndex) >= 0
         ? (game.variants[Number(game.selectedVariantIndex)] || null) : null
     property string subtitle: [variant && variant.store ? DesktopTokens.storeLabel(variant.store) : "",
-        String((ShellStore.activeSession || {}).serverLocation || ShellStore.selectedRegion || "")]
+        String((ShellStore.activeSession || {}).serverLocation || ShellStore.selectedRegionName || "")]
         .filter(part => part !== "").join(" · ")
     property string statusText: ""
     property color tone: Theme.focus

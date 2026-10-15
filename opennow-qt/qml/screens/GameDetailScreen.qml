@@ -81,10 +81,7 @@ FocusScope {
     }
 
     function regionLabel() {
-        const selected = String(ShellStore.selectedRegion || "")
-        if (selected.length)
-            return selected
-        return qsTr("Automatic region")
+        return ShellStore.selectedRegionName || qsTr("Automatic region")
     }
 
     function selectVariant(index) {

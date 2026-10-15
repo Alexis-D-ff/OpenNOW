@@ -42,7 +42,7 @@ Item {
 
     function regionName() {
         const session = ShellStore.activeSession || ({})
-        return String(ShellStore.selectedRegion || "") || String(session.zone || session.serverLocation || "")
+        return ShellStore.selectedRegionName || String(session.zone || session.serverLocation || "")
     }
 
     function regionStatus() {
