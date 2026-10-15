@@ -196,8 +196,13 @@ QtObject {
             {provider:"STEAM",label:"Fixture Steam",isConnected:true,status:"connected",supportsSync:true,supportsLinking:false},
             {provider:"UPLAY",label:"Fixture Ubisoft",isConnected:false,status:"not_connected",supportsSync:true,supportsLinking:true}
         ]
+        const unsupported = {provider:"EA_APP",label:"Fixture EA",isConnected:false,status:"not_connected",supportsSync:false,supportsLinking:false}
         accounts.refreshGameAccounts()
-        client.responseReceived(accounts.gameAccountsRequestId, {accounts:fixtures,subscriptions:[],definitions:{}})
+        client.responseReceived(accounts.gameAccountsRequestId, {accounts:fixtures.concat([unsupported]),subscriptions:[],definitions:{}})
+        check(accounts.gameAccounts.length === 3 && accounts.actionableGameAccounts.length === 2
+            && !accounts.actionableGameAccounts.some(account => account.provider === "EA_APP"),
+            "store without linking or sync support was listed as actionable")
+        check(storeRow(stores, unsupported.label) === null, "store without linking or sync support was shown")
         for (const account of fixtures) {
             const button = storeActionButton(stores, account.label)
             check(button && button.enabled, "supported store action is disabled or missing")
@@ -215,6 +220,14 @@ QtObject {
             check(retry !== "" && retry !== id, "store action could not retry after a core failure")
             client.requestFailed(retry, "upstream_error", "Fixture retry failure")
         }
+    }
+    function storeRow(item, label) {
+        if (item.title === label && item.status !== undefined) return item
+        for (const child of item.children || []) {
+            const found = storeRow(child, label)
+            if (found) return found
+        }
+        return null
     }
     function storeActionButton(item, label) {
         if (item.title === label) {

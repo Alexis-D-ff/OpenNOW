@@ -294,6 +294,7 @@ QtObject {
     readonly property bool regionPingBusy: accountServicesOwner.regionPingBusy
     property var savedAccounts: []
     property alias gameAccounts: accountServicesOwner.gameAccounts
+    readonly property alias actionableGameAccounts: accountServicesOwner.actionableGameAccounts
     property alias gameAccountsState: accountServicesOwner.gameAccountsState
     property alias gameAccountMessage: accountServicesOwner.gameAccountMessage
     property alias syncOperation: accountServicesOwner.syncOperation

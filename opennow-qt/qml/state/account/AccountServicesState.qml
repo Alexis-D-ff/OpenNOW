@@ -20,6 +20,7 @@ QtObject {
     readonly property bool regionPingBusy: regionPingPending || regionPingRequestId !== ""
     property string regionPingRequestId: ""
     property var gameAccounts: []
+    readonly property var actionableGameAccounts: gameAccounts.filter(account => gameAccountAction(account) !== "none")
     property string gameAccountsState: "idle"
     property string gameAccountMessage: ""
     property var accountLinkAttempt: null

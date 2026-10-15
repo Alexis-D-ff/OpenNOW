@@ -208,7 +208,7 @@ FocusScope {
                 toggle("Discord Rich Presence", "Show what you're playing on Discord", "discordRichPresence"),
                 {t:qsTr("Usage & bug reports · Experimental"), d:qsTr("Send usage statistics and error reports with logs to the developer, identified by your GeForce NOW username or e-mail"), v:ShellStore.bugReports.enabled ? qsTr("On") : qsTr("Off"), action:"automatic-bug-reports"},
                 {t:"Sign out", d:"Removes the NVIDIA token from this PC; My games stay", v:"Sign out of NVIDIA", action:"sign-out", danger:true},
-                {t:"Game accounts", d:"Steam, Epic, Ubisoft and Xbox", v:qsTr("%1 detected").arg(ShellStore.gameAccounts.length), route:"game-accounts"},
+                {t:"Game accounts", d:"Steam, Epic, Ubisoft and Xbox", v:qsTr("%1 detected").arg(ShellStore.actionableGameAccounts.length), route:"game-accounts"},
                 {t:"Persistent storage", d:ShellStore.subscription && ShellStore.subscription.storageAddon ? (ShellStore.subscription.storageAddon.regionName || "Cloud storage active") : "Manage cloud storage locations", v:"Open", route:"persistent-storage"}
             ]
         }

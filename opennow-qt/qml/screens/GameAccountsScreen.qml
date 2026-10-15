@@ -7,8 +7,8 @@ FocusScope {
     property var unlinkTarget: null
     property bool unlinkOpen: false
     property Item unlinkOrigin: null
-    readonly property var selectedAccount: accountList.currentIndex >= 0 && accountList.currentIndex < ShellStore.gameAccounts.length
-        ? ShellStore.gameAccounts[accountList.currentIndex] : null
+    readonly property var selectedAccount: accountList.currentIndex >= 0 && accountList.currentIndex < ShellStore.actionableGameAccounts.length
+        ? ShellStore.actionableGameAccounts[accountList.currentIndex] : null
     readonly property string primaryAction: ShellStore.gameAccountAction(selectedAccount)
 
     function requestUnlink(origin) {
@@ -69,7 +69,7 @@ FocusScope {
             leftMargin: 10; rightMargin: 10; topMargin: 10; bottomMargin: 10
             spacing: 2; clip: true; keyNavigationWraps: false
             highlightMoveDuration: AppController.reducedMotion ? 0 : 260
-            model: ShellStore.gameAccounts
+            model: ShellStore.actionableGameAccounts
             Component.onCompleted: currentIndex = model.length ? Math.min(ShellStore.focusIndex("game-accounts"), model.length - 1) : -1
             onCountChanged: if (count > 0 && currentIndex < 0) currentIndex = Math.min(ShellStore.focusIndex("game-accounts"), count - 1)
             onCurrentIndexChanged: if (currentIndex >= 0) ShellStore.rememberFocus("game-accounts", currentIndex)
