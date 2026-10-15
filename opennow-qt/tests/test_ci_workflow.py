@@ -335,9 +335,19 @@ class CIWorkflowTest(unittest.TestCase):
         nightly = jobs((WORKFLOWS / "qt-build.yml").read_text())["packages"]
         candidates = jobs((WORKFLOWS / "qt-release-candidate.yml").read_text())
 
-        # The nightly package job keys each platform from its matrix os and label.
+        # Resolve the nightly package job's own key expression per matrix entry,
+        # so a rename in either workflow has to move both sides together.
+        nightly_rust = block(nightly, "Swatinem/rust-cache")
+        self.assertEqual(key_expression(nightly_rust, "shared-key"),
+                         key_expression(block(nightly, "hendrikmuhs/ccache-action"), "key"))
+        expression = key_expression(nightly_rust, "shared-key")
+        macos = re.search(r"runner\.os == 'macOS' && '(qt-ci-[^']+)'", expression)
+        template = re.search(r"format\('(\S+)', matrix\.os, matrix\.label\)", expression)
+        self.assertIsNotNone(macos, expression)
+        self.assertIsNotNone(template, expression)
         platforms = {
-            label: "qt-ci-macos-arm64" if "macos" in image else f"qt-ci-{image}-{label}"
+            label: macos[1] if "macos" in image
+            else template[1].replace("{0}", image).replace("{1}", label)
             for label, image in re.findall(r"- label: (\S+)\n\s+os: (\S+)\n", nightly)
         }
         self.assertEqual(set(platforms), {
@@ -360,9 +370,6 @@ class CIWorkflowTest(unittest.TestCase):
             "macos-arm64": key_expression(block(candidates["macos"], "Swatinem/rust-cache"), "shared-key"),
         }, platforms)
 
-        nightly_rust = block(nightly, "Swatinem/rust-cache")
-        self.assertEqual(key_expression(nightly_rust, "shared-key"),
-                         key_expression(block(nightly, "hendrikmuhs/ccache-action"), "key"))
         nightly_workspaces = nightly_rust.split("workspaces: |", 1)[1].strip()
         self.assertIn("native/opennow-core -> ../../build/opennow-qt-release/rust-target", nightly_workspaces)
         for name in ("linux", "windows", "macos"):
