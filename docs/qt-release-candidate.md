@@ -82,8 +82,8 @@ the update-signing seed, and does not require a manually registered runner.
 - AppImages embed stable-channel update information and include versioned `.zsync` sidecars
   for external delta-update tools. Both sidecars receive manifests and release checksums.
 - The inventory job fails unless it finds both Windows MSI/ZIP/setup.exe triples, both Linux AppImage/DEB pairs,
-  both AppImage sidecars, the macOS ARM64 DMG/ZIP pair, and exactly one manifest per asset
-  (twelve packages plus two sidecars). It records the immutable commit and
+  both Linux Flatpak bundles, both AppImage sidecars, the macOS ARM64 DMG/ZIP pair, and exactly one manifest per asset
+  (fourteen packages plus two sidecars). It records the immutable commit and
   SHA-256 of every candidate file, plus `windowsSigningMode=unsigned` or
   `windowsSigningMode=authenticode`. Windows artifact bundles use the same mode as their suffix;
   package filenames stay unchanged for updater compatibility.
