@@ -22,6 +22,10 @@ int AcceptanceSession::startStreamExitWorkload()
     auto *store = m_engine.singletonInstance<QObject *>(u"OpenNOW"_s, u"ShellStore"_s);
     if (!window || !store) return EXIT_FAILURE;
     const bool windowClose = m_arguments.contains(u"--smoke-exit-window-close"_s);
+    const bool idleOptOut = m_arguments.contains(u"--smoke-exit-idle-opt-out"_s);
+    if (idleOptOut && !QMetaObject::invokeMethod(store, "applySetting",
+            Q_ARG(QVariant, u"confirmQuitWhenIdle"_s), Q_ARG(QVariant, false)))
+        return EXIT_FAILURE;
     const auto originalRoute = m_controller.route();
     const auto originalState = windowClose && originalRoute != u"stream"_s
         ? (originalRoute == u"inserting"_s ? u"queued"_s : u"idle"_s) : u"streaming"_s;
@@ -43,7 +47,7 @@ int AcceptanceSession::startStreamExitWorkload()
     const auto state = std::make_shared<State>();
     auto *timer = new QTimer(this);
     timer->setInterval(150);
-    connect(timer, &QTimer::timeout, this, [this, window, store, fullscreen, windowClose, originalRoute, originalState, state, timer] {
+    connect(timer, &QTimer::timeout, this, [this, window, store, fullscreen, windowClose, idleOptOut, originalRoute, originalState, state, timer] {
         const auto require = [this, state, timer](bool ok, const char *message) {
             if (!ok) {
                 qCritical("Stream exit step %d: %s", state->step, message);
@@ -89,6 +93,12 @@ int AcceptanceSession::startStreamExitWorkload()
                     m_controller.quitApplication();
                     if (!require(window->property("applicationCloseConfirmed").toBool()
                             && m_controller.overlay().isEmpty(), "authorized quit requested another confirmation")) return;
+                    timer->stop();
+                    return;
+                }
+                if (state->step == 1 && idleOptOut && originalRoute == u"home"_s) {
+                    if (!require(window->close() && !window->isVisible() && m_controller.overlay().isEmpty(),
+                            "idle window close asked for confirmation after opting out")) return;
                     timer->stop();
                     return;
                 }

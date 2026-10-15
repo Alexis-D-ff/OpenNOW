@@ -25,7 +25,7 @@ ApplicationWindow {
             && consoleOverlayHost.supportedOverlay ? consoleOverlayHost : null
     onConsoleModalFocusOwnerChanged: if (consoleModalFocusOwner) Qt.callLater(window.restoreConsoleModalFocus)
     onClosing: event => {
-        if (!applicationCloseConfirmed) {
+        if (!applicationCloseConfirmed && ShellStore.applicationQuitNeedsConfirmation) {
             event.accepted = false
             AppController.showOverlay("application-quit-confirm")
         }

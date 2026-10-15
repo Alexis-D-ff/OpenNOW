@@ -58,6 +58,26 @@ OwnershipAcceptance {
             || top.y + control.height <= corner.y || top.y >= corner.y + close.height,
             "close button covers " + control.objectName)
     }
+    function verifyHomePlay(selected) {
+        const poster = find(host, "desktopHomePoster-" + selected.id)
+        check(poster, "Home rail poster was not created")
+        AppController.inputMode = "keyboard"
+        poster.current = true
+        const play = find(poster, "desktopPosterPlay")
+        check(play && play.visible, "Home poster Play button is not visible on the selected card")
+        poster.activateAt(play.mapToItem(poster, play.width / 2, play.height / 2))
+        const inspection = request(ShellStore.launchInspectRequestId)
+        check(AppController.route === "home" && inspection && inspection.method === "catalog.launch.inspect"
+            && inspection.params.appId === selected.id && inspection.params.variantId === selected.variants[0].id,
+            "Home Play opened details instead of launching the selected store version")
+        ShellStore.invalidateLaunchInspection()
+        ShellStore.pendingLaunchParams = null
+        ShellStore.streamState = "idle"
+        ShellStore.streamMessage = ""
+        poster.activateAt(Qt.point(poster.width / 2, DesktopTokens.px(8)))
+        check(AppController.route === "game-detail" && ShellStore.selectedGame.id === selected.id,
+            "Home card body no longer opens details")
+    }
     function run(windowHost) {
         host = windowHost
         const scaleIndex = Qt.application.arguments.indexOf("--details-scale")
@@ -84,6 +104,7 @@ OwnershipAcceptance {
         owner.catalogGames = [selected]
         owner.catalogState = "ready"
         owner.catalogComplete = true
+        if (owned && !reportFocusCheck) verifyHomePlay(selected)
         ShellStore.selectedGame = selected
         AppController.navigate("game-detail")
         if (reportFocusCheck) {

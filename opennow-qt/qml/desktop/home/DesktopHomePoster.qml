@@ -16,8 +16,18 @@ Item {
     readonly property string artwork: DesktopTokens.artworkUrl(game, false)
 
     signal activated()
+    signal playRequested()
     signal pointed()
 
+    function activateAt(position) {
+        const play = overlay.playButton
+        if (overlay.visible && play.contains(play.mapFromItem(root, position.x, position.y)))
+            root.playRequested()
+        else
+            root.activated()
+    }
+
+    objectName: "desktopHomePoster-" + String(game && game.id || "")
     width: tileWidth
     height: tileHeight
     z: highlighted || visual.scale !== 1 ? 20 : 0
@@ -54,6 +64,7 @@ Item {
     }
 
     DesktopPosterOverlay {
+        id: overlay
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -75,6 +86,6 @@ Item {
 
     TapHandler {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad | PointerDevice.Stylus | PointerDevice.TouchScreen
-        onTapped: root.activated()
+        onTapped: eventPoint => root.activateAt(eventPoint.position)
     }
 }

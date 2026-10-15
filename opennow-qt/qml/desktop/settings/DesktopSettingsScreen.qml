@@ -31,7 +31,7 @@ FocusScope {
         {label: qsTr("Audio"), detail: qsTr("Output and stream audio"), icon: "wave", page: 4, keywords: "sound audio volume output microphone mute focus"},
         {label: qsTr("Controls"), detail: qsTr("Pads, mouse, shortcuts"), icon: "controller", page: 5, keywords: "controller gyroscope steam sensitivity keyboard language shortcuts"},
         {label: qsTr("Recording"), detail: qsTr("Capture, replay, shortcuts"), icon: "image", page: 12, keywords: "recording capture clip replay buffer memory duration folder resolution fps quality shortcuts F12"},
-        {label: qsTr("Appearance"), detail: qsTr("Theme, accent, layout"), icon: "palette", page: 8, keywords: "theme accent interface language scale motion console sidebar tiles"},
+        {label: qsTr("Appearance"), detail: qsTr("Theme, accent, layout"), icon: "palette", page: 8, keywords: "theme accent interface language scale motion console sidebar tiles quit exit close confirm"},
         {label: qsTr("Console mode"), detail: qsTr("Gamepad-first interface"), icon: "controller", page: 9, keywords: "console fullscreen gamepad startup"},
         {label: qsTr("Account"), detail: qsTr("NVIDIA, stores, privacy"), icon: "person", page: 0, keywords: "profile subscription stores steam epic xbox ubisoft battle gaijin privacy"},
         {label: qsTr("About & support"), detail: qsTr("Updates, diagnostics"), icon: "info", page: 11, keywords: "version release update diagnostics onboarding introduction replay setup restart reset"}
@@ -262,8 +262,8 @@ FocusScope {
         }
         if (sub.isUnlimited)
             chips.push(qsTr("UNLIMITED"))
-        else if (sub.remainingHours !== undefined && sub.remainingHours !== null)
-            chips.push(qsTr("%1 h left").arg(Math.max(0, Math.round(Number(sub.remainingHours)))))
+        else if (ShellStore.remainingPlaytimeHours !== null)
+            chips.push(qsTr("%1 h left").arg(Math.round(ShellStore.remainingPlaytimeHours)))
         if (chips.length === 0)
             chips.push(String(sub.membershipTier || qsTr("Unavailable")).toUpperCase())
         return chips

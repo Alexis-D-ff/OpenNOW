@@ -28,8 +28,6 @@ FocusScope {
 
     function closeOverlay() {
         hoverExpanded = false
-        if (!collapsed)
-            collapseRequested(true)
     }
 
     Behavior on width {

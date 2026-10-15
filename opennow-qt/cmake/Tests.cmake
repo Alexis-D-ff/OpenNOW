@@ -1578,6 +1578,12 @@ if(BUILD_TESTING)
                 set_tests_properties("qml-window-close-${surface}-${mode}-${route}" PROPERTIES
                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
                 if(mode STREQUAL "windowed")
+                    add_test(NAME "qml-window-close-idle-opt-out-${surface}-${route}"
+                        COMMAND opennow-qt --smoke-test --allow-multiple-instances
+                            --${surface} --route ${route} --smoke-stream-exit
+                            --smoke-exit-window-close --smoke-exit-idle-opt-out --reduced-motion)
+                    set_tests_properties("qml-window-close-idle-opt-out-${surface}-${route}" PROPERTIES
+                        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
                     add_test(NAME "qml-authorized-quit-${surface}-${route}"
                         COMMAND opennow-qt --smoke-test --allow-multiple-instances
                             --${surface} --route ${route} --smoke-stream-exit

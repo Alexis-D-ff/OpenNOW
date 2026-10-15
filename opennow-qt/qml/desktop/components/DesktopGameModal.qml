@@ -212,8 +212,8 @@ FocusScope {
     readonly property var summaryCards: [
         {glyph:"monitor", title:resolutionText + " · " + fpsText, detail:codecText + " · " + String(streamSettings.colorQuality || "8bit_420").replace("_", " ")},
         {glyph:"globe", title:regionLabel(), detail:qsTr("Region selected at launch")},
-        {glyph:"clock", title:membershipText || qsTr("Membership"), detail:ShellStore.subscription && ShellStore.subscription.remainingHours !== undefined
-            ? qsTr("%1 h remaining").arg(Math.max(0, Number(ShellStore.subscription.remainingHours)).toFixed(1)) : qsTr("Entitlements checked at launch")}
+        {glyph:"clock", title:membershipText || qsTr("Membership"), detail:ShellStore.remainingPlaytimeHours !== null
+            ? qsTr("%1 h remaining").arg(ShellStore.remainingPlaytimeHours.toFixed(1)) : qsTr("Entitlements checked at launch")}
     ]
     function regionLabel() {
         const value = String(streamSettings.region || "")
