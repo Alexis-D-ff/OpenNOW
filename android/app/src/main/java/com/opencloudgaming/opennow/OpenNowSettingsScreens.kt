@@ -1101,6 +1101,13 @@ private fun SettingsContent(
                 }
             }
     CategorySettingsSection(selectedCategory, SettingsCategory.Stream, searchQuery, stringResource(R.string.settings_section_stream_connection), "stream", "connection", "network", "region", "session proxy", "proxy") {
+                SettingSwitch(
+                    label = stringResource(R.string.settings_browser_client_mode),
+                    checked = settings.stream.browserClientMode,
+                    description = stringResource(R.string.settings_browser_client_mode_desc),
+                ) { enabled ->
+                    viewModel.updateStreamSettings { s -> s.copy(browserClientMode = enabled) }
+                }
                 ChoiceRow(stringResource(R.string.settings_region), listOf(stringResource(R.string.option_auto)) + state.regions.map { it.name }, state.regions.firstOrNull { it.url == settings.stream.region }?.name ?: stringResource(R.string.option_auto)) { label ->
                     val url = state.regions.firstOrNull { it.name == label }?.url.orEmpty()
                     viewModel.updateStreamSettings { s -> s.copy(region = url) }

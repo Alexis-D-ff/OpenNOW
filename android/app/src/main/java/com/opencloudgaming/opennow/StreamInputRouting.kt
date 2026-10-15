@@ -289,9 +289,8 @@ object NativeStreamInputRouter {
     private val touchSlots = TouchSlotAllocator()
 
     fun attach(next: NativeStreamClient) {
+        if (client !== next) touchMouseState.reset(client)
         client = next
-        // Never carry an in-progress drag position into a different host session.
-        touchMouseState.forgetCursorPosition()
         decodedStreamResolution = 0 to 0
         resetPresentationTransform()
     }
@@ -301,7 +300,6 @@ object NativeStreamInputRouter {
             releaseInputForLifecycle("stream-detached")
             consumedControllerMenuHoldDeviceId = null
             client = null
-            touchMouseState.forgetCursorPosition()
             decodedStreamResolution = 0 to 0
             resetPresentationTransform()
         }

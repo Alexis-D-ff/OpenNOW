@@ -163,7 +163,7 @@ internal fun StreamScreen(
     val nativeTouchAvailable = !tvProfile && shouldUseNativeTouch(
         state.settings.androidTouch.effectiveNativeTouchMode(),
         game,
-        state.activeStreamSettings ?: state.settings.stream,
+        (state.activeStreamSettings ?: state.settings.stream).forProviderInput(state.authSession?.provider?.code),
     )
     val launchInputMode = state.streamInputModeAtLaunch ?: streamInputModeAtStart(
         nativeTouchAvailable = nativeTouchAvailable,
@@ -196,7 +196,7 @@ internal fun StreamScreen(
     val nativeTouchActive = !tvProfile && shouldUseNativeTouchForStream(
         state.settings.androidTouch.effectiveNativeTouchMode(),
         game,
-        state.activeStreamSettings ?: state.settings.stream,
+        (state.activeStreamSettings ?: state.settings.stream).forProviderInput(state.authSession?.provider?.code),
         preferVirtualController = preferVirtualController,
         preferKeyboardMouse = streamInputMode == StreamInputMode.KeyboardMouse,
     )

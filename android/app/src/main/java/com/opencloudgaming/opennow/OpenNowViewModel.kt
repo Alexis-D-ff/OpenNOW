@@ -4288,6 +4288,12 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
         _state.update { it.copy(loadingGames = true, error = null) }
         val baseUrl = effectiveStreamingBaseUrl(session)
         val token = session.tokens.idToken ?: session.tokens.accessToken
+        val libraryScopeIsCurrent = {
+            state.value.authSession?.let { current ->
+                current.user.userId == session.user.userId && current.provider == session.provider &&
+                    effectiveStreamingBaseUrl(current) == baseUrl
+            } == true
+        }
         val initialCatalogSearch = state.value.catalogSearch
         val initialCatalogSortId = state.value.catalogSortId
         val initialCatalogFilterIds = state.value.catalogFilterIds
@@ -4350,13 +4356,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
         val hasScopedCatalogQuery =
             isScopedCatalogQuery(initialCatalogSearch, initialCatalogSortId, initialCatalogFilterIds)
         if (cachedMain != null || cachedLibrary != null || cachedCatalog != null || cachedNewlyAdded != null) {
-            val cachedMergedLibrary = withContext(Dispatchers.Default) {
-                mergeKnownLibraryGames(
-                    cachedLibrary.orEmpty(),
-                    cachedMain.orEmpty(),
-                    cachedCatalog?.games.orEmpty(),
-                )
-            }
             _state.update {
                 val nextGames = cachedCatalog?.games ?: if (hasScopedCatalogQuery) {
                     emptyList()
@@ -4376,7 +4375,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                     newlyAddedGames = cachedGfnThursdayGames.ifEmpty {
                         cachedNewlyAdded?.games?.ifEmpty { it.newlyAddedGames } ?: it.newlyAddedGames
                     },
-                    libraryGames = cachedMergedLibrary.ifEmpty { cachedLibrary ?: it.libraryGames },
+                    libraryGames = cachedLibrary ?: it.libraryGames,
                     catalogResult = nextCatalogResult,
                     loadingGames = catalogStillLoadingAfterCache(hasGamesToShow, keepRefreshVisibleWithCache),
                     catalogQueryLoading = !hasGamesToShow,
@@ -4478,10 +4477,10 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     val libraryDeferred = async(Dispatchers.IO) {
-                        catalogRepository.fetchLibraryGames(token, baseUrl, includeSupplementalPublicVariants)
+                        catalogRepository.fetchLibraryGames(token, baseUrl, libraryScopeIsCurrent)
                             .also { library ->
                                 _state.update { current ->
-                                    if (current.authSession?.user?.userId == session.user.userId) {
+                                    if (libraryScopeIsCurrent()) {
                                         current.copy(libraryGames = library)
                                     } else {
                                         current
@@ -4533,9 +4532,8 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     val library = libraryDeferred.await()
-                    val mergedLibrary = withContext(Dispatchers.Default) {
-                        mergeKnownLibraryGames(library, main, catalog.games)
-                    }
+                    // Account-library pages own membership; Home and Store are separate views.
+                    val mergedLibrary = library
                     recordDebugEvent(
                         "catalog",
                         "Library counts raw=${library.size} main=${main.size} mainOwned=${main.count(::isGameInLibrary)} " +
@@ -4543,6 +4541,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                             "gfnThursday=${gfnThursdayGames.size} merged=${mergedLibrary.size} " +
                             "activeFilters=${state.value.libraryFilterIds.sorted().joinToString(",").ifBlank { "none" }}",
                     )
+                    check(libraryScopeIsCurrent()) { "The catalog changed. Restart the library refresh." }
                     withContext(Dispatchers.IO) {
                         catalogCacheStore.saveMainGames(session.user.userId, baseUrl, main)
                         catalogCacheStore.saveLibraryGames(session.user.userId, baseUrl, mergedLibrary)
@@ -4570,7 +4569,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
             }.onSuccess { (library, catalog, newlyAddedCatalog) ->
                 _state.update { current ->
                     if (
-                        current.authSession?.user?.userId == session.user.userId &&
+                        libraryScopeIsCurrent() &&
                         current.catalogSearch == initialCatalogSearch &&
                         current.catalogSortId == initialCatalogSortId &&
                         current.catalogFilterIds == initialCatalogFilterIds
@@ -4712,9 +4711,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             }.onSuccess { result ->
-                val mergedLibrary = withContext(Dispatchers.Default) {
-                    mergeKnownLibraryGames(state.value.libraryGames, result.games)
-                }
                 withContext(Dispatchers.IO) {
                     catalogCacheStore.saveCatalog(
                         userId = auth.user.userId,
@@ -4747,7 +4743,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                             loadingGames = false,
                             catalogQueryLoading = false,
                             games = result.games,
-                            libraryGames = mergedLibrary.ifEmpty { it.libraryGames },
                         )
                     } else {
                         it
@@ -4982,7 +4977,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
         val nativeTouchAvailable = !androidTvProfile && shouldUseNativeTouch(
             _state.value.settings.androidTouch.effectiveNativeTouchMode(),
             game,
-            settings,
+            settings.forProviderInput(_state.value.authSession?.provider?.code),
         )
         val connection = connectedPhysicalKeyboardMouse()
         val mode = chooseStreamInputModeAtStart(
@@ -5304,7 +5299,7 @@ private fun Throwable.debugMessage(): String {
 }
 
 private fun StreamSettings.debugSummary(): String =
-    "res=$resolution aspect=$aspectRatio fps=$fps bitrate=$maxBitrateMbps codec=$codec color=${colorQuality.name} hdr=$hdrEnabled l4s=$enableL4S nvst=$experimentalNvst sharp=$streamSharpeningEnabled"
+    "res=$resolution aspect=$aspectRatio fps=$fps bitrate=$maxBitrateMbps codec=$codec color=${colorQuality.name} hdr=$hdrEnabled l4s=$enableL4S nvst=$experimentalNvst browser=$browserClientMode sharp=$streamSharpeningEnabled"
 
 private fun StreamRuntimeStats.hasDebugValues(): Boolean =
     bitrateKbps != null ||

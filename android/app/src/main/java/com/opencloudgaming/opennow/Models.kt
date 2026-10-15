@@ -218,6 +218,8 @@ data class StreamSettings(
     val sessionProxyUrl: String = "",
     val enableL4S: Boolean = false,
     val experimentalNvst: Boolean = false,
+    /** Opt in to the browser CloudMatch identity for the next NVIDIA session. */
+    val browserClientMode: Boolean = false,
     val experimentalDynamicNetworkAdjustment: Boolean = false,
     val experimentalDynamicMinimumBitrateMbps: Int = 5,
     val mouseSensitivity: Float = 1f,
@@ -243,6 +245,7 @@ internal fun StreamSettings.withUserStreamOptionsFrom(source: StreamSettings): S
         videoOutput = source.videoOutput,
         microphoneDeviceId = source.microphoneDeviceId,
         experimentalNvst = source.experimentalNvst,
+        browserClientMode = source.browserClientMode,
         experimentalDynamicNetworkAdjustment = source.experimentalDynamicNetworkAdjustment,
         experimentalDynamicMinimumBitrateMbps = source.experimentalDynamicMinimumBitrateMbps,
         recordingBitrateMbps = source.recordingBitrateMbps,
@@ -988,11 +991,12 @@ internal fun streamSettingsSessionSignature(settings: StreamSettings): String {
     ).joinToString(";").let { signature ->
         val withControllers = if (settings.multiControllerEnabled) "$signature;controllers=4" else signature
         val withTransport = if (settings.experimentalNvst) "$withControllers;transport=nvst" else withControllers
+        val withClient = if (settings.browserClientMode) "$withTransport;client=browser" else withTransport
         if (settings.experimentalDynamicNetworkAdjustment) {
             val minimumMbps = StreamNetworkAdaptation.bitrateRange(compatible).minimumKbps / 1000
-            "$withTransport;dynamic=1;minBitrate=$minimumMbps"
+            "$withClient;dynamic=1;minBitrate=$minimumMbps"
         } else {
-            withTransport
+            withClient
         }
     }
 }
@@ -2402,9 +2406,11 @@ internal fun StreamSettings.lowPowerPerformanceWarningReasons(report: RuntimeCod
 private fun StreamSettings.withoutAndroidTvSharpening(report: RuntimeCodecReport?): StreamSettings =
     if (
         report?.androidTvProfile == true &&
-        report.constrainedRuntimeProfile == false &&
         streamSharpeningEnabled
     ) {
+        // Constrained TVs need the same protection: sharpening also forces the decoder
+        // through EGL textures instead of the direct MediaCodec surface. This is an
+        // effective launch profile only; the saved user preference remains untouched.
         copy(streamSharpeningEnabled = false)
     } else {
         this
