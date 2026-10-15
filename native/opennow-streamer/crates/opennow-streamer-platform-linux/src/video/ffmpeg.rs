@@ -1478,6 +1478,20 @@ mod tests {
         assert!((2..=4).contains(&threads));
     }
 
+    #[cfg(feature = "ffmpeg-bundled")]
+    #[test]
+    fn bundled_vaapi_includes_dmabuf_export_support() {
+        let configuration = unsafe { std::ffi::CStr::from_ptr(ffi::avutil_configuration()) }
+            .to_str()
+            .unwrap();
+        assert!(
+            configuration
+                .split_whitespace()
+                .any(|option| option == "--enable-libdrm"),
+            "bundled VAAPI requires DRM PRIME export: {configuration}"
+        );
+    }
+
     #[test]
     fn software_decoder_opens_with_low_delay_and_a_bounded_thread_pool() {
         let format = StreamFormat::video_default(64, 64).unwrap();

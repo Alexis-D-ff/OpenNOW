@@ -19,6 +19,7 @@ ffmpeg-bundled = [
     "ffmpeg-sys-next/build-nvdec",
     "ffmpeg-sys-next/build-vulkan",
     "ffmpeg-sys-next/build-vaapi",
+    "ffmpeg-sys-next/build-drm",
 ]
 
 [dependencies]
