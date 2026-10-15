@@ -441,12 +441,20 @@ FocusScope {
             }
         }
         Flickable {
+            id: railFlick
             width: parent.width
             height: root.compactNavigation ? navigation.implicitHeight : Math.max(0, root.height - settingsRail.y - settingsSearch.height - 36)
             contentWidth: width
             contentHeight: navigation.implicitHeight
             clip: true
             boundsBehavior: Flickable.StopAtBounds
+            // Entry heights scale with the interface scale, so the rail can be
+            // taller than its viewport. AsNeeded also hides the bar while the
+            // user is not scrolling, which would leave the overflow invisible.
+            ScrollBar.vertical: ScrollBar {
+                objectName: "settingsRailScroll"
+                policy: railFlick.contentHeight > railFlick.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            }
             Flow {
                 id: navigation
                 width: parent.width
@@ -465,6 +473,20 @@ FocusScope {
                         padding: 12
                         hoverEnabled: true
                         onClicked: root.selectedSection = modelData.page
+                        // Keyboard focus must not land on an entry the rail is
+                        // scrolled away from. Flickable.ensureVisible only accepts
+                        // a direct child of its contentItem, and these buttons sit
+                        // inside the navigation Flow, so scroll explicitly.
+                        onFocusChanged: if (focus) {
+                            const top = mapToItem(railFlick.contentItem, 0, 0).y
+                            const bottom = top + height
+                            if (top < railFlick.contentY) {
+                                railFlick.contentY = Math.max(0, top - DesktopTokens.px(8))
+                            } else if (bottom > railFlick.contentY + railFlick.height) {
+                                railFlick.contentY = Math.min(railFlick.contentHeight - railFlick.height,
+                                                             bottom - railFlick.height + DesktopTokens.px(8))
+                            }
+                        }
                         background: Rectangle {
                             radius: 16
                             color: root.selectedGroup === index ? DesktopTokens.raisedStrong : parent.hovered ? DesktopTokens.raised : "transparent"

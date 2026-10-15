@@ -586,8 +586,18 @@ if(BUILD_TESTING)
             --smoke-accounts 8 --smoke-account-state switch-error --smoke-settings-scale 1.25
             --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
             --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-error-960.png)
+    add_test(NAME qml-settings-rail-fit-1440
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route settings
+            --smoke-paper-design --smoke-settings-scale 1.25 --smoke-settings-rail-check
+            --smoke-width 1440 --smoke-height 900 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/settings-rail-fit-1440.png)
+    add_test(NAME qml-settings-rail-fit-1920
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route settings
+            --smoke-paper-design --smoke-settings-scale 1.25 --smoke-settings-rail-check
+            --smoke-width 1920 --smoke-height 1080 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/settings-rail-fit-1920.png)
     set_tests_properties(qml-account-switch-confirm-light qml-account-picker-fit-960 qml-account-switcher-fit-960
-        qml-account-picker-error-960
+        qml-account-picker-error-960 qml-settings-rail-fit-1440 qml-settings-rail-fit-1920
         PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     add_test(NAME qml-console-settings
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --console

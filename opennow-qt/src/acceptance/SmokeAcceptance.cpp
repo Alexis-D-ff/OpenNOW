@@ -49,6 +49,82 @@ static QQuickItem *findVisualChild(QQuickItem *item, const QString &name)
     return nullptr;
 }
 
+static void collectSettingsRailEntries(QQuickItem *item, QList<QQuickItem *> &found)
+{
+    if (!item)
+        return;
+    if (item->objectName().startsWith(u"settingsNavigation-"_s))
+        found.append(item);
+    const auto children = item->childItems();
+    for (auto *child : children)
+        collectSettingsRailEntries(child, found);
+}
+
+// The rail is a clipped Flickable whose entries scale with the interface scale,
+// so it can be taller than its viewport. This asserts that an overflowing rail
+// offers a scrollbar, that every entry is inside the viewport once scrolled to
+// the end, and that a focused entry is pulled into view.
+static bool settingsRailFits(QQuickWindow *window)
+{
+    auto *screen = window ? window->findChild<QQuickItem *>(u"desktopSettingsScreen"_s) : nullptr;
+    if (!screen) {
+        qCritical("Settings surface was not mounted for the rail check");
+        return false;
+    }
+    if (!screen->isVisible()) {
+        qCritical("Settings rail check ran while the settings surface was hidden");
+        return false;
+    }
+    QList<QQuickItem *> buttons;
+    collectSettingsRailEntries(screen, buttons);
+    if (buttons.isEmpty()) {
+        qCritical("Settings rail rendered no entries");
+        return false;
+    }
+    QQuickItem *rail = nullptr;
+    for (auto *parent = buttons.first()->parentItem(); parent; parent = parent->parentItem()) {
+        if (parent->property("clip").toBool() && parent->property("contentHeight").isValid()) {
+            rail = parent;
+            break;
+        }
+    }
+    if (!rail) {
+        qCritical("Settings rail viewport was not found");
+        return false;
+    }
+    if (rail->property("contentHeight").toReal() <= rail->height() + 1)
+        return true;
+    auto *bar = findVisualChild(rail, u"settingsRailScroll"_s);
+    if (!bar || !bar->isVisible()) {
+        qCritical("Settings rail overflows its viewport with no scroll affordance: content %f viewport %f",
+                  rail->property("contentHeight").toReal(), rail->height());
+        return false;
+    }
+    const auto viewport = sceneRect(rail);
+    const auto inside = [&viewport](const QRectF &rect) {
+        return rect.top() >= viewport.top() - 1 && rect.bottom() <= viewport.bottom() + 1;
+    };
+    rail->setProperty("contentY", 0.0);
+    if (!inside(sceneRect(buttons.first()))) {
+        qCritical("Settings rail clipped its first entry: %s", qPrintable(buttons.first()->objectName()));
+        return false;
+    }
+    rail->setProperty("contentY", rail->property("contentHeight").toReal() - rail->height());
+    if (!inside(sceneRect(buttons.last()))) {
+        qCritical("Settings rail clipped its last entry at the end of the scroll: %s",
+                  qPrintable(buttons.last()->objectName()));
+        return false;
+    }
+    rail->setProperty("contentY", 0.0);
+    buttons.last()->forceActiveFocus();
+    if (!inside(sceneRect(buttons.last()))) {
+        qCritical("Settings rail did not reveal the focused entry: %s contentY=%f",
+                  qPrintable(buttons.last()->objectName()), rail->property("contentY").toReal());
+        return false;
+    }
+    return true;
+}
+
 static bool accountChromeFits(QQuickWindow *window)
 {
     if (!window)
@@ -1124,6 +1200,10 @@ int AcceptanceSession::startSmokeWorkload()
             }
             auto *window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
             if (m_arguments.contains(u"--smoke-account-chrome-check"_s) && !accountChromeFits(window)) {
+                m_application.exit(EXIT_FAILURE);
+                return;
+            }
+            if (m_arguments.contains(u"--smoke-settings-rail-check"_s) && !settingsRailFits(window)) {
                 m_application.exit(EXIT_FAILURE);
                 return;
             }
