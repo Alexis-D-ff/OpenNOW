@@ -342,3 +342,109 @@ fn generic_nack_sender_keeps_fixed_retries_even_with_a_live_rtt() {
     }
     assert_eq!(sent_at, [0, 4, 8]);
 }
+
+#[test]
+fn frame_invalidation_uses_the_idr_control_channel_once_and_retries_rejected_sends() {
+    let (mut local, mut remote, channels, _) = connect_bundle_pair();
+    let now = Instant::now() + Duration::from_secs(1);
+    receive_messages(&mut local, &mut remote, now);
+    let feedback = NvstFeedbackState::default();
+    feedback.frame_invalidation.queue((41, 43));
+    send_pending_frame_invalidation(&feedback, now, &mut local, channels);
+    send_pending_frame_invalidation(&feedback, now, &mut local, channels);
+    assert_eq!(
+        receive_messages(&mut local, &mut remote, now),
+        vec![(
+            "control_channel_reliable".to_owned(),
+            frame_invalidation_range(41, 43, 0).encoded(),
+        )]
+    );
+    assert!(feedback.frame_invalidation.stats().starts_with("rfiSent=1 "));
+    assert!(!feedback.keyframe_request_pending());
+
+    local
+        .direct_api()
+        .close_data_channel(channels.control_reliable);
+    receive_messages(&mut local, &mut remote, now);
+    feedback.frame_invalidation.queue((44, 50));
+    send_pending_frame_invalidation(&feedback, now, &mut local, channels);
+    assert!(receive_messages(&mut local, &mut remote, now).is_empty());
+    assert_eq!(feedback.frame_invalidation.take(), Some((44, 50)));
+    assert!(feedback.frame_invalidation.stats().starts_with("rfiSent=1 "));
+}
+
+#[test]
+fn extending_a_nack_keeps_each_packets_original_deadline_and_attempts() {
+    let feedback = NvstFeedbackState::default();
+    let now = Instant::now();
+    feedback.request_nack(10, 11, now);
+    assert_eq!(feedback.take_nack(now, None), Some((10, 11)));
+    feedback.request_nack(11, 12, now + Duration::from_millis(40));
+    assert_eq!(
+        feedback.take_nack(now + Duration::from_millis(40), None),
+        Some((10, 12))
+    );
+    assert!(feedback.resolve_nack(11));
+    assert_eq!(
+        feedback.take_nack(now + NACK_TRACKING_TIMEOUT, None),
+        Some((12, 12))
+    );
+    assert!(!feedback.resolve_nack(10));
+}
+
+#[test]
+fn nack_overflow_requests_idr_without_evicting_older_losses() {
+    let feedback = NvstFeedbackState::default();
+    let now = Instant::now();
+    feedback.request_nack(0, u64::MAX, now);
+    assert_eq!(
+        feedback.pending_nacks.lock().unwrap().len(),
+        MAX_PENDING_NACK_PACKETS
+    );
+    assert!(feedback.keyframe_request_pending());
+    assert_eq!(feedback.nack_overflows.load(Ordering::Relaxed), 1);
+    assert_eq!(feedback.take_nack(now, None), Some((0, 63)));
+    for index in (1..MAX_PENDING_NACK_PACKETS as u64).step_by(2) {
+        feedback.resolve_nack(index);
+    }
+    assert_eq!(
+        feedback.pending_nacks.lock().unwrap().len(),
+        MAX_PENDING_NACK_PACKETS / 2
+    );
+    feedback.request_nack(
+        MAX_PENDING_NACK_PACKETS as u64,
+        MAX_PENDING_NACK_PACKETS as u64 + 2048,
+        now,
+    );
+    assert_eq!(
+        feedback.pending_nacks.lock().unwrap().len(),
+        MAX_PENDING_NACK_PACKETS
+    );
+}
+
+#[test]
+fn resolving_holes_and_readding_ranges_does_not_reset_nack_attempts() {
+    let feedback = NvstFeedbackState::default();
+    let now = Instant::now();
+    feedback.request_nack(0, 128, now);
+    for attempt in 0..MAX_NACK_ATTEMPTS {
+        let at = now + NACK_RETRY_INTERVAL * u32::from(attempt);
+        assert_eq!(feedback.take_nack(at, None), Some((0, 63)));
+        assert_eq!(feedback.take_nack(at, None), Some((64, 127)));
+        assert_eq!(feedback.take_nack(at, None), Some((128, 128)));
+    }
+    assert!(feedback.resolve_nack(65));
+    feedback.request_nack(64, 129, now + Duration::from_millis(20));
+    assert_eq!(
+        feedback.take_nack(now + Duration::from_millis(20), None),
+        Some((65, 65))
+    );
+    assert_eq!(
+        feedback.take_nack(now + Duration::from_millis(20), None),
+        Some((129, 129))
+    );
+    assert_eq!(
+        feedback.take_nack(now + Duration::from_millis(20), None),
+        None
+    );
+}

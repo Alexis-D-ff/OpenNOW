@@ -8,10 +8,15 @@
 #include <QVariantList>
 
 #include <array>
+#include <memory>
 
 #include <SDL3/SDL.h>
 
 #include "input/SdlDeviceClaim.h"
+#include "input/GenericHidWire.h"
+
+class GenericHidInput;
+class GenericHidBackend;
 
 class ControllerInput final : public QObject
 {
@@ -19,12 +24,19 @@ class ControllerInput final : public QObject
     Q_PROPERTY(int controllerCount READ controllerCount NOTIFY controllerCountChanged)
     Q_PROPERTY(QVariantList controllers READ controllers NOTIFY controllersChanged)
     Q_PROPERTY(QVariantList availableControllers READ availableControllers NOTIFY availableControllersChanged)
+    Q_PROPERTY(QVariantList flightDevices READ flightDevices NOTIFY flightDevicesChanged)
+    Q_PROPERTY(QVariantList supportedFlightDevices READ supportedFlightDevices CONSTANT)
+    Q_PROPERTY(bool forwardFlightControls READ forwardFlightControls WRITE setForwardFlightControls NOTIFY forwardFlightControlsChanged)
     Q_PROPERTY(quint32 inputControllerId READ inputControllerId WRITE setInputControllerId NOTIFY inputControllerIdChanged)
     Q_PROPERTY(bool shellCaptureEnabled READ shellCaptureEnabled WRITE setShellCaptureEnabled NOTIFY shellCaptureEnabledChanged)
     Q_PROPERTY(bool inputSuspended READ inputSuspended WRITE setInputSuspended NOTIFY inputSuspendedChanged)
+    Q_PROPERTY(bool shellInputBlocked READ shellInputBlocked WRITE setShellInputBlocked NOTIFY shellInputBlockedChanged)
+    Q_PROPERTY(bool shellInputDraining READ shellInputDraining NOTIFY shellInputDrainingChanged)
     Q_PROPERTY(int leftStickDeadzone READ leftStickDeadzone WRITE setLeftStickDeadzone NOTIFY leftStickDeadzoneChanged)
     Q_PROPERTY(int rightStickDeadzone READ rightStickDeadzone WRITE setRightStickDeadzone NOTIFY rightStickDeadzoneChanged)
     Q_PROPERTY(int vibrationIntensity READ vibrationIntensity WRITE setVibrationIntensity NOTIFY vibrationIntensityChanged)
+    Q_PROPERTY(QVariantMap controllerProfiles READ controllerProfiles WRITE setControllerProfiles NOTIFY controllerProfilesChanged)
+    Q_PROPERTY(bool leftStickNavigationEnabled READ leftStickNavigationEnabled WRITE setLeftStickNavigationEnabled NOTIFY leftStickNavigationEnabledChanged)
 
 public:
     static constexpr quint32 syntheticControllerScanCode = 0x4f504e57;
@@ -53,39 +65,67 @@ public:
         quint64 observedAtUs = 0;
     };
 
-    explicit ControllerInput(QObject *parent = nullptr);
+    explicit ControllerInput(QObject *parent = nullptr, std::shared_ptr<GenericHidBackend> hidBackend = {});
     ~ControllerInput() override;
 
     [[nodiscard]] int controllerCount() const;
     [[nodiscard]] QVariantList controllers() const;
     [[nodiscard]] QVariantList availableControllers() const;
+    [[nodiscard]] QVariantList flightDevices() const { return m_flightDevices; }
+    [[nodiscard]] bool forwardFlightControls() const { return m_forwardFlightControls; }
+    void setForwardFlightControls(bool enabled);
+    [[nodiscard]] QVariantList supportedFlightDevices() const;
     [[nodiscard]] quint32 inputControllerId() const;
     void setInputControllerId(quint32 id);
     [[nodiscard]] bool shellCaptureEnabled() const;
     void setShellCaptureEnabled(bool enabled);
     [[nodiscard]] bool inputSuspended() const;
     void setInputSuspended(bool suspended);
+    [[nodiscard]] bool shellInputBlocked() const { return m_shellInputBlocked; }
+    [[nodiscard]] bool shellInputDraining() const { return m_shellInputDraining; }
+    void setShellInputBlocked(bool blocked);
     [[nodiscard]] int leftStickDeadzone() const;
     [[nodiscard]] int rightStickDeadzone() const;
     [[nodiscard]] int vibrationIntensity() const;
     void setLeftStickDeadzone(int percent);
     void setRightStickDeadzone(int percent);
     void setVibrationIntensity(int percent);
+    [[nodiscard]] QVariantMap controllerProfiles() const { return m_controllerProfiles; }
+    void setControllerProfiles(const QVariantMap &profiles);
+    [[nodiscard]] bool leftStickNavigationEnabled() const { return m_leftStickNavigationEnabled; }
+    void setLeftStickNavigationEnabled(bool enabled);
+    Q_INVOKABLE QVariantMap stickSample(quint32 instanceId) const;
+    Q_INVOKABLE bool testRumble(quint32 instanceId);
+    [[nodiscard]] static QString profileKey(quint16 vendor, quint16 product, const char *serial, SDL_GUID guid);
     void playRumble(quint8 controllerId, quint16 lowFrequency, quint16 highFrequency, quint32 durationMs,
                     quint64 sourceIncarnation = 0);
     void stopRumble();
     [[nodiscard]] QList<SdlDeviceClaim> deviceClaims() const;
+    [[nodiscard]] QList<GenericHidDeviceClaim> genericHidClaims() const;
+
+public slots:
+    void setGenericHidAdmission(quint8 slot, quint64 incarnation, GenericHidAdmission admission);
+    void resetGenericHidAdmissions();
+    void handleGenericHidOutput(const GenericHidReport &report);
+    void stopGenericHidOutput();
 
 signals:
     void controllerCountChanged(int count);
     void controllersChanged();
     void availableControllersChanged();
+    void flightDevicesChanged();
+    void forwardFlightControlsChanged();
     void inputControllerIdChanged();
     void shellCaptureEnabledChanged();
     void inputSuspendedChanged();
+    void shellInputBlockedChanged();
+    void shellInputDrainingChanged();
+    void shellInputSkipRequested();
     void leftStickDeadzoneChanged();
     void rightStickDeadzoneChanged();
     void vibrationIntensityChanged();
+    void controllerProfilesChanged();
+    void leftStickNavigationEnabledChanged();
     void controllerActivity();
     void controllerActivityDetailed(const QString &device, const QString &control, int value);
     void gamepadSnapshot(quint8 controllerId, quint16 bitmap, quint16 buttons,
@@ -93,6 +133,8 @@ signals:
                          qint16 leftStickX, qint16 leftStickY,
                          qint16 rightStickX, qint16 rightStickY);
     void deviceClaimsChanged();
+    void genericDeviceClaimsChanged();
+    void genericHidReport(const GenericHidReport &report);
     void sonySnapshot(const ControllerInput::SonySnapshot &snapshot);
     void localActionRequested(quint32 action);
 
@@ -105,6 +147,12 @@ private:
         qint64 pressedAt = 0;
         qint64 repeatedAt = 0;
         int key = 0;
+    };
+
+    struct ShellKeyPress {
+        QPointer<QObject> target;
+        qint64 pressedAt = 0;
+        qint64 repeatedAt = 0;
     };
 
     struct GamepadSlot {
@@ -121,10 +169,15 @@ private:
         quint64 incarnation = 0;
         quint16 vendor = 0;
         quint16 product = 0;
+        QString profileKey;
+        bool hasSerial = false;
+        int leftDeadzone = 5;
+        int rightDeadzone = 5;
+        int vibration = 100;
         bool touchpadClick = false;
         bool guideLatched = false;
         std::array<SonyContact, 2> contacts{};
-        QHash<int, QPointer<QObject>> shellKeys;
+        QHash<int, ShellKeyPress> shellKeys;
         std::array<RepeatingDirection, 4> directions{{
             {false, 0, 0, Qt::Key_Left}, {false, 0, 0, Qt::Key_Right},
             {false, 0, 0, Qt::Key_Up}, {false, 0, 0, Qt::Key_Down}}};
@@ -156,15 +209,23 @@ private:
     void publishConnectedGamepads(bool neutral = false);
     void updateSlotSnapshot(int slot);
     void updatePollInterval();
+    void updateShellInputDrain();
     [[nodiscard]] bool isSonySlot(int slotIndex) const;
     void refreshControllerMetadata();
+    void refreshFlightDevices();
+    void applySlotTuning();
+    void tuneSlot(GamepadSlot &slot) const;
     static quint16 buttonMask(Uint8 button);
     static QPair<qint16, qint16> radialDeadzone(qint16 x, qint16 y, int percent);
     static quint8 triggerValue(qint16 value);
 
     QTimer m_pollTimer;
+    std::unique_ptr<GenericHidInput> m_genericHid;
     QVariantList m_controllerMetadata;
     QVariantList m_availableControllerMetadata;
+    QVariantList m_flightDevices;
+    QHash<quint64, GenericHidAdmission> m_genericHidAdmissions;
+    bool m_forwardFlightControls = true;
     SDL_JoystickID m_inputControllerId = 0;
     QElapsedTimer m_clock;
     QHash<SDL_JoystickID, int> m_gamepadSlots;
@@ -172,9 +233,13 @@ private:
     bool m_sdlReady = false;
     bool m_shellCaptureEnabled = true;
     bool m_inputSuspended = false;
+    bool m_shellInputBlocked = false;
+    bool m_shellInputDraining = false;
     int m_leftStickDeadzone = 5;
     int m_rightStickDeadzone = 5;
     int m_vibrationIntensity = 100;
+    QVariantMap m_controllerProfiles;
+    bool m_leftStickNavigationEnabled = true;
     qint64 m_lastControllerMetadataAt = 0;
     qint64 m_lastGamepadSnapshotAt = 0;
     quint64 m_nextIncarnation = 1;

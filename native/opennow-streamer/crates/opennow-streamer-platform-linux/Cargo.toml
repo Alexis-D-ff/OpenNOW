@@ -19,6 +19,7 @@ ffmpeg-bundled = [
     "ffmpeg-sys-next/build-nvdec",
     "ffmpeg-sys-next/build-vulkan",
     "ffmpeg-sys-next/build-vaapi",
+    "ffmpeg-sys-next/build-drm",
 ]
 
 [dependencies]
@@ -36,6 +37,7 @@ raw-window-handle = { version = "0.6", optional = true }
 thiserror = "2"
 
 [dev-dependencies]
+anyhow = "1"
 # The Linux backend loads libopus at runtime; tests use the workspace encoder to
 # produce packets the runtime-loaded decoder can conceal around.
 opus.workspace = true

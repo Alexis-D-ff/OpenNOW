@@ -4,7 +4,10 @@ use crate::{DecodedVideoFrame, EncodedVideoFrame, Result, StreamFormat, VideoCod
 
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg;
+mod mediacodec;
 mod v4l2;
+pub(crate) use mediacodec::MediaCodecDecoder;
+pub use mediacodec::{MEDIACODEC_MAX_HEIGHT, MEDIACODEC_MAX_WIDTH, probe_mediacodec};
 #[cfg(any(feature = "ffmpeg", test))]
 #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
 mod v4l2_request;
@@ -79,6 +82,9 @@ pub(crate) fn probe_ffmpeg_software(_: VideoCodec) -> std::result::Result<String
 }
 
 pub(crate) trait VideoDecoder {
+    fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn decode(&mut self, frame: &EncodedVideoFrame) -> Result<Vec<DecodedVideoFrame>>;
     fn poll(&mut self) -> Result<Vec<DecodedVideoFrame>> {
         Ok(Vec::new())

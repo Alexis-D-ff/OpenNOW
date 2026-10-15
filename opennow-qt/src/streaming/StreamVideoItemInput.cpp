@@ -909,9 +909,53 @@ void StreamVideoItem::submitAbsoluteMouse(const QPointF &position)
         static_cast<quint16>(std::min(coordinates.height(), 65535)));
 }
 
+bool StreamVideoItem::NativeWindowMoveLoopFilter::nativeEventFilter(
+    const QByteArray &eventType, void *message, qintptr *result)
+{
+#if defined(Q_OS_WIN)
+    if (eventType != "windows_generic_MSG") return false;
+    const auto *msg = static_cast<const MSG *>(message);
+    const auto command = msg->wParam & 0xfff0;
+    if (msg->message != WM_SYSCOMMAND || (command != SC_MOVE && command != SC_SIZE))
+        return false;
+    const auto *window = m_item.window();
+    if (!window || !window->handle() || msg->hwnd != reinterpret_cast<HWND>(window->winId())
+        || !m_item.isVisible() || !s_nativeRuntime
+        || !s_nativeRuntime->running())
+        return false;
+    const QPointer<StreamVideoItem> item(&m_item);
+    const auto hwnd = msg->hwnd;
+    const auto wParam = msg->wParam;
+    const auto lParam = msg->lParam;
+    item->setNativeWindowMoveLoop(true);
+    if (wParam & 0x000f)
+        SetCursorPos(static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+    const auto handled = DefWindowProcW(hwnd, WM_SYSCOMMAND, wParam, lParam);
+    if (result) *result = handled;
+    if (item) item->setNativeWindowMoveLoop(false);
+    return true;
+#else
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+    return false;
+#endif
+}
+
+void StreamVideoItem::setNativeWindowMoveLoop(bool active)
+{
+    if (m_nativeWindowMoveLoop == active) return;
+    m_nativeWindowMoveLoop = active;
+    if (active) {
+        syncCaptureState();
+        return;
+    }
+    QMetaObject::invokeMethod(this, &StreamVideoItem::resynchronizeInput, Qt::QueuedConnection);
+}
+
 void StreamVideoItem::syncCaptureState()
 {
-    auto desired = m_inputEnabled && isVisible() && hasActiveFocus()
+    auto desired = m_inputEnabled && !m_nativeWindowMoveLoop && isVisible() && hasActiveFocus()
         && window() && window()->isActive() && s_nativeRuntime && s_nativeRuntime->running()
         && s_nativeRuntime->inputAllowed();
     if (m_captureActive && (!desired || (WaylandPointerCapture::isWayland()
@@ -1024,8 +1068,10 @@ void StreamVideoItem::updateCursorConfinement()
         releaseCursorConfinement();
         return;
     }
-    const auto first = mapToItem(content, QPointF(0, 0));
-    const auto second = mapToItem(content, QPointF(width(), height()));
+    const auto viewport = aspectFitRect(m_videoSize, QSize(qRound(width()), qRound(height())));
+    const auto first = mapToItem(content, QPointF(viewport.x(), viewport.y()));
+    const auto second = mapToItem(content, QPointF(viewport.x() + viewport.width(),
+                                                viewport.y() + viewport.height()));
     const QRectF itemRect(QPointF(std::min(first.x(), second.x()),
                                  std::min(first.y(), second.y())),
                           QPointF(std::max(first.x(), second.x()),
@@ -1100,7 +1146,8 @@ void StreamVideoItem::updateLocalCursor()
         unsetCursor();
         return;
     }
-    if (m_relativeMouse || (m_serverCursorComposited && m_manualRelativeMouse != false)) {
+    if (m_relativeMouse || (m_serverCursorComposited && !m_usesMacPointerCapture
+                           && m_manualRelativeMouse != false)) {
         setCursor(Qt::BlankCursor);
         return;
     }
@@ -1113,7 +1160,8 @@ void StreamVideoItem::resetRemoteCursor()
     m_remoteCursorVisible = false;
     m_serverCursorComposited = s_nativeRuntime ? s_nativeRuntime->serverCursorComposited() : true;
     m_remoteCursor = QCursor();
-    setRelativeMouse(m_manualRelativeMouse.value_or(false));
+    setRelativeMouse(m_manualRelativeMouse.value_or(
+        s_nativeRuntime && s_nativeRuntime->defaultRelativeMouse()));
     updateLocalCursor();
 }
 

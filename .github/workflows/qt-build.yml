@@ -123,10 +123,10 @@ jobs:
         shell: bash
         run: sudo python3 .github/scripts/prepare-ubuntu-apt-https.py
 
-      - name: Enable Windows Media Foundation
+      - name: Start Windows Media Foundation installation
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .github/scripts/ensure-windows-media-foundation.ps1
+        run: .github/scripts/windows-media-foundation-background.ps1 Start
 
       - name: Map stable Windows workspace
         if: runner.os == 'Windows'
@@ -301,6 +301,7 @@ jobs:
           shared-key: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           cache-bin: false
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
           workspaces: |
             native/opennow-core -> target
             native/opennow-streamer -> target
@@ -314,6 +315,8 @@ jobs:
           key: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           restore-keys: ${{ runner.os == 'macOS' && 'qt-ci-macos-arm64' || format('qt-ci-{0}-{1}', matrix.os, matrix.label) }}
           max-size: 1G
+          evict-old-files: job
+          save: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
           verbose: 1
 
       - name: Build and cache SDL3
@@ -322,6 +325,13 @@ jobs:
           version: ${{ env.SDL_VERSION }}
           target-arch: ${{ endsWith(matrix.label, 'arm64') && 'arm64' || 'x64' }}
           parallel: ${{ matrix.build-parallel }}
+
+      - name: Finish Windows Media Foundation installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .github/scripts/windows-media-foundation-background.ps1 Wait
+          .github/scripts/ensure-windows-media-foundation.ps1
 
       - name: Windows decoder regression tests
         if: matrix.label == 'windows-x64'
@@ -345,6 +355,9 @@ jobs:
           fi
           if [[ -n "${OPENNOW_QT_HOST_PATH:-}" ]]; then
             OPENNOW_CMAKE_ARGS+=("-DQT_HOST_PATH=${OPENNOW_QT_HOST_PATH}")
+          fi
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            OPENNOW_CMAKE_ARGS+=(-DCMAKE_INSTALL_LIBDIR=lib)
           fi
           cmake -S opennow-qt -B build/opennow-qt-release \
             -DCMAKE_BUILD_TYPE=Release \
@@ -447,7 +460,7 @@ jobs:
           mkdir -p build/qt-packages
           cmake --install build/opennow-qt-release --config Release \
             --prefix "$PWD/build/AppDir/usr"
-          python3 opennow-qt/packaging/verify_linux_package.py build/AppDir/usr/bin
+          python3 opennow-qt/packaging/verify_linux_package.py build/AppDir/usr/bin --libdir lib
           curl --fail --location --retry 3 \
             "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage" \
             --output "build/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
@@ -464,6 +477,12 @@ jobs:
           chmod +x "build/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage" "build/linuxdeploy-plugin-qt-${LINUXDEPLOY_ARCH}.AppImage"
           install -Dm644 opennow-qt/packaging/opennow-vaapi-hook.sh \
             build/AppDir/apprun-hooks/opennow-vaapi-hook.sh
+          for library in libva libva-drm; do
+            install -Dm644 "$(pkg-config --variable=libdir "$library")/$library.so.2" \
+              "build/AppDir/usr/lib/libva-fallback/$library.so.2"
+            install -Dm644 "/usr/share/doc/${library}2/copyright" \
+              "build/AppDir/usr/share/doc/${library}2/copyright"
+          done
           export LDAI_UPDATE_INFORMATION
           LDAI_UPDATE_INFORMATION=$(python3 opennow-qt/packaging/appimage_updates.py information \
             --channel "$BUILD_CHANNEL" --arch "$PACKAGE_ARCH")
@@ -475,22 +494,20 @@ jobs:
               --appdir build/AppDir \
               --desktop-file build/AppDir/usr/share/applications/io.github.opencloudgaming.OpenNOW.desktop \
               --icon-file build/AppDir/usr/share/icons/hicolor/scalable/apps/io.github.opencloudgaming.OpenNOW.svg \
-              --library "$(pkg-config --variable=libdir libva)/libva.so.2" \
-              --library "$(pkg-config --variable=libdir libva-drm)/libva-drm.so.2" \
+              --exclude-library 'libva.so.*' \
+              --exclude-library 'libva-drm.so.*' \
               --exclude-library libglib-2.0.so.0 \
               --exclude-library libgobject-2.0.so.0 \
               --exclude-library libgio-2.0.so.0 \
               --exclude-library libgmodule-2.0.so.0 \
               --plugin qt \
               --output appimage
-          test -f build/AppDir/usr/lib/libva.so.2
-          test -f build/AppDir/usr/lib/libva-drm.so.2
           test -f build/AppDir/usr/plugins/platforms/libqoffscreen.so
           test -f build/AppDir/usr/plugins/platforms/libqwayland-egl.so
           test -f build/AppDir/usr/plugins/platforms/libqwayland-generic.so
           test -f build/AppDir/usr/plugins/wayland-shell-integration/libxdg-shell.so
           LD_LIBRARY_PATH="$PWD/build/AppDir/usr/lib:$LD_LIBRARY_PATH" \
-            python3 opennow-qt/packaging/verify_linux_package.py build/AppDir/usr/bin --appdir build/AppDir
+            python3 opennow-qt/packaging/verify_linux_package.py build/AppDir/usr/bin --libdir lib --appdir build/AppDir
           python3 opennow-qt/packaging/appimage_updates.py verify \
             --channel "$BUILD_CHANNEL" --arch "$PACKAGE_ARCH" \
             --appimage "OpenNOW-Qt-${OPENNOW_BUILD_VERSION}-Linux-${PACKAGE_ARCH}.AppImage"
@@ -545,9 +562,10 @@ jobs:
         run: |
           [[ "$(uname -m)" == arm64 ]]
           python3 -m unittest discover -s opennow-qt/tests -p test_macos_build.py
+          python3 -m unittest discover -s opennow-qt/packaging -p test_macos_awdl.py
           cargo test --manifest-path native/opennow-core/Cargo.toml --locked
           cargo test --manifest-path native/opennow-streamer/Cargo.toml --locked \
-            -p opennow-streamer-platform-macos -p opennow-streamer-protocol -p opennow-streamer-ffi
+            -p opennow-streamer-platform-macos -p opennow-streamer-protocol -p opennow-streamer-ffi -p opennow-awdl-helper
       - name: Configure and build Qt native release
         if: runner.os == 'macOS'
         shell: bash
@@ -606,6 +624,12 @@ jobs:
               test -x "$bin/$executable"
               lipo "$bin/$executable" -verify_arch arm64
             done
+            test -x "$app/Contents/Helpers/opennow-awdl-helper"
+            lipo "$app/Contents/Helpers/opennow-awdl-helper" -verify_arch arm64
+            /usr/bin/codesign --verify --strict "$app/Contents/Helpers/opennow-awdl-helper"
+            /usr/bin/codesign --display --verbose=4 "$app/Contents/Helpers/opennow-awdl-helper" 2>&1 \
+              | grep -Fx 'Identifier=io.github.opencloudgaming.OpenNOW.awdl-helper'
+            plutil -lint "$app/Contents/Resources/opennow-awdl.plist"
             test -f "$bin/libopennow_streamer_ffi.dylib"
             lipo "$bin/libopennow_streamer_ffi.dylib" -verify_arch arm64
             otool -D "$bin/libopennow_streamer_ffi.dylib" \
@@ -635,10 +659,13 @@ jobs:
 
           bin_dir = Path(sys.argv[1])
           for name in ("OpenNOW", "opennow-core", "opennow-acceptance-verify",
-                       "opennow-update-helper", "opennow-streamer", "libopennow_streamer_ffi.dylib"):
+                       "opennow-update-helper", "opennow-streamer", "libopennow_streamer_ffi.dylib",
+                       "../Helpers/opennow-awdl-helper"):
               dependencies = subprocess.check_output(["otool", "-L", bin_dir / name], text=True)
               for line in dependencies.splitlines()[1:]:
                   dependency = line.strip().split(" (", 1)[0]
+                  if name == "../Helpers/opennow-awdl-helper":
+                      assert dependency.startswith(("/System/Library/", "/usr/lib/")), (name, dependency)
                   assert not dependency.startswith("/") or dependency.startswith(
                       ("/System/Library/", "/usr/lib/")), (name, dependency)
           probe = subprocess.run(
@@ -693,9 +720,22 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    uses: ./.github/workflows/qt-flatpak.yml
+    with:
+      arch: ${{ matrix.arch }}
+      version: ${{ needs.metadata.outputs.version }}
+      update_public_key: ${{ inputs.update_public_key }}
+
   artifact-inventory:
     name: Verify complete unsigned artifact set
-    needs: [metadata, packages]
+    needs: [metadata, packages, flatpak]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     env:
       RELEASE_VERSION: ${{ needs.metadata.outputs.version }}

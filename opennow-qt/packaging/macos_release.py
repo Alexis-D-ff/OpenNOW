@@ -13,6 +13,7 @@ import tempfile
 
 
 BUNDLE_ID = "io.github.opencloudgaming.OpenNOW"
+AWDL_HELPER_ID = BUNDLE_ID + ".awdl-helper"
 ENTITLEMENTS = Path(__file__).with_name("macos-release-entitlements.plist")
 SECRET_NAMES = (
     "OPENNOW_MACOS_DEVELOPER_ID_P12_BASE64",
@@ -142,6 +143,8 @@ def package(build, output, version):
             print("Signing and verifying nested code inside-out", flush=True)
             for target in signing_targets(app):
                 options = ["--identifier", BUNDLE_ID, "--entitlements", ENTITLEMENTS] if target == app else []
+                if target == app / "Contents/Helpers/opennow-awdl-helper":
+                    options = ["--identifier", AWDL_HELPER_ID]
                 run("codesign", "--force", "--sign", identity, "--keychain", keychain,
                     "--options", "runtime", "--timestamp", *options, target)
                 run("codesign", "--verify", "--strict", "-R", requirement, target)

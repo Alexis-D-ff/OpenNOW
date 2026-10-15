@@ -20,6 +20,14 @@ Column {
     property var colorFormat: ShellStore.streamColorNotice
     property bool colorNotice: false
     property real colorLifetime: 0
+    property var hdrDowngrade: ShellStore.streamHdrNotice
+    property bool hdrNotice: false
+    property real hdrLifetime: 0
+    readonly property var bugReport: ShellStore.bugReports.latest
+    property bool bugReportNotice: false
+    property real bugReportLifetime: 0
+    property bool antiAfkNotice: false
+    property real antiAfkLifetime: 0
     width: Math.min(384, parent ? Math.max(0, parent.width - 48) : 384)
     spacing: 12
 
@@ -28,6 +36,12 @@ Column {
         lossAnimation.stop()
         colorAnimation.stop()
         colorNotice = false
+        hdrAnimation.stop()
+        hdrNotice = false
+        bugReportAnimation.stop()
+        bugReportNotice = false
+        antiAfkAnimation.stop()
+        antiAfkNotice = false
         controllerNotice = null
         lossNotice = false
         knownControllerIds = controllers.map(controller => controller.instanceId)
@@ -81,6 +95,13 @@ Column {
         colorAnimation.restart()
     }
 
+    function observeHdrDowngrade() {
+        if (!active || !hdrDowngrade || hdrDowngrade.sessionId !== sessionId
+                || ShellStore.streamerStopExpected || !ShellStore.claimHdrNotice(hdrDowngrade)) return
+        hdrNotice = true
+        hdrAnimation.restart()
+    }
+
     function colorLabel(value) {
         switch (value) {
         case "8bit_420": return qsTr("8-bit 4:2:0")
@@ -92,11 +113,29 @@ Column {
     }
 
     onColorFormatChanged: observeColorFormat()
+    onHdrDowngradeChanged: observeHdrDowngrade()
+    Connections {
+        target: ShellStore.bugReports
+        function onGenerationChanged() {
+            if (!root.active || !root.bugReport || root.bugReport.state !== "sent") return
+            root.bugReportNotice = true
+            bugReportAnimation.restart()
+        }
+    }
+    Connections {
+        target: ShellStore
+        function onAntiAfkEnabledChanged() {
+            if (!root.active || !ShellStore.activeSession) return
+            root.antiAfkNotice = true
+            antiAfkAnimation.restart()
+        }
+    }
     onActiveChanged: {
         reset()
         if (active) {
             observeTelemetry()
             observeColorFormat()
+            observeHdrDowngrade()
         }
     }
     onSessionIdChanged: reset()
@@ -105,6 +144,7 @@ Column {
         if (active) {
             observeTelemetry()
             observeColorFormat()
+            observeHdrDowngrade()
         }
     }
 
@@ -121,10 +161,40 @@ Column {
         onFinished: root.lossNotice = false
     }
     NumberAnimation {
+        id: bugReportAnimation
+        target: root; property: "bugReportLifetime"
+        from: 1; to: 0; duration: 5000
+        onFinished: root.bugReportNotice = false
+    }
+    NumberAnimation {
+        id: antiAfkAnimation
+        target: root; property: "antiAfkLifetime"
+        from: 1; to: 0; duration: 4000
+        onFinished: root.antiAfkNotice = false
+    }
+    NumberAnimation {
+        id: hdrAnimation
+        target: root; property: "hdrLifetime"
+        from: 1; to: 0; duration: 4000
+        onFinished: root.hdrNotice = false
+    }
+    NumberAnimation {
         id: colorAnimation
         target: root; property: "colorLifetime"
         from: 1; to: 0; duration: 4000
         onFinished: root.colorNotice = false
+    }
+
+    DesktopStreamToast {
+        objectName: "streamAntiAfkToast"
+        width: root.width
+        visible: root.active && root.antiAfkNotice
+        formatNotice: true
+        title: ShellStore.antiAfkEnabled ? qsTr("Anti-AFK on") : qsTr("Anti-AFK off")
+        subtitle: ShellStore.antiAfkEnabled
+            ? qsTr("A short keypress every 4 minutes keeps the session from timing out.")
+            : qsTr("GeForce NOW can end the session after a period of inactivity.")
+        lifetimeFraction: root.antiAfkLifetime
     }
 
     DesktopStreamToast {
@@ -139,6 +209,29 @@ Column {
                 .arg(root.colorLabel(root.colorFormat.actualColorQuality))
                 .arg(root.colorLabel(root.colorFormat.requestedColorQuality))
         lifetimeFraction: root.colorLifetime
+    }
+
+    DesktopStreamToast {
+        objectName: "streamHdrDowngradeToast"
+        width: root.width
+        visible: root.active && root.hdrNotice && !ShellStore.streamerStopExpected
+        formatNotice: true
+        title: qsTr("Streaming in SDR")
+        subtitle: qsTr("%1 doesn't support HDR. Your HDR setting stays on.")
+            .arg(root.hdrDowngrade && root.hdrDowngrade.title ? root.hdrDowngrade.title : qsTr("This game"))
+        lifetimeFraction: root.hdrLifetime
+    }
+
+    DesktopStreamToast {
+        objectName: "streamBugReportToast"
+        width: root.width
+        visible: root.active && root.bugReportNotice && root.bugReport !== null
+        formatNotice: true
+        title: !root.bugReport ? "" : root.bugReport.kind === "frame_drops"
+            ? qsTr("Frame drops reported to the developer")
+            : qsTr("Problem reported to the developer")
+        subtitle: qsTr("A report with logs was sent so it can be fixed.")
+        lifetimeFraction: root.bugReportLifetime
     }
 
     DesktopStreamToast {

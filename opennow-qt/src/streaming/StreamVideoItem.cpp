@@ -5,6 +5,7 @@
 #include "streaming/NativeStreamRuntime.h"
 #include "streaming/rendering/NativeStreamRenderCallback.h"
 
+#include <QCoreApplication>
 #include <QCursor>
 #include <QMetaObject>
 #include <QQmlEngine>
@@ -45,6 +46,9 @@ StreamVideoItem::StreamVideoItem(std::unique_ptr<MacPointerCapture> pointerCaptu
         if (m_captureActive && m_inputEnabled && m_relativeMouse && s_nativeRuntime)
             s_nativeRuntime->submitMouseRelative(x, y);
     });
+#if defined(Q_OS_WIN)
+    QCoreApplication::instance()->installNativeEventFilter(&m_nativeWindowMoveLoopFilter);
+#endif
     setFlag(ItemHasContents, true);
     setActiveFocusOnTab(true);
     setAcceptedMouseButtons(Qt::AllButtons);
@@ -58,6 +62,15 @@ StreamVideoItem::StreamVideoItem(std::unique_ptr<MacPointerCapture> pointerCaptu
     connect(this, &QQuickItem::visibleChanged, this, &StreamVideoItem::updateSwapGate,
             Qt::UniqueConnection);
     if (s_nativeRuntime) {
+        m_relativeMouse = s_nativeRuntime->defaultRelativeMouse();
+        m_decodedVideoSize = s_nativeRuntime->decodedDisplaySize();
+        refreshVideoSize();
+        connect(s_nativeRuntime, &NativeStreamRuntime::decodedDisplaySizeChanged, this,
+                [this](const QSize &size, quint64 generation) {
+            if (!s_nativeRuntime || generation != s_nativeRuntime->presentationGeneration()) return;
+            m_decodedVideoSize = size;
+            refreshVideoSize();
+        });
         m_serverCursorComposited = s_nativeRuntime->serverCursorComposited();
         connect(s_nativeRuntime, &NativeStreamRuntime::cursorCaptureChanged, this,
                 [this](bool composited) {
@@ -134,10 +147,17 @@ QSize StreamVideoItem::videoSize() const
 
 void StreamVideoItem::setVideoSize(const QSize &size)
 {
-    const auto normalized = size.isValid() && !size.isEmpty() ? size : QSize{};
+    m_requestedVideoSize = size.isValid() && !size.isEmpty() ? size : QSize{};
+    refreshVideoSize();
+}
+
+void StreamVideoItem::refreshVideoSize()
+{
+    const auto normalized = m_decodedVideoSize.isEmpty() ? m_requestedVideoSize : m_decodedVideoSize;
     if (m_videoSize == normalized) return;
     m_videoSize = normalized;
     emit videoSizeChanged();
+    syncCaptureState();
     update();
 }
 

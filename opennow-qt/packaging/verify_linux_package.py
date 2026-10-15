@@ -20,7 +20,9 @@ def verify_capabilities(message):
         raise ValueError("Native VAAPI must not advertise HEVC or AV1 support")
     software = next(backend for backend in backends if backend["backend"] == "ffmpeg")
     fallback_codecs = {codec["codec"]: codec["available"] for codec in software["codecs"]}
-    if fallback_codecs != {"h264": True, "h265": True, "av1": True}:
+    if (set(fallback_codecs) != {"h264", "h265", "av1"}
+            or any(type(available) is not bool for available in fallback_codecs.values())
+            or not all(fallback_codecs[codec] for codec in ("h264", "h265"))):
         raise ValueError("The packaged FFmpeg software fallback is unavailable")
 
 
@@ -31,14 +33,21 @@ def verify_apprun(appdir):
         raise ValueError("The deployed VAAPI driver-search hook is missing or stale")
     if f'source "$this_dir"/apprun-hooks/"{hook}"' not in (appdir / "AppRun").read_text():
         raise ValueError("AppRun does not source the VAAPI driver-search hook")
+    for library in ("libva.so.2", "libva-drm.so.2"):
+        if (appdir / "usr/lib" / library).exists():
+            raise ValueError(f"{library} must not shadow the host libva in usr/lib")
+        if not (appdir / "usr/lib/libva-fallback" / library).is_file():
+            raise ValueError(f"The AppDir is missing its fallback {library}")
 
 
-def verify_package(bin_dir):
+def verify_package(bin_dir, lib_dir=None):
+    if lib_dir is None:
+        lib_dir = bin_dir.parent / "lib"
     helper = bin_dir / "opennow-update-helper"
     if not helper.is_file() or not os.access(helper, os.X_OK):
         raise ValueError("The package is missing its executable update helper")
-    for name in ("opennow-streamer", "libopennow_streamer_ffi.so"):
-        binary = bin_dir / name
+    for binary in (bin_dir / "opennow-streamer", lib_dir / "libopennow_streamer_ffi.so"):
+        name = binary.name
         dependencies = subprocess.check_output(["readelf", "-d", binary], text=True)
         for library in ("libva.so.2", "libva-drm.so.2"):
             if f"[{library}]" not in dependencies:
@@ -66,12 +75,16 @@ def verify_package(bin_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("bin_dir", type=Path)
+    parser.add_argument("--libdir", type=Path, default=Path("lib"),
+                        help="Library directory relative to bin_dir's parent and the DEB's /usr prefix")
     parser.add_argument("--deb", type=Path)
     parser.add_argument("--appdir", type=Path)
     args = parser.parse_args()
+    if args.libdir.is_absolute():
+        parser.error("--libdir must be relative to the install prefix")
     if args.appdir:
         verify_apprun(args.appdir.resolve())
-    verify_package(args.bin_dir.resolve())
+    verify_package(args.bin_dir.resolve(), args.bin_dir.resolve().parent / args.libdir)
     if args.deb:
         dependencies = subprocess.check_output(["dpkg-deb", "-f", args.deb, "Depends"], text=True)
         for dependency in ("libva2", "libva-drm2", "qt6-svg-plugins"):
@@ -79,5 +92,6 @@ if __name__ == "__main__":
                 raise ValueError(f"The DEB does not require {dependency}")
         with tempfile.TemporaryDirectory(prefix="opennow-deb-check-") as directory:
             subprocess.run(["dpkg-deb", "-x", args.deb, directory], check=True)
-            verify_package(Path(directory) / "usr/bin")
+            root = Path(directory)
+            verify_package(root / "usr/bin", root / "usr" / args.libdir)
     print("Linux package VAAPI H.264 and FFmpeg capability checks passed")

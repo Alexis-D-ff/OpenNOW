@@ -47,9 +47,56 @@ Do not commit raw official traces; they contain ICE credentials and session data
    logged before authentication, explicitly labelled as such.
 6. `nvst-video` / `nvst-bundle`: bounded two-second counters for received traffic,
    authentication, frames, hole punches, ICE/DTLS/SCTP and feedback.
-7. `media-timeout`: final stage counters, with firewall status explicitly unknown.
-8. `present`: retains a bounded platform error description before conversion to
-   the generic FFI status, separating decoder readiness from actual render faults.
+7. `media-timeout`: final stage counters, `rx_idle_ms` (age of the last datagram
+   from any source on the video socket) and `port_unreachable` (ICMP-unreachable
+   receive errors), with firewall status explicitly unknown. A flat `inbound` with
+   a large `rx_idle_ms` means ingress stopped at the socket, not in assembly.
+8. `nvst-bundle recovery-snapshot` / `stop-snapshot`: bundle state when recovery
+   or teardown is commanded, at most once per command. `rx_idle_ms` and
+   `peer_rx_idle_ms` age the last datagram from any source and from the
+   negotiated peer, `tx_idle_ms` the last WebRTC transmit, `sctp_rx_idle_ms` the
+   last data-channel message, plus the last ICE state, ICMP-unreachable count and
+   closed-channel count. `stop-snapshot` names who stopped the worker.
+9. `nvst-sctp channel-close`: the protocol channel label with the same idle ages
+   at the moment SCTP closed it, bounded by the negotiated channel count.
+10. `nvst-input input-unavailable`: the fixed reason string (channel closed,
+    handshake timeout, input or HID delivery failure). Reasons are compile-time
+    constants, never server text.
+    Temporary gameplay write rejection keeps the stream running. Discrete input
+    remains ordered in a pending encoded queue bounded to 256 messages and 64 KiB;
+    motion can drop rather than accumulate behind it. Accepted messages are removed
+    individually, so a partially written batch never replays its accepted prefix.
+    Queue exhaustion, malformed discrete input, and a closed input transport still
+    stop the session to prevent stuck input. HID retirement and shutdown retain
+    their dedicated teardown reservation and failure policy.
+    Core input-readiness races retain the oldest captured sample for retry rather
+    than restarting media. Successful meaningful wire input clears an active idle
+    warning once; rejected writes, heartbeat packets, and empty encoder output do
+    not clear it.
+    One single-flight paste also waits in this ordered FIFO, bounded to 64 KiB
+    of UTF-8 plus at most 128 KiB of encoded packets. Pending text messages/bytes
+    appear separately in the periodic counters. Cancellation discards unsent text
+    only; later key releases still follow their presses. A duplicate paste is
+    rejected with nonterminal `text-input-error` retry feedback, not silently
+    dropped or recorded as a stream failure.
+    The 10-second `nvst-input` snapshot reports `pendingMessages`, `pendingBytes`,
+    and saturating `deferredWrites` and `droppedMotion` counters without logging
+    each temporary rejection.
+11. `transport nvst-transport-stopped`: the error message carries the worker's
+    typed stop cause (`cause=socket operation=<leg-operation> kind=<ErrorKind>
+    os_code=<n>`, `cause=webrtc operation=<poll-output|timer|receive>
+    error=<category>`, `cause=input-delivery-failed`, `cause=hid-output-blocked`,
+    `cause=media-consumer-closed`, `cause=upstream-gate-closed`,
+    `cause=controller-closed` or `cause=requested`). The error code is unchanged.
+12. `transport media-consumer-closed`: when a video decoder error preceded the
+    closure, the message ends with that `<codec> decoder error: <message>`,
+    bounded to 240 characters.
+13. `webrtc-signaling`: the WebSocket failure category (`io kind=<ErrorKind>
+    os_code=<n>`, `protocol=<variant>`, `http status=<n>`, `tls`) or the peer's
+    close code. The same detail is appended to the `webrtc-signaling-failed`
+    message. Addresses, URLs and server-provided close reasons are never logged.
+14. `present`: retains a bounded platform error description before conversion to
+    the generic FFI status, separating decoder readiness from actual render faults.
 
 For a remote report, export diagnostics immediately after one failed attempt and
 preserve all three logs (`current.log`, `native-streamer.log`, `qt-native.log`).
@@ -108,7 +155,7 @@ IDR waited for a video SSRC, and a successful enqueue consumed the request
 without confirming keyframe receipt. Startup now arms recovery before channel
 opening; control IDR can send without a video SSRC, while PLI still requires the
 authenticated stream identifier. Successful and failed send attempts are limited
-to the existing 250 ms cooldown. Requests remain pending until a complete
+to a separate 100 ms retry interval. Requests remain pending until a complete
 keyframe is assembled, and subsequent loss or decoder rejection can re-arm them.
 The existing wire messages and sender identifiers are unchanged.
 

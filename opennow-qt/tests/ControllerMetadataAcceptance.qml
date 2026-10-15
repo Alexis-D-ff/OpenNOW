@@ -3,6 +3,9 @@ import OpenNOW
 
 QtObject {
     property QtObject input: QtObject {
+        property var flightDevices: []
+        property var supportedFlightDevices: []
+        property bool forwardFlightControls: true
         property var availableControllers: [
             {instanceId: 1, slot: 1, name: "DualSense Wireless Controller", family: "playstation", powerState: "charging", batteryPercent: 65, charging: true},
             {instanceId: 2, slot: 2, name: "Xbox Wireless Controller", family: "xbox", powerState: "onBattery", batteryPercent: 70, charging: false},
@@ -15,10 +18,17 @@ QtObject {
         property int controllerCount: controllers.length
         property bool shellCaptureEnabled: true
         property bool inputSuspended: false
+        property bool shellInputBlocked: false
+        readonly property bool shellInputDraining: false
         property int leftStickDeadzone: 5
         property int rightStickDeadzone: 5
         property int vibrationIntensity: 100
+        property var controllerProfiles: ({})
+        property bool leftStickNavigationEnabled: true
+        function stickSample(instanceId) { return ({}) }
+        function testRumble(instanceId) { return false }
         signal controllerActivity()
+        signal shellInputSkipRequested()
         signal controllerActivityDetailed(string device, string control, int value)
     }
 

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 
@@ -113,6 +113,7 @@ pub struct GraphicsFrameInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphicsFrameError {
     NotReady,
+    Unsupported(String),
     Failed(String),
 }
 
@@ -191,6 +192,9 @@ impl GraphicsFrame for opennow_streamer_platform_linux::LinuxGpuFrame {
         }
         .map_err(|error| match error {
             opennow_streamer_platform_linux::Error::FrameNotReady => GraphicsFrameError::NotReady,
+            error @ opennow_streamer_platform_linux::Error::ImportUnsupported(_) => {
+                GraphicsFrameError::Unsupported(error.to_string())
+            }
             error => GraphicsFrameError::from(error.to_string()),
         })?;
         Ok(GraphicsRecordedFrame {
@@ -322,6 +326,7 @@ pub enum GraphicsRuntimeError {
     NoFrame,
     StaleFrame,
     FrameAlreadyRecorded,
+    RecordUnsupported(String),
     RecordFailed(String),
 }
 
@@ -341,6 +346,9 @@ impl fmt::Display for GraphicsRuntimeError {
             }
             Self::FrameAlreadyRecorded => {
                 formatter.write_str("the GPU frame token was already recorded")
+            }
+            Self::RecordUnsupported(message) => {
+                write!(formatter, "GPU frame recording is unsupported: {message}")
             }
             Self::RecordFailed(message) => {
                 write!(formatter, "GPU frame recording failed: {message}")
@@ -376,6 +384,10 @@ pub struct GraphicsFramePublisher {
 }
 
 impl GraphicsFramePublisher {
+    pub fn published_frames(&self) -> u64 {
+        self.inner.published_frames.load(Ordering::Relaxed)
+    }
+
     pub fn clear(&self) {
         lock_scene(&self.inner.scene).latest = None;
     }
@@ -393,6 +405,24 @@ impl GraphicsFramePublisher {
         lease: GraphicsContextLease,
         frame: Arc<dyn GraphicsFrame>,
     ) -> Result<GraphicsPublishOutcome, GraphicsRuntimeError> {
+        self.publish_frame(lease, frame, true)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn publish_pending(
+        &self,
+        lease: GraphicsContextLease,
+        frame: Arc<dyn GraphicsFrame>,
+    ) -> Result<GraphicsPublishOutcome, GraphicsRuntimeError> {
+        self.publish_frame(lease, frame, false)
+    }
+
+    fn publish_frame(
+        &self,
+        lease: GraphicsContextLease,
+        frame: Arc<dyn GraphicsFrame>,
+        decoded: bool,
+    ) -> Result<GraphicsPublishOutcome, GraphicsRuntimeError> {
         let outcome = {
             let mut scene = lock_scene(&self.inner.scene);
             if scene.context.is_none() {
@@ -405,6 +435,9 @@ impl GraphicsFramePublisher {
                 epoch: lease.epoch,
                 frame,
             });
+            if decoded {
+                self.inner.published_frames.fetch_add(1, Ordering::Relaxed);
+            }
             if replaced.is_some() {
                 GraphicsPublishOutcome::Replaced
             } else {
@@ -440,6 +473,7 @@ impl RenderThreadGraphics {
         let inner = Arc::new(GraphicsRuntimeInner {
             scene: Mutex::new(SceneGraphState::default()),
             frame_available: Box::new(frame_available),
+            published_frames: AtomicU64::new(0),
         });
         (
             Self {
@@ -526,6 +560,9 @@ impl RenderThreadGraphics {
             .record(context, command)
             .map_err(|error| match error {
                 GraphicsFrameError::NotReady => GraphicsRuntimeError::NoFrame,
+                GraphicsFrameError::Unsupported(message) => {
+                    GraphicsRuntimeError::RecordUnsupported(message)
+                }
                 GraphicsFrameError::Failed(message) => GraphicsRuntimeError::RecordFailed(message),
             })
     }
@@ -554,6 +591,7 @@ impl RenderThreadGraphics {
 struct GraphicsRuntimeInner {
     scene: Mutex<SceneGraphState>,
     frame_available: Box<dyn Fn() + Send + Sync>,
+    published_frames: AtomicU64,
 }
 
 #[derive(Default)]
@@ -899,6 +937,103 @@ mod tests {
             drops: Arc::clone(drops),
             records: Arc::clone(records),
         })
+    }
+
+    #[test]
+    fn decoded_resize_keeps_source_dimensions_on_retained_tokens() {
+        struct DecodedFrame(GraphicsFrameInfo);
+
+        impl GraphicsFrame for DecodedFrame {
+            fn info(&self) -> GraphicsFrameInfo {
+                self.0
+            }
+
+            fn record(
+                &self,
+                _: GraphicsContext,
+                command: GraphicsRecordCommand,
+            ) -> Result<GraphicsRecordedFrame, GraphicsFrameError> {
+                Ok(GraphicsRecordedFrame {
+                    resource: 10,
+                    resource_view: 11,
+                    texture_format: GraphicsTextureFormat::Rgba8,
+                    color_space: GraphicsColorSpace::Sdr709,
+                    width: self.0.width,
+                    height: self.0.height,
+                    frame_slot: command.frame_slot,
+                    generation: 1,
+                    presentation_time_ns: self.0.presentation_time_ns,
+                })
+            }
+        }
+
+        let (graphics, publisher) = RenderThreadGraphics::new(|| {});
+        graphics.initialize(context()).unwrap();
+        let lease = publisher.context().unwrap();
+        let mut retained: Vec<(GraphicsFrameToken, GraphicsFrameInfo)> = Vec::new();
+        for (width, height, sequence) in [(1920, 1080, 42), (1600, 1200, 47), (3440, 1440, 53)] {
+            let info = GraphicsFrameInfo {
+                width,
+                height,
+                sequence,
+                presentation_time_ns: sequence * 1_000,
+            };
+            publisher
+                .publish(lease, Arc::new(DecodedFrame(info)))
+                .unwrap();
+            let token = graphics.acquire_latest().unwrap();
+            assert_eq!(token.info(), info);
+            let recorded = graphics.record(&token, command()).unwrap();
+            assert_eq!((recorded.width, recorded.height), (width, height));
+            assert_eq!(recorded.presentation_time_ns, info.presentation_time_ns);
+            for (old, old_info) in &retained {
+                assert_eq!(old.info(), *old_info);
+            }
+            retained.push((token, info));
+        }
+        drop(retained);
+        graphics.shutdown().unwrap();
+    }
+
+    #[test]
+    fn publication_progress_survives_consumption_and_rejects_stale_frames() {
+        let (graphics, publisher) = RenderThreadGraphics::new(|| {});
+        graphics.initialize(context()).unwrap();
+        let lease = publisher.context().unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let records = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(publisher.published_frames(), 0);
+        publisher
+            .publish_pending(lease, frame(0, &drops, &records))
+            .unwrap();
+        assert_eq!(publisher.published_frames(), 0);
+        publisher
+            .publish(lease, frame(1, &drops, &records))
+            .unwrap();
+        publisher
+            .publish(lease, frame(2, &drops, &records))
+            .unwrap();
+        assert_eq!(publisher.published_frames(), 2);
+        drop(graphics.acquire_latest().unwrap());
+        publisher.clear();
+        assert_eq!(publisher.published_frames(), 2);
+        graphics.shutdown().unwrap();
+        assert!(
+            publisher
+                .publish(lease, frame(3, &drops, &records))
+                .is_err()
+        );
+        graphics.initialize(context()).unwrap();
+        assert!(
+            publisher
+                .publish(lease, frame(4, &drops, &records))
+                .is_err()
+        );
+        assert_eq!(publisher.published_frames(), 2);
+        publisher
+            .publish(publisher.context().unwrap(), frame(5, &drops, &records))
+            .unwrap();
+        assert_eq!(publisher.published_frames(), 3);
     }
 
     #[test]

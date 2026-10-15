@@ -89,6 +89,34 @@ if(OPENNOW_RUST_TARGET)
     set(OPENNOW_STREAMER_ARTIFACT_ROOT
         "${OPENNOW_STREAMER_TARGET_DIR}/${OPENNOW_RUST_TARGET}")
 endif()
+if(APPLE)
+    set(OPENNOW_AWDL_HELPER_ARTIFACT
+        "${OPENNOW_STREAMER_ARTIFACT_ROOT}/${OPENNOW_CORE_PROFILE}/opennow-awdl-helper")
+    add_custom_target(opennow-awdl-helper-build ALL
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=MAKEFLAGS --unset=MFLAGS
+                "${CARGO_EXECUTABLE}" build
+                --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/../native/opennow-streamer/Cargo.toml"
+                --target-dir "${OPENNOW_STREAMER_TARGET_DIR}"
+                --package opennow-awdl-helper
+                --bin opennow-awdl-helper
+                ${OPENNOW_RUST_TARGET_ARGS}
+                $<$<CONFIG:Release>:--release>
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "$<TARGET_FILE_DIR:opennow-qt>/../Helpers"
+                "$<TARGET_FILE_DIR:opennow-qt>/../Resources"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${OPENNOW_AWDL_HELPER_ARTIFACT}"
+                "$<TARGET_FILE_DIR:opennow-qt>/../Helpers/opennow-awdl-helper"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/packaging/opennow-awdl.plist"
+                "$<TARGET_FILE_DIR:opennow-qt>/../Resources/opennow-awdl.plist"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../native/opennow-streamer"
+        COMMENT "Building and bundling the macOS AWDL helper"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+    add_dependencies(opennow-qt opennow-awdl-helper-build)
+endif()
 # The embedded streamer decodes and publishes GPU frames in process. A debug
 # Rust build is too slow for real-time playback, so link its release library
 # into every Qt configuration.
@@ -103,7 +131,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND OPENNOW_STREAMER_CARGO_FEATURE_ARGS
         --features linux-ffmpeg-bundled,linux-vaapi)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(OPENNOW_VAAPI REQUIRED libva libva-drm)
+    pkg_check_modules(OPENNOW_VAAPI REQUIRED libva libva-drm libdrm)
     if(OPENNOW_RUST_TARGET MATCHES "^aarch64-.*-linux-"
         OR (NOT OPENNOW_RUST_TARGET AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$"))
         pkg_check_modules(OPENNOW_V4L2_REQUEST REQUIRED libdrm libudev)
@@ -363,5 +391,4 @@ if(APPLE)
     set_property(TARGET opennow-qt APPEND PROPERTY INSTALL_RPATH "@loader_path")
 elseif(UNIX)
     set_property(TARGET opennow-qt APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-    set_property(TARGET opennow-qt APPEND PROPERTY INSTALL_RPATH "$ORIGIN")
 endif()

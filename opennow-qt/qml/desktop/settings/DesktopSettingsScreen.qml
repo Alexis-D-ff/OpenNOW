@@ -10,6 +10,7 @@ FocusScope {
     clip: true
 
     property int selectedSection: 3
+    readonly property int updatesSection: 13
     property string searchQuery: ""
     property bool advancedOpen: false
     // Isolated visual acceptance only; never selects alternate production UI.
@@ -26,18 +27,19 @@ FocusScope {
     TenBitWarningDialog { id: tenBitWarning; settingsStore: ShellStore }
 
     readonly property var sections: [
-        {label: qsTr("Stream"), detail: qsTr("Picture, codec, bitrate"), icon: "monitor", page: 3, keywords: "resolution fps hdr color stats overlay timer bitrate codec reflex backend gpu directx vulkan steam big picture launch gamepad fullscreen session ready persistent in-game graphics settings background reminder afk taskbar"},
+        {label: qsTr("Stream"), detail: qsTr("Picture, codec, bitrate"), icon: "monitor", page: 3, keywords: "resolution fps hdr color stats overlay timer bitrate codec dlss super resolution frame generation multiplier ray reconstruction reflex backend gpu directx vulkan steam big picture launch gamepad fullscreen session ready persistent in-game graphics settings background reminder afk taskbar"},
         {label: qsTr("Network"), detail: qsTr("Region, ping, proxy"), icon: "globe", page: 6, keywords: "server region ping proxy l4s"},
         {label: qsTr("Audio"), detail: qsTr("Output and stream audio"), icon: "wave", page: 4, keywords: "sound audio volume output microphone mute focus"},
         {label: qsTr("Controls"), detail: qsTr("Pads, mouse, shortcuts"), icon: "controller", page: 5, keywords: "controller gyroscope steam sensitivity keyboard language shortcuts"},
         {label: qsTr("Recording"), detail: qsTr("Capture, replay, shortcuts"), icon: "image", page: 12, keywords: "recording capture clip replay buffer memory duration folder resolution fps quality shortcuts F12"},
-        {label: qsTr("Appearance"), detail: qsTr("Theme, accent, layout"), icon: "palette", page: 8, keywords: "theme accent interface language scale motion console sidebar tiles"},
+        {label: qsTr("Appearance"), detail: qsTr("Theme, accent, layout"), icon: "palette", page: 8, keywords: "theme accent interface language scale motion console sidebar tiles quit exit close confirm"},
         {label: qsTr("Console mode"), detail: qsTr("Gamepad-first interface"), icon: "controller", page: 9, keywords: "console fullscreen gamepad startup"},
         {label: qsTr("Account"), detail: qsTr("NVIDIA, stores, privacy"), icon: "person", page: 0, keywords: "profile subscription stores steam epic xbox ubisoft battle gaijin privacy"},
-        {label: qsTr("About & support"), detail: qsTr("Updates, diagnostics"), icon: "info", page: 11, keywords: "version release update diagnostics onboarding introduction replay setup restart reset"}
+        {label: qsTr("Updates"), detail: qsTr("Version, channel, notes"), icon: "reset", page: updatesSection, keywords: "update updates version release notes changelog channel stable nightly download install restart"},
+        {label: qsTr("About & support"), detail: qsTr("Diagnostics, legal"), icon: "info", page: 11, keywords: "version diagnostics legal onboarding introduction replay setup restart reset"}
     ]
-    readonly property var pageTitles: [qsTr("Account"), qsTr("Account"), qsTr("Account"), qsTr("Stream"), qsTr("Audio"), qsTr("Controls"), qsTr("Network"), qsTr("Appearance"), qsTr("Appearance"), qsTr("Console mode"), qsTr("Controls"), qsTr("About & support"), qsTr("Recording")]
-    readonly property var pageComponents: [accountGroup, accountGroup, accountGroup, streamPage, audioPage, controlsGroup, networkPage, lookGroup, lookGroup, consolePage, controlsGroup, aboutPage, recordingPage]
+    readonly property var pageTitles: [qsTr("Account"), qsTr("Account"), qsTr("Account"), qsTr("Stream"), qsTr("Audio"), qsTr("Controls"), qsTr("Network"), qsTr("Appearance"), qsTr("Appearance"), qsTr("Console mode"), qsTr("Controls"), qsTr("About & support"), qsTr("Recording"), qsTr("Updates")]
+    readonly property var pageComponents: [accountGroup, accountGroup, accountGroup, streamPage, audioPage, controlsGroup, networkPage, lookGroup, lookGroup, consolePage, controlsGroup, aboutPage, recordingPage, updatesPage]
 
     function matchesSection(section) {
         const query = searchQuery.trim().toLowerCase()
@@ -262,8 +264,8 @@ FocusScope {
         }
         if (sub.isUnlimited)
             chips.push(qsTr("UNLIMITED"))
-        else if (sub.remainingHours !== undefined && sub.remainingHours !== null)
-            chips.push(qsTr("%1 h left").arg(Math.max(0, Math.round(Number(sub.remainingHours)))))
+        else if (ShellStore.remainingPlaytimeHours !== null)
+            chips.push(qsTr("%1 h left").arg(Math.round(ShellStore.remainingPlaytimeHours)))
         if (chips.length === 0)
             chips.push(String(sub.membershipTier || qsTr("Unavailable")).toUpperCase())
         return chips
@@ -439,12 +441,20 @@ FocusScope {
             }
         }
         Flickable {
+            id: railFlick
             width: parent.width
             height: root.compactNavigation ? navigation.implicitHeight : Math.max(0, root.height - settingsRail.y - settingsSearch.height - 36)
             contentWidth: width
             contentHeight: navigation.implicitHeight
             clip: true
             boundsBehavior: Flickable.StopAtBounds
+            // Entry heights scale with the interface scale, so the rail can be
+            // taller than its viewport. AsNeeded also hides the bar while the
+            // user is not scrolling, which would leave the overflow invisible.
+            ScrollBar.vertical: ScrollBar {
+                objectName: "settingsRailScroll"
+                policy: railFlick.contentHeight > railFlick.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            }
             Flow {
                 id: navigation
                 width: parent.width
@@ -463,6 +473,20 @@ FocusScope {
                         padding: 12
                         hoverEnabled: true
                         onClicked: root.selectedSection = modelData.page
+                        // Keyboard focus must not land on an entry the rail is
+                        // scrolled away from. Flickable.ensureVisible only accepts
+                        // a direct child of its contentItem, and these buttons sit
+                        // inside the navigation Flow, so scroll explicitly.
+                        onFocusChanged: if (focus) {
+                            const top = mapToItem(railFlick.contentItem, 0, 0).y
+                            const bottom = top + height
+                            if (top < railFlick.contentY) {
+                                railFlick.contentY = Math.max(0, top - DesktopTokens.px(8))
+                            } else if (bottom > railFlick.contentY + railFlick.height) {
+                                railFlick.contentY = Math.min(railFlick.contentHeight - railFlick.height,
+                                                             bottom - railFlick.height + DesktopTokens.px(8))
+                            }
+                        }
                         background: Rectangle {
                             radius: 16
                             color: root.selectedGroup === index ? DesktopTokens.raisedStrong : parent.hovered ? DesktopTokens.raised : "transparent"
@@ -656,6 +680,14 @@ FocusScope {
     Component {
         id: aboutPage
         DesktopSettingsAboutPage {
+            availableWidth: contentFlick.width
+            settingsScreen: root
+        }
+    }
+
+    Component {
+        id: updatesPage
+        DesktopSettingsUpdatesPage {
             availableWidth: contentFlick.width
             settingsScreen: root
         }

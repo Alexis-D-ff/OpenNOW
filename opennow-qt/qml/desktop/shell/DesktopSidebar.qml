@@ -19,6 +19,7 @@ FocusScope {
     signal consoleModeRequested()
     signal collapseRequested(bool collapsed)
     signal createCollectionRequested()
+    signal accountSwitcherRequested()
 
     x: 0
     width: overlayOpen ? DesktopTokens.railWidth : DesktopTokens.railCollapsedWidth
@@ -27,8 +28,6 @@ FocusScope {
 
     function closeOverlay() {
         hoverExpanded = false
-        if (!collapsed)
-            collapseRequested(true)
     }
 
     Behavior on width {
@@ -534,15 +533,30 @@ FocusScope {
                 width: parent.width
                 height: 44
                 padding: 0
-                Accessible.name: qsTr("Profile")
+                objectName: "sidebarProfileButton"
+                Accessible.name: qsTr("Switch account")
+                Accessible.description: ShellStore.signedIn && ShellStore.authSession.user
+                    ? qsTr("Signed in as %1").arg(ShellStore.authSession.user.displayName) : ""
                 background: Rectangle {
                     radius: 11
                     color: profileButton.hovered || profileButton.activeFocus ? "#0CFFFFFF" : "transparent"
                 }
                 contentItem: Item {
+                    DesktopAccountTile {
+                        x: 4
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 36
+                        visible: Boolean(ShellStore.signedIn && ShellStore.authSession && ShellStore.authSession.user)
+                        account: visible ? {userId: ShellStore.authSession.user.userId, displayName: ShellStore.authSession.user.displayName} : null
+                        tileSize: 36
+                        cornerRadius: 18
+                        avatarOnly: true
+                        enabled: false
+                    }
                     Rectangle {
                         x: 4
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: !Boolean(ShellStore.signedIn && ShellStore.authSession && ShellStore.authSession.user)
                         width: 36
                         height: 36
                         radius: 999
@@ -551,9 +565,7 @@ FocusScope {
                         border.color: "#29FFFFFF"
                         Text {
                             anchors.centerIn: parent
-                            text: ShellStore.signedIn && ShellStore.authSession.user
-                                ? String(ShellStore.authSession.user.displayName || "?").charAt(0).toUpperCase()
-                                : "Z"
+                            text: "?"
                             color: DesktopTokens.textHigh
                             font.family: DesktopTokens.bodyFont
                             font.pixelSize: DesktopTokens.monoSize
@@ -600,7 +612,7 @@ FocusScope {
                         icon: "desktop-chevron-up.svg"
                     }
                 }
-                onClicked: root.routeRequested("settings-account")
+                onClicked: ShellStore.signedIn ? root.accountSwitcherRequested() : root.routeRequested("settings-account")
             }
         }
     }

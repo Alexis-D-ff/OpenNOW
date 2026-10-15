@@ -6,6 +6,7 @@ Column {
     objectName: "desktopNetworkSettings"
     required property real availableWidth
     required property var settingsScreen
+    property var awdlController: MacAwdl
 
     width: page.availableWidth; spacing: DesktopTokens.px(12)
     Component.onCompleted: ShellStore.refreshRegions()
@@ -56,6 +57,65 @@ Column {
             }
         }
     }
+    DesktopSettingsPanel {
+        visible: page.awdlController.state !== MacAwdlController.Unsupported
+        width: parent.width; paperStyle: true
+        DesktopSettingsSection { text: qsTr("MACOS WI-FI") }
+        DesktopSettingsRow {
+            objectName: "suppressAwdlWhileStreamingRow"
+            width: parent.width; paperStyle: true; glyph: "globe"
+            title: qsTr("Suppress AWDL while streaming")
+            description: qsTr("May reduce Wi-Fi latency spikes. Temporarily interrupts AirDrop, AirPlay, Sidecar, Universal Control and other Continuity features for all users while a stream is active. AWDL is restored when the stream ends or OpenNOW disconnects.")
+            DesktopSettingsToggle {
+                objectName: "suppressAwdlWhileStreamingToggle"
+                enabled: !page.awdlController.busy
+                    && (page.awdlController.state === MacAwdlController.Installed || checked)
+                checked: page.settingsScreen.boolSetting("suppressAwdlWhileStreaming", false)
+                onValueChangedByUser: value => page.settingsScreen.setSetting("suppressAwdlWhileStreaming", value)
+            }
+        }
+        DesktopSettingsRow {
+            objectName: "awdlHelperStatus"
+            width: parent.width; paperStyle: true; glyph: "shield"
+            title: qsTr("AWDL helper")
+            description: page.awdlController.busy ? qsTr("Waiting for macOS authorization…")
+                : page.awdlController.error !== "" ? qsTr("Error")
+                : page.awdlController.leased ? qsTr("Active")
+                : page.awdlController.state === MacAwdlController.Installed ? qsTr("Ready")
+                : qsTr("Not installed")
+            DesktopSettingsButton {
+                objectName: "awdlHelperInstallButton"
+                enabled: !page.awdlController.busy
+                text: page.awdlController.state === MacAwdlController.Installed ? qsTr("Remove helper…") : qsTr("Install helper…")
+                onClicked: {
+                    if (page.awdlController.state === MacAwdlController.Installed)
+                        page.awdlController.uninstall()
+                    else
+                        page.awdlController.install()
+                }
+            }
+            DesktopSettingsButton {
+                objectName: "awdlHelperRefreshButton"
+                text: qsTr("Refresh")
+                enabled: !page.awdlController.busy
+                onClicked: page.awdlController.refresh()
+            }
+        }
+        DesktopSettingsRow {
+            width: parent.width; paperStyle: true; glyph: "info"
+            title: qsTr("Administrator authorization")
+            description: qsTr("Installing or removing the helper requires administrator approval once. Only install it if you trust this copy of OpenNOW. Ad-hoc signing does not verify the publisher.")
+            showDivider: false
+        }
+        DesktopSettingsRow {
+            objectName: "awdlHelperError"
+            visible: page.awdlController.error !== ""
+            width: parent.width; paperStyle: true; glyph: "info"
+            title: qsTr("AWDL helper needs attention")
+            description: page.awdlController.error
+            showDivider: false
+        }
+    }
     DesktopSettingsAdvanced {
         detail: qsTr("Transport · Network test · API proxy")
         expanded: page.settingsScreen.advancedOpen; onClicked: page.settingsScreen.advancedOpen = !page.settingsScreen.advancedOpen
@@ -66,6 +126,19 @@ Column {
         sourceComponent: DesktopSettingsPanel {
             width: page.availableWidth; paperStyle: true
             DesktopSettingsSection { text: qsTr("TRANSPORT") }
+            DesktopSettingsChoice {
+                objectName: "webrtcCompatibilityModeChoice"
+                width: parent.width; glyph: "globe"
+                title: qsTr("WebRTC compatibility mode")
+                description: qsTr("Automatic uses WebRTC for signed-in alliance accounts and NVST for NVIDIA accounts. Choose WebRTC or NVST to override either account type. Applies to new sessions only; existing sessions keep their transport.")
+                    + "\n" + qsTr("WebRTC is for compatibility only. Expect lower performance than NVST. Supports H.264 and H.265, SDR, and stereo. H.265 supports 10-bit color and the selected resolution and frame rate. No microphone or clipboard text. Requires direct UDP connectivity.")
+                enabled: !ShellStore.activeSession && !ShellStore.streamBusy && !ShellStore.pendingLaunchParams
+                maximumColumns: 3
+                items: [{value:"auto", label:qsTr("Automatic")},
+                    {value:"on", label:qsTr("WebRTC")}, {value:"off", label:qsTr("NVST")}]
+                value: page.settingsScreen.valueSetting("webrtcCompatibilityMode", "auto")
+                onSelected: value => page.settingsScreen.setSetting("webrtcCompatibilityMode", value)
+            }
             DesktopSettingsRow {
                 width: parent.width; paperStyle: true; glyph: "bolt"; title: qsTr("L4S")
                 description: qsTr("Request scalable low-latency transport for the next session")

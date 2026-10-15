@@ -1,322 +1,329 @@
 #include "app/platform/MacAwdlController.h"
 
 #include <QSignalSpy>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QTest>
-
-#ifdef Q_OS_MACOS
-#include <cstring>
-#include <ifaddrs.h>
-#include <net/if.h>
-#endif
 
 class FakeMacAwdlBackend final : public MacAwdlBackend
 {
 public:
-    MacAwdlController::State currentState = MacAwdlController::Enabled;
-    QString readError;
+    MacAwdlController::State currentState = MacAwdlController::Installed;
+    Payload payload{QStringLiteral("/private/tmp/opennow-awdl-Abc123"), QString(64, QLatin1Char('a')), {}, 8192};
     QString program;
     QStringList arguments;
-    int reads = 0;
     int starts = 0;
+    int preparations = 0;
+    int acquisitions = 0;
+    int releases = 0;
     int kills = 0;
+    int *externalReleases = nullptr;
 
-    MacAwdlController::State readState(QString *error) override
-    {
-        ++reads;
-        *error = readError;
-        return currentState;
-    }
-
+    MacAwdlController::State readState() override { return currentState; }
+    Payload preparePayload() override { ++preparations; return payload; }
     void start(const QString &path, const QStringList &args) override
     {
         ++starts;
         program = path;
         arguments = args;
     }
-
     void kill() override { ++kills; }
+    void acquire() override { ++acquisitions; }
+    void release() override
+    {
+        ++releases;
+        if (externalReleases) ++*externalReleases;
+    }
 };
 
 class MacAwdlControllerTest final : public QObject
 {
     Q_OBJECT
 
+    static QString administratorCommand(const QString &request)
+    {
+        const auto prefix = QStringLiteral("do shell script \"");
+        const auto suffix = QStringLiteral("\" with administrator privileges");
+        if (!request.startsWith(prefix) || !request.endsWith(suffix)) return {};
+        const auto encoded = request.mid(prefix.size(), request.size() - prefix.size() - suffix.size());
+        QString shell;
+        for (qsizetype index = 0; index < encoded.size(); ++index) {
+            if (encoded[index] == QLatin1Char('\\') && index + 1 < encoded.size()) ++index;
+            shell += encoded[index];
+        }
+        return shell;
+    }
+
 private slots:
-    void defaultBackendReadsStatusWithoutActions()
+    void defaultBackendNeverRequestsAuthorization()
     {
         MacAwdlController controller;
-        QSignalSpy busy(&controller, &MacAwdlController::busyChanged);
+        QVERIFY(!controller.enabled());
+        QVERIFY(!controller.leased());
         controller.refresh();
         QVERIFY(!controller.busy());
-        QCOMPARE(busy.count(), 0);
-#ifdef Q_OS_MACOS
-        ifaddrs *addresses = nullptr;
-        auto expectedState = MacAwdlController::Unknown;
-        if (getifaddrs(&addresses) == 0) {
-            expectedState = MacAwdlController::Unavailable;
-            for (const ifaddrs *entry = addresses; entry; entry = entry->ifa_next) {
-                if (entry->ifa_name && std::strcmp(entry->ifa_name, "awdl0") == 0) {
-                    expectedState = (entry->ifa_flags & IFF_UP) ? MacAwdlController::Enabled
-                                                              : MacAwdlController::Disabled;
-                    break;
-                }
-            }
-            freeifaddrs(addresses);
-        }
-        QCOMPARE(controller.state(), expectedState);
-        if (expectedState == MacAwdlController::Unknown)
-            QVERIFY(!controller.error().isEmpty());
-#else
-        QCOMPARE(controller.state(), MacAwdlController::Unsupported);
-#endif
-    }
-
-    void unsupportedPlatform()
-    {
 #ifndef Q_OS_MACOS
-        MacAwdlController controller;
         QCOMPARE(controller.state(), MacAwdlController::Unsupported);
-        controller.disable();
-        controller.enable();
+        controller.install();
+        controller.uninstall();
+        controller.setEnabled(true);
+        controller.setStreaming(true);
         QVERIFY(!controller.busy());
-        QCOMPARE(controller.state(), MacAwdlController::Unsupported);
+        QVERIFY(!controller.leased());
 #endif
     }
 
-    void nonActionableStates_data()
+    void leaseRequiresPreferenceAndActualStreaming()
     {
-        QTest::addColumn<MacAwdlController::State>("state");
-        QTest::newRow("unsupported") << MacAwdlController::Unsupported;
-        QTest::newRow("absent") << MacAwdlController::Unavailable;
-        QTest::newRow("unknown") << MacAwdlController::Unknown;
-    }
-
-    void nonActionableStates()
-    {
-        QFETCH(MacAwdlController::State, state);
         auto backend = std::make_unique<FakeMacAwdlBackend>();
         auto *fake = backend.get();
-        fake->currentState = state;
-        if (state == MacAwdlController::Unknown)
-            fake->readError = QStringLiteral("getifaddrs failed");
         MacAwdlController controller(std::move(backend));
-        QCOMPARE(controller.state(), state);
-        controller.disable();
-        controller.enable();
+        controller.setStreaming(true);
+        QCOMPARE(fake->acquisitions, 0);
+        controller.setStreaming(false);
+        controller.setEnabled(true);
+        QCOMPARE(fake->acquisitions, 0);
+        controller.setStreaming(true);
+        QCOMPARE(fake->acquisitions, 1);
+        QVERIFY(!controller.leased());
+        emit fake->leaseAcquired();
+        QVERIFY(controller.leased());
+        controller.setStreaming(true);
+        controller.refresh();
+        QCOMPARE(fake->acquisitions, 1);
+        controller.setStreaming(false);
+        QCOMPARE(fake->releases, 1);
+        QVERIFY(!controller.leased());
+        controller.setStreaming(false);
+        QCOMPARE(fake->releases, 1);
+        controller.setStreaming(true);
+        QCOMPARE(fake->acquisitions, 2);
+        controller.setEnabled(false);
+        QCOMPARE(fake->releases, 2);
+        QCOMPARE(fake->starts, 0);
+    }
+
+    void canceledAcquisitionAndDestructionRelease()
+    {
+        int releases = 0;
+        {
+            auto backend = std::make_unique<FakeMacAwdlBackend>();
+            auto *fake = backend.get();
+            fake->externalReleases = &releases;
+            MacAwdlController controller(std::move(backend));
+            controller.setEnabled(true);
+            controller.setStreaming(true);
+            controller.setEnabled(false);
+            emit fake->leaseAcquired();
+            QVERIFY(!controller.leased());
+            QCOMPARE(releases, 2);
+            controller.setEnabled(true);
+            emit fake->leaseAcquired();
+            QVERIFY(controller.leased());
+        }
+        QCOMPARE(releases, 3);
+    }
+
+    void failureDoesNotLoopAndRefreshRetries()
+    {
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        MacAwdlController controller(std::move(backend));
+        controller.setEnabled(true);
+        controller.setStreaming(true);
+        emit fake->leaseFailed(QStringLiteral("helper disconnected"));
+        QVERIFY(!controller.leased());
+        QCOMPARE(controller.error(), QStringLiteral("helper disconnected"));
+        QTest::qWait(10);
+        controller.setStreaming(true);
+        QCOMPARE(fake->acquisitions, 1);
+        controller.refresh();
+        QCOMPARE(fake->acquisitions, 2);
+        QVERIFY(controller.error().isEmpty());
+        emit fake->leaseAcquired();
+        QVERIFY(controller.leased());
+        controller.setStreaming(false);
+        emit fake->leaseFailed(QStringLiteral("stale failure"));
+        QVERIFY(controller.error().isEmpty());
+    }
+
+    void installationUsesVerifiedSnapshotAndFixedPlist()
+    {
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        fake->currentState = MacAwdlController::NotInstalled;
+        MacAwdlController controller(std::move(backend));
+        controller.setEnabled(true);
+        controller.setStreaming(true);
+        QCOMPARE(fake->acquisitions, 0);
+        controller.install();
+        QVERIFY(controller.busy());
+        QCOMPARE(fake->preparations, 1);
+        QCOMPARE(fake->program, QStringLiteral("/usr/bin/osascript"));
+        QCOMPARE(fake->arguments.size(), 2);
+        const auto script = fake->arguments[1];
+        QVERIFY(script.contains(fake->payload.path));
+        QVERIFY(script.contains(fake->payload.sha256));
+        QVERIFY(script.contains(QStringLiteral("/usr/bin/shasum -a 256")));
+        QVERIFY(script.contains(QStringLiteral("/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c")));
+        QVERIFY(script.contains(QStringLiteral("O_RDONLY|O_NOFOLLOW|O_NONBLOCK")));
+        QVERIFY(script.contains(QStringLiteral("-f $in or die")));
+        QVERIFY(script.contains(QStringLiteral("alarm 5")));
+        QVERIFY(script.contains(QStringLiteral("$total<=33554432")));
+        QVERIFY(script.contains(QStringLiteral("8192")));
+        QVERIFY(script.contains(QStringLiteral("<key>ExitTimeOut</key><integer>20</integer>")));
+        QVERIFY(script.contains(QStringLiteral("<key>ProgramArguments</key>")));
+        QVERIFY(script.contains(QStringLiteral("/Library/PrivilegedHelperTools/io.github.opencloudgaming.OpenNOW.awdl-helper")));
+        QVERIFY(!script.contains(QStringLiteral("Contents/Resources")));
+        QVERIFY(!script.contains(QStringLiteral("/sbin/ifconfig")));
+        controller.install();
+        controller.uninstall();
+        QCOMPARE(fake->starts, 1);
+        fake->currentState = MacAwdlController::Installed;
+        emit fake->finished(0, QProcess::NormalExit);
+        QVERIFY(!controller.busy());
+        QVERIFY(controller.error().isEmpty());
+        QCOMPARE(fake->acquisitions, 1);
+        emit fake->leaseAcquired();
+        controller.uninstall();
+        QVERIFY(!controller.leased());
+        QCOMPARE(fake->releases, 1);
+        QCOMPARE(fake->preparations, 1);
+        QVERIFY(!fake->arguments[1].contains(fake->payload.path));
+        QVERIFY(fake->arguments[1].contains(QStringLiteral("/var/db/opennow-awdl/restore")));
+        QVERIFY(fake->arguments[1].contains(QStringLiteral("exit 1; fi;")));
+        fake->currentState = MacAwdlController::NotInstalled;
+        emit fake->finished(0, QProcess::NormalExit);
+        QVERIFY(controller.error().isEmpty());
+        QCOMPARE(fake->acquisitions, 1);
+    }
+
+    void unsafePayloadsAreRejected_data()
+    {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QString>("digest");
+        QTest::newRow("shell-path") << QStringLiteral("/private/tmp/opennow-awdl-';id;") << QString(64, QLatin1Char('a'));
+        QTest::newRow("other-path") << QStringLiteral("/tmp/opennow-awdl-Abc123") << QString(64, QLatin1Char('a'));
+        QTest::newRow("shell-digest") << QStringLiteral("/private/tmp/opennow-awdl-Abc123") << QStringLiteral("';id");
+    }
+
+    void administratorRequestUsesCleanEnvironmentAndValidShellQuoting()
+    {
+#ifndef Q_OS_UNIX
+        QSKIP("POSIX installer syntax validation requires a Unix shell.");
+#endif
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        fake->currentState = MacAwdlController::NotInstalled;
+        MacAwdlController controller(std::move(backend));
+        const auto validSyntax = [](const QString &request) {
+            auto shell = administratorCommand(request);
+            if (!shell.startsWith(QStringLiteral("/usr/bin/env -i PATH="))) return false;
+            shell.replace(QStringLiteral("/bin/sh -c"), QStringLiteral("/bin/sh -n -c"));
+            QProcess parser;
+            parser.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), shell});
+            return parser.waitForFinished(2'000) && parser.exitStatus() == QProcess::NormalExit
+                && parser.exitCode() == 0;
+        };
+        controller.install();
+        QVERIFY(validSyntax(fake->arguments[1]));
+        fake->currentState = MacAwdlController::Installed;
+        emit fake->finished(0, QProcess::NormalExit);
+        controller.uninstall();
+        QVERIFY(validSyntax(fake->arguments[1]));
+    }
+
+    void privilegedCopyUsesTheOpenedDescriptorAndRejectsSpecialFiles()
+    {
+#ifndef Q_OS_UNIX
+        QSKIP("POSIX descriptor-copy validation requires a Unix host.");
+#endif
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        fake->currentState = MacAwdlController::NotInstalled;
+        MacAwdlController controller(std::move(backend));
+        controller.install();
+        auto command = administratorCommand(fake->arguments[1]);
+        QVERIFY(command.contains(QStringLiteral("/bin/sh -c")));
+        command.replace(QStringLiteral("/bin/sh -c"), QStringLiteral("/usr/bin/printf %s"));
+        QProcess extract;
+        extract.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), command});
+        QVERIFY(extract.waitForFinished(2'000));
+        QCOMPARE(extract.exitCode(), 0);
+        const auto script = QString::fromUtf8(extract.readAllStandardOutput());
+        const auto begin = script.indexOf(QStringLiteral("-e '"));
+        QVERIFY(begin >= 0);
+        const auto end = script.indexOf(QStringLiteral("' "), begin + 4);
+        QVERIFY(end > begin);
+        const auto copyProgram = script.mid(begin + 4, end - begin - 4);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto source = directory.filePath(QStringLiteral("source"));
+        QFile input(source);
+        QVERIFY(input.open(QIODevice::WriteOnly));
+        const QByteArray data(8192, 'x');
+        QCOMPARE(input.write(data), data.size());
+        input.close();
+        const auto destination = directory.filePath(QStringLiteral("destination"));
+        const auto copy = [&](const QString &path, const QString &target, int expectedExit) {
+            QProcess process;
+            process.start(QStringLiteral("/usr/bin/perl"), {
+                QStringLiteral("-MFcntl=O_RDONLY,O_NOFOLLOW,O_NONBLOCK"), QStringLiteral("-e"),
+                copyProgram, path, target, QString::number(data.size())});
+            if (!process.waitForFinished(2'000)) return false;
+            return process.exitStatus() == QProcess::NormalExit
+                && (expectedExit == 0 ? process.exitCode() == 0 : process.exitCode() != 0);
+        };
+        QVERIFY(copy(source, destination, 0));
+        QFile output(destination);
+        QVERIFY(output.open(QIODevice::ReadOnly));
+        QCOMPARE(output.readAll(), data);
+        const auto link = directory.filePath(QStringLiteral("link"));
+        QVERIFY(QFile::link(source, link));
+        const auto rejected = directory.filePath(QStringLiteral("rejected"));
+        QVERIFY(copy(link, rejected, 1));
+        QVERIFY(!QFile::exists(rejected));
+        const auto fifo = directory.filePath(QStringLiteral("fifo"));
+        QCOMPARE(QProcess::execute(QStringLiteral("/usr/bin/mkfifo"), {fifo}), 0);
+        QVERIFY(copy(fifo, rejected, 1));
+        QVERIFY(!QFile::exists(rejected));
+    }
+
+    void unsafePayloadsAreRejected()
+    {
+        QFETCH(QString, path);
+        QFETCH(QString, digest);
+        auto backend = std::make_unique<FakeMacAwdlBackend>();
+        auto *fake = backend.get();
+        fake->payload = {path, digest, {}, 8192};
+        MacAwdlController controller(std::move(backend));
+        controller.install();
         QCOMPARE(fake->starts, 0);
         QVERIFY(!controller.busy());
         QVERIFY(!controller.error().isEmpty());
-        if (state == MacAwdlController::Unknown)
-            QCOMPARE(controller.error(), fake->readError);
     }
 
-    void refreshUsesOnlyStateRead()
+    void processFailuresAndTimeout()
     {
         auto backend = std::make_unique<FakeMacAwdlBackend>();
         auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        QSignalSpy status(&controller, &MacAwdlController::statusChanged);
-        controller.refresh();
-        QCOMPARE(status.count(), 0);
-        fake->currentState = MacAwdlController::Disabled;
-        controller.refresh();
-        QCOMPARE(controller.state(), MacAwdlController::Disabled);
-        QCOMPARE(status.count(), 1);
-        QCOMPARE(fake->starts, 0);
-    }
-
-    void refreshClearsRecoveredReadError()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        fake->currentState = MacAwdlController::Unknown;
-        fake->readError = QStringLiteral("getifaddrs failed");
-        MacAwdlController controller(std::move(backend));
-        QCOMPARE(controller.error(), fake->readError);
-        controller.disable();
-        QCOMPARE(controller.error(), fake->readError);
-        QSignalSpy errors(&controller, &MacAwdlController::errorChanged);
-        fake->currentState = MacAwdlController::Enabled;
-        fake->readError.clear();
-        controller.refresh();
-        QCOMPARE(controller.state(), MacAwdlController::Enabled);
-        QVERIFY(controller.error().isEmpty());
-        QCOMPARE(errors.count(), 1);
-        QCOMPARE(fake->starts, 0);
-    }
-
-    void recoveredReadPreservesActionError()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        controller.disable();
-        emit fake->standardErrorReady("execution error: User canceled. (-128)\n");
+        fake->currentState = MacAwdlController::NotInstalled;
+        MacAwdlController controller(std::move(backend), 10);
+        controller.install();
+        emit fake->processError(QProcess::FailedToStart);
+        QVERIFY(!controller.busy());
+        QVERIFY(!controller.error().isEmpty());
+        controller.install();
         emit fake->finished(1, QProcess::NormalExit);
-        const auto actionError = controller.error();
-        QVERIFY(actionError.contains(QStringLiteral("(-128)")));
-        fake->currentState = MacAwdlController::Unknown;
-        fake->readError = QStringLiteral("getifaddrs failed");
-        controller.refresh();
-        QVERIFY(controller.error().contains(actionError));
-        QVERIFY(controller.error().contains(fake->readError));
-        fake->currentState = MacAwdlController::Enabled;
-        fake->readError.clear();
-        controller.refresh();
-        QCOMPARE(controller.error(), actionError);
-        QCOMPARE(fake->starts, 1);
-    }
-
-    void fixedCommandsAndIdempotence()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        QSignalSpy busy(&controller, &MacAwdlController::busyChanged);
-        controller.enable();
-        QCOMPARE(fake->starts, 0);
-        controller.disable();
-        QVERIFY(controller.busy());
-        QCOMPARE(fake->program, QStringLiteral("/usr/bin/osascript"));
-        QCOMPARE(fake->arguments, QStringList({QStringLiteral("-e"), QStringLiteral("do shell script \"/sbin/ifconfig awdl0 down\" with administrator privileges")}));
-        fake->currentState = MacAwdlController::Disabled;
-        emit fake->finished(0, QProcess::NormalExit);
-        QCOMPARE(controller.state(), MacAwdlController::Disabled);
         QVERIFY(!controller.busy());
-        QVERIFY(controller.error().isEmpty());
-        QCOMPARE(busy.count(), 2);
-        controller.disable();
-        QCOMPARE(fake->starts, 1);
-        controller.enable();
-        QCOMPARE(fake->program, QStringLiteral("/usr/bin/osascript"));
-        QCOMPARE(fake->arguments, QStringList({QStringLiteral("-e"), QStringLiteral("do shell script \"/sbin/ifconfig awdl0 up\" with administrator privileges")}));
-        fake->currentState = MacAwdlController::Enabled;
-        emit fake->finished(0, QProcess::NormalExit);
-        QVERIFY(controller.error().isEmpty());
-        QCOMPARE(controller.state(), MacAwdlController::Enabled);
-    }
-
-    void staleStateIsReadBeforeAction()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        fake->currentState = MacAwdlController::Disabled;
-        controller.disable();
-        QCOMPARE(fake->starts, 0);
-        QCOMPARE(controller.state(), MacAwdlController::Disabled);
-    }
-
-    void duplicateRequestsAreIgnored()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        controller.disable();
-        const int reads = fake->reads;
-        controller.disable();
-        controller.enable();
-        controller.refresh();
-        QCOMPARE(fake->starts, 1);
-        QCOMPARE(fake->reads, reads);
-        fake->currentState = MacAwdlController::Disabled;
-        emit fake->finished(0, QProcess::NormalExit);
-        QCOMPARE(fake->reads, reads + 1);
-        QCOMPARE(fake->starts, 1);
-    }
-
-    void processFailures_data()
-    {
-        QTest::addColumn<QString>("outcome");
-        QTest::addColumn<QString>("expectedError");
-        QTest::newRow("cancel") << QStringLiteral("cancel") << QStringLiteral("(-128)");
-        QTest::newRow("nonzero") << QStringLiteral("nonzero") << QStringLiteral("exit code 7");
-        QTest::newRow("launch") << QStringLiteral("launch") << QStringLiteral("Could not start");
-        QTest::newRow("crash") << QStringLiteral("crash") << QStringLiteral("crashed");
-        QTest::newRow("io") << QStringLiteral("io") << QStringLiteral("process error");
-    }
-
-    void processFailures()
-    {
-        QFETCH(QString, outcome);
-        QFETCH(QString, expectedError);
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        controller.disable();
-        fake->currentState = MacAwdlController::Disabled;
-        if (outcome == QStringLiteral("launch")) {
-            emit fake->processError(QProcess::FailedToStart);
-        } else if (outcome == QStringLiteral("crash")) {
-            emit fake->processError(QProcess::Crashed);
-            emit fake->finished(9, QProcess::CrashExit);
-        } else if (outcome == QStringLiteral("io")) {
-            emit fake->processError(QProcess::ReadError);
-            QCOMPARE(fake->kills, 1);
-            QVERIFY(controller.busy());
-            emit fake->finished(9, QProcess::CrashExit);
-        } else {
-            if (outcome == QStringLiteral("cancel")) {
-                emit fake->standardErrorReady(QByteArray(100'000, 'x'));
-                emit fake->standardErrorReady("execution error: User canceled. (-128)\n");
-            }
-            emit fake->finished(7, QProcess::NormalExit);
-        }
-        QVERIFY(!controller.busy());
-        QVERIFY2(controller.error().contains(expectedError), qPrintable(controller.error()));
-        QVERIFY(controller.error().size() < 1024);
-        QCOMPARE(controller.state(), MacAwdlController::Disabled);
-        controller.refresh();
-        QVERIFY(controller.error().contains(expectedError));
-        controller.disable();
-        QVERIFY(controller.error().isEmpty());
-        QCOMPARE(fake->starts, 1);
-    }
-
-    void timeoutWaitsForExitAndRefreshes()
-    {
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend), 1);
-        controller.disable();
+        QVERIFY(!controller.error().isEmpty());
+        controller.install();
         QTRY_COMPARE(fake->kills, 1);
         QVERIFY(controller.busy());
         QVERIFY(controller.error().contains(QStringLiteral("timed out")));
-        controller.enable();
-        controller.disable();
-        QCOMPARE(fake->starts, 1);
-        fake->currentState = MacAwdlController::Disabled;
         emit fake->finished(9, QProcess::CrashExit);
         QVERIFY(!controller.busy());
-        QCOMPARE(controller.state(), MacAwdlController::Disabled);
         QVERIFY(controller.error().contains(QStringLiteral("timed out")));
-    }
-
-    void unexpectedPostState_data()
-    {
-        QTest::addColumn<MacAwdlController::State>("state");
-        QTest::newRow("reenabled") << MacAwdlController::Enabled;
-        QTest::newRow("absent") << MacAwdlController::Unavailable;
-        QTest::newRow("read-failure") << MacAwdlController::Unknown;
-    }
-
-    void unexpectedPostState()
-    {
-        QFETCH(MacAwdlController::State, state);
-        auto backend = std::make_unique<FakeMacAwdlBackend>();
-        auto *fake = backend.get();
-        MacAwdlController controller(std::move(backend));
-        controller.disable();
-        fake->currentState = state;
-        if (state == MacAwdlController::Unknown)
-            fake->readError = QStringLiteral("getifaddrs failed");
-        emit fake->finished(0, QProcess::NormalExit);
-        QCOMPARE(controller.state(), state);
-        QVERIFY(!controller.error().isEmpty());
-        QVERIFY(!controller.busy());
-        QCOMPARE(fake->starts, 1);
-        controller.refresh();
-        QCOMPARE(fake->starts, 1);
     }
 };
 

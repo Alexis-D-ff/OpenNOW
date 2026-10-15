@@ -5,9 +5,10 @@ QtObject {
     property QtObject runtime: QtObject {
         property bool running: true
         property string lastError: ""
-        signal presentationError(string message)
+        signal presentationError(string message, string errorCode)
         signal responseReceived(var response)
         signal eventReceived(var event)
+        signal sessionTimerReceived(int timerType, double secondsLeft, bool active)
         signal callbacksDropped(int count)
         function start() { return true }
         function send(command) { return true }

@@ -16,6 +16,7 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderBackend {
+    MediaCodec,
     Vulkan,
     Cuda,
     VaApi,
@@ -33,6 +34,7 @@ impl DecoderBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderPreference {
+    MediaCodecOnly,
     Automatic,
     HardwareOnly,
     VulkanOnly,
@@ -81,6 +83,7 @@ pub struct SessionConfig {
     pub embedded_presentation: bool,
     pub vulkan_device: Option<Arc<crate::SharedVulkanDevice>>,
     pub v4l2_device: Option<PathBuf>,
+    pub mediacodec_socket: Option<PathBuf>,
     pub encoded_queue_depth: usize,
     pub decoded_queue_depth: usize,
     pub audio: Option<AudioConfig>,
@@ -95,6 +98,7 @@ impl SessionConfig {
             embedded_presentation: false,
             vulkan_device: None,
             v4l2_device: None,
+            mediacodec_socket: None,
             // Hardware decoders can briefly stop consuming while the driver
             // retires a large frame or reallocates surfaces. Four frames is
             // too small for a 120 Hz stream and turns a harmless burst into a
@@ -186,6 +190,11 @@ enum VideoCommand {
 
 type EventQueue = Arc<BoundedQueue<BackendEvent>>;
 
+struct VideoWorkerCompletion {
+    startup: mpsc::SyncSender<Result<DecoderBackend>>,
+    close_error: Arc<Mutex<Option<Error>>>,
+}
+
 pub struct LinuxSession {
     config: SessionConfig,
     state: Arc<Mutex<LifecycleState>>,
@@ -200,6 +209,7 @@ pub struct LinuxSession {
     video_submit: Mutex<()>,
     decode_timings: DecodeTimingProbe,
     video_worker: Option<JoinHandle<()>>,
+    video_close_error: Arc<Mutex<Option<Error>>>,
     audio_worker: Option<JoinHandle<()>>,
 }
 
@@ -212,6 +222,7 @@ impl LinuxSession {
         let events = Arc::new(BoundedQueue::new(64));
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let decode_timings = DecodeTimingProbe::default();
+        let video_close_error = Arc::new(Mutex::new(None));
         let video_worker = {
             let config = config.clone();
             let state = Arc::clone(&state);
@@ -219,6 +230,7 @@ impl LinuxSession {
             let decoded = Arc::clone(&decoded_frames);
             let events = Arc::clone(&events);
             let decode_timings = decode_timings.clone();
+            let close_error = Arc::clone(&video_close_error);
             thread::Builder::new()
                 .name("opennow-linux-video".to_owned())
                 .spawn(move || {
@@ -229,7 +241,10 @@ impl LinuxSession {
                         decoded,
                         events,
                         decode_timings,
-                        startup_tx,
+                        VideoWorkerCompletion {
+                            startup: startup_tx,
+                            close_error,
+                        },
                     )
                 })
                 .map_err(|error| Error::io(Subsystem::Session, error))?
@@ -315,6 +330,7 @@ impl LinuxSession {
             video_submit: Mutex::new(()),
             decode_timings,
             video_worker: Some(video_worker),
+            video_close_error,
             audio_worker,
         })
     }
@@ -438,6 +454,16 @@ impl LinuxSession {
         if let Some(worker) = self.video_worker.take() {
             if worker.join().is_err() {
                 failure = Some(Error::WorkerPanic("video"));
+            }
+        }
+        if let Some(error) = self
+            .video_close_error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            if failure.is_none() {
+                failure = Some(error);
             }
         }
         if let Some(worker) = self.audio_worker.take() {
@@ -579,8 +605,12 @@ fn run_video_worker(
     decoded: Arc<BoundedQueue<DecodedVideoFrame>>,
     events: EventQueue,
     decode_timings: DecodeTimingProbe,
-    startup: mpsc::SyncSender<Result<DecoderBackend>>,
+    completion: VideoWorkerCompletion,
 ) {
+    let VideoWorkerCompletion {
+        startup,
+        close_error,
+    } = completion;
     let (mut backend, mut decoder) = match open_preferred_decoder(&config, config.stream_format) {
         Ok(opened) => opened,
         Err(error) => {
@@ -590,6 +620,7 @@ fn run_video_worker(
         }
     };
     if !publish_video_readiness(&state, &events, backend, &startup) {
+        finish_video_close(&mut decoder, &close_error, &state, &events);
         return;
     }
     // Never feed a fresh hardware decoder an inter-frame packet. In
@@ -603,7 +634,7 @@ fn run_video_worker(
     let mut active_format = config.stream_format;
     let mut active_generation = 0;
     loop {
-        let poll_output = backend == DecoderBackend::V4l2 && config.codec == VideoCodec::H264;
+        let poll_output = decoder_needs_poll(backend, config.codec);
         let command =
             match commands.wait_pop(Duration::from_millis(if poll_output { 5 } else { 100 })) {
                 QueuePop::Item(command) => Some(command),
@@ -626,6 +657,13 @@ fn run_video_worker(
                 );
                 decoded.clear();
                 decode_timings.clear();
+                if backend == DecoderBackend::MediaCodec {
+                    if let Err(error) = close_decoder(&mut decoder) {
+                        report_video_close_error(error, &close_error, &state, &events);
+                        return;
+                    }
+                    drop(decoder);
+                }
                 match open_preferred_decoder(&config, format) {
                     Ok((new_backend, new_decoder)) => {
                         if new_backend != backend {
@@ -662,9 +700,18 @@ fn run_video_worker(
                 if generation < active_generation {
                     continue;
                 }
-                if reset || generation > active_generation {
+                if (reset || generation > active_generation)
+                    && !(backend == DecoderBackend::MediaCodec && need_keyframe)
+                {
                     decoded.clear();
                     decode_timings.clear();
+                    if backend == DecoderBackend::MediaCodec {
+                        if let Err(error) = close_decoder(&mut decoder) {
+                            report_video_close_error(error, &close_error, &state, &events);
+                            return;
+                        }
+                        drop(decoder);
+                    }
                     match open_preferred_decoder(&config, active_format) {
                         Ok((new_backend, new_decoder)) => {
                             if new_backend != backend {
@@ -679,7 +726,6 @@ fn run_video_worker(
                             }
                             backend = new_backend;
                             decoder = new_decoder;
-                            active_generation = generation;
                         }
                         Err(error) => {
                             report_worker_error(&state, &events, error);
@@ -688,6 +734,7 @@ fn run_video_worker(
                     }
                     need_keyframe = true;
                 }
+                active_generation = generation;
                 if need_keyframe && !frame.keyframe {
                     continue;
                 }
@@ -724,7 +771,12 @@ fn run_video_worker(
             Err(error @ Error::ReferenceLost { .. }) => {
                 decoded.clear();
                 if !reference_recovery.try_recover() {
+                    finish_video_close(&mut decoder, &close_error, &state, &events);
                     report_worker_error(&state, &events, error);
+                    return;
+                }
+                if let Err(error) = close_decoder(&mut decoder) {
+                    report_video_close_error(error, &close_error, &state, &events);
                     return;
                 }
                 drop(decoder);
@@ -779,6 +831,7 @@ fn run_video_worker(
                     decoder = new_decoder;
                 }
                 Err(_) => {
+                    finish_video_close(&mut decoder, &close_error, &state, &events);
                     report_worker_error(&state, &events, error);
                     return;
                 }
@@ -792,6 +845,36 @@ fn run_video_worker(
         &decode_timings,
         "shutdown",
     );
+    finish_video_close(&mut decoder, &close_error, &state, &events);
+}
+
+fn finish_video_close(
+    decoder: &mut Box<dyn VideoDecoder>,
+    close_error: &Mutex<Option<Error>>,
+    state: &Mutex<LifecycleState>,
+    events: &EventQueue,
+) {
+    if let Err(error) = close_decoder(decoder) {
+        report_video_close_error(error, close_error, state, events);
+    }
+}
+
+fn report_video_close_error(
+    error: Error,
+    close_error: &Mutex<Option<Error>>,
+    state: &Mutex<LifecycleState>,
+    events: &EventQueue,
+) {
+    let message = error.to_string();
+    *close_error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+    report_worker_error(state, events, Error::backend(Subsystem::Session, message));
+}
+
+fn decoder_needs_poll(backend: DecoderBackend, codec: VideoCodec) -> bool {
+    backend == DecoderBackend::MediaCodec
+        || (backend == DecoderBackend::V4l2 && codec == VideoCodec::H264)
 }
 
 const AUDIO_DECODE_STRIKES_BEFORE_RESET: u32 = 8;
@@ -1069,6 +1152,35 @@ fn write_audio(
                 message: message.clone(),
             },
         );
+        let restarted = sink.restart().and_then(|restarted| {
+            if restarted {
+                sink.write(pcm, cancelled)?;
+            }
+            Ok(restarted)
+        });
+        if cancelled() {
+            return Err(AudioWriteError::Closed);
+        }
+        match restarted {
+            Ok(true) => {
+                emit(
+                    events,
+                    BackendEvent::AudioOutputRecovered {
+                        from: *backend,
+                        to: *backend,
+                    },
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => emit(
+                events,
+                BackendEvent::AudioOutputError {
+                    backend: *backend,
+                    message: error.to_string(),
+                },
+            ),
+        }
         match open_audio_fallback(config, *backend) {
             Ok(mut fallback) => {
                 let fallback_backend = fallback.backend();
@@ -1168,6 +1280,7 @@ fn open_fallback_decoder(
 
 fn decoder_order(preference: DecoderPreference) -> &'static [DecoderBackend] {
     match preference {
+        DecoderPreference::MediaCodecOnly => &[DecoderBackend::MediaCodec],
         DecoderPreference::Automatic => &[
             DecoderBackend::Vulkan,
             DecoderBackend::Cuda,
@@ -1208,6 +1321,12 @@ fn open_decoder(
         validate_decoder_presentation(backend)?;
     }
     match backend {
+        DecoderBackend::MediaCodec => crate::video::MediaCodecDecoder::open(
+            config.codec,
+            format,
+            config.mediacodec_socket.as_deref(),
+        )
+        .map(|decoder| Box::new(decoder) as Box<dyn VideoDecoder>),
         #[cfg(all(feature = "ffmpeg", feature = "vulkan"))]
         DecoderBackend::Vulkan if config.embedded_presentation => {
             crate::video::FfmpegDecoder::open_shared(
@@ -1381,6 +1500,17 @@ fn flush_decoder(decoder: &mut Box<dyn VideoDecoder>) -> Result<Vec<DecodedVideo
     )
 }
 
+fn close_decoder(decoder: &mut Box<dyn VideoDecoder>) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.close())).unwrap_or_else(
+        |panic| {
+            Err(Error::backend(
+                Subsystem::Session,
+                format!("decoder panicked while closing: {}", panic_message(panic)),
+            ))
+        },
+    )
+}
+
 fn finish_decoder_drain(
     result: Result<Vec<DecodedVideoFrame>>,
     decoded: &BoundedQueue<DecodedVideoFrame>,
@@ -1433,6 +1563,136 @@ fn emit(events: &EventQueue, event: BackendEvent) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mediacodec_queued_keyframe_after_reconfigure_reuses_the_fresh_decoder() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let directory =
+            std::env::temp_dir().join(format!("opennow-mc-reconfigure-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("codec.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut submissions = 0;
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                loop {
+                    let mut header = [0u8; 16];
+                    stream.read_exact(&mut header).unwrap();
+                    let kind = u32::from_be_bytes(header[8..12].try_into().unwrap());
+                    let mut request =
+                        vec![0; u32::from_be_bytes(header[12..16].try_into().unwrap()) as usize];
+                    stream.read_exact(&mut request).unwrap();
+                    let (response_kind, payload) = match kind {
+                        2 => {
+                            let mut payload = Vec::new();
+                            for value in [1u32, 0, 8] {
+                                payload.extend_from_slice(&value.to_be_bytes());
+                            }
+                            payload.extend_from_slice(b"hardware");
+                            (102, payload)
+                        }
+                        3 => {
+                            submissions += 1;
+                            let mut payload = Vec::new();
+                            for value in [0u32, 1] {
+                                payload.extend_from_slice(&value.to_be_bytes());
+                            }
+                            payload.extend_from_slice(&request[..8]);
+                            payload.extend_from_slice(&4u32.to_be_bytes());
+                            payload.extend_from_slice(&2u32.to_be_bytes());
+                            payload.extend_from_slice(&[16, 16, 16, 16, 128, 128]);
+                            (103, payload)
+                        }
+                        4 | 5 => {
+                            let mut payload = u32::from(kind == 5).to_be_bytes().to_vec();
+                            payload.extend_from_slice(&0u32.to_be_bytes());
+                            (103, payload)
+                        }
+                        6 => (104, Vec::new()),
+                        _ => panic!("unexpected request {kind}"),
+                    };
+                    let mut bytes = Vec::new();
+                    for value in [0x44444d43u32, 1, response_kind, payload.len() as u32] {
+                        bytes.extend_from_slice(&value.to_be_bytes());
+                    }
+                    bytes.extend_from_slice(&payload);
+                    stream.write_all(&bytes).unwrap();
+                    if kind == 6 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(submissions, 1);
+        });
+
+        let format = super::StreamFormat::video_default(2, 2).unwrap();
+        let mut config = super::SessionConfig::new(format);
+        config.audio = None;
+        config.decoder_preference = super::DecoderPreference::MediaCodecOnly;
+        config.mediacodec_socket = Some(path.clone());
+        let mut session = super::LinuxSession::start(config).unwrap();
+        let state = session.state.lock().unwrap();
+        session.video_needs_keyframe.store(true, Ordering::Release);
+        let generation = session.video_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        assert_eq!(
+            session
+                .video_commands
+                .replace(super::VideoCommand::Reconfigure { format, generation }),
+            QueuePush::Added
+        );
+        assert_eq!(
+            super::queue_video_command(
+                &session.video_commands,
+                &session.events,
+                &session.video_generation,
+                &session.video_needs_keyframe,
+                super::EncodedVideoFrame::new(vec![0, 0, 0, 1, 0x65], 42, true).unwrap(),
+            )
+            .unwrap(),
+            super::PushOutcome::Queued
+        );
+        drop(state);
+        let frame = session
+            .recv_frame_timeout(Duration::from_secs(3))
+            .expect("queued recovery keyframe decoded without a third OPEN");
+        assert_eq!(frame.timestamp_us, 42);
+        session.stop().unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn mediacodec_requires_explicit_selection_and_idle_polling() {
+        assert_eq!(
+            super::decoder_order(super::DecoderPreference::MediaCodecOnly),
+            &[super::DecoderBackend::MediaCodec]
+        );
+        for preference in [
+            super::DecoderPreference::Automatic,
+            super::DecoderPreference::HardwareOnly,
+        ] {
+            assert!(!super::decoder_order(preference).contains(&super::DecoderBackend::MediaCodec));
+        }
+        assert!(super::decoder_needs_poll(
+            super::DecoderBackend::MediaCodec,
+            super::VideoCodec::H264
+        ));
+        assert!(super::validate_decoder_presentation(super::DecoderBackend::MediaCodec).is_ok());
+        let format = super::StreamFormat::video_default(2, 2).unwrap();
+        let mut config = super::SessionConfig::new(format);
+        config.decoder_preference = super::DecoderPreference::MediaCodecOnly;
+        assert!(
+            super::open_fallback_decoder(&config, format, super::DecoderBackend::MediaCodec)
+                .is_err()
+        );
+    }
+
     struct DelayedDecoder {
         frame: Option<super::DecodedVideoFrame>,
         reference_lost: bool,
@@ -2216,6 +2476,85 @@ mod tests {
         assert!(packets.is_closed());
         assert!(unavailable.load(Ordering::Acquire));
         worker.join().expect("audio worker thread");
+    }
+
+    #[test]
+    fn audio_output_restart_is_bounded_and_reports_only_accepted_output() {
+        struct RestartingSink {
+            accepts_restarted_output: bool,
+            restarts: Arc<std::sync::atomic::AtomicUsize>,
+            writes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl super::AudioSink for RestartingSink {
+            fn backend(&self) -> crate::AudioBackend {
+                crate::AudioBackend::PipeWire
+            }
+
+            fn write(&mut self, _: &[f32], _: &dyn Fn() -> bool) -> crate::Result<()> {
+                self.writes.fetch_add(1, Ordering::Relaxed);
+                if self.accepts_restarted_output && self.restarts.load(Ordering::Relaxed) > 0 {
+                    Ok(())
+                } else {
+                    Err(crate::Error::DeviceLost {
+                        subsystem: crate::Subsystem::PipeWire,
+                        reason: "stalled child".to_owned(),
+                    })
+                }
+            }
+
+            fn restart(&mut self) -> crate::Result<bool> {
+                self.restarts.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+        }
+
+        for accepts_restarted_output in [true, false] {
+            let events: super::EventQueue = Arc::new(super::BoundedQueue::new(32));
+            let config = super::AudioConfig {
+                output_device: "pipewire:fixed-output".to_owned(),
+                ..super::AudioConfig::default()
+            };
+            let restarts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut sink: Box<dyn super::AudioSink + Send> = Box::new(RestartingSink {
+                accepts_restarted_output,
+                restarts: Arc::clone(&restarts),
+                writes: Arc::clone(&writes),
+            });
+            let mut backend = crate::AudioBackend::PipeWire;
+            let result = super::write_audio(
+                &mut sink,
+                &mut backend,
+                &config,
+                &events,
+                &[0.0; 960],
+                &|| false,
+            );
+            assert_eq!(result.is_ok(), accepts_restarted_output);
+            assert_eq!(restarts.load(Ordering::Relaxed), 1);
+            assert_eq!(writes.load(Ordering::Relaxed), 2);
+            let observed = collect_events(&events);
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        super::BackendEvent::AudioOutputRecovered {
+                            from: crate::AudioBackend::PipeWire,
+                            to: crate::AudioBackend::PipeWire,
+                        }
+                    ))
+                    .count(),
+                usize::from(accepts_restarted_output),
+                "recovery requires accepted PCM, saw {observed:?}"
+            );
+            assert!(
+                !observed
+                    .iter()
+                    .any(|event| matches!(event, super::BackendEvent::StateChanged(_)))
+            );
+        }
     }
 
     #[test]

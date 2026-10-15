@@ -32,10 +32,11 @@ class MacOSBuildContractTest(unittest.TestCase):
         workflow = QT_SOURCE.parent / ".github/workflows/qt-build.yml"
         commands = [shlex.split(line.strip()) for line in workflow.read_text().splitlines()
                     if line.strip().startswith("lipo ")]
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 3)
         self.assertEqual(
             commands,
             [["lipo", "$bin/$executable", "-verify_arch", "arm64"],
+             ["lipo", "$app/Contents/Helpers/opennow-awdl-helper", "-verify_arch", "arm64"],
              ["lipo", "$bin/libopennow_streamer_ffi.dylib", "-verify_arch", "arm64"]],
         )
 

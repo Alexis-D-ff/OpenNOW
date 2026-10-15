@@ -20,13 +20,16 @@ incomplete protocol replies are bounded and retried rather than reused as stale 
 
 Frame generation is disabled for HDR sources because the current interpolation path is designed for SDR. Native frames retain their original cadence and HDR precision; enabling HDR does not insert SDR-generated frames into the stream.
 
-HDR requests use ten bits and preserve the selected chroma format. Auto prefers HEVC and falls back to AV1 for 4:2:0 only when the runtime reports the required hardware support. HDR 4:4:4 requires HEVC and a supported ten-bit 4:4:4 decode and conversion path. Explicit incompatible codecs or unavailable output produce an actionable error before allocating a new session. An explicit server SDR response remains SDR; a saved HDR preference does not override the accepted session format.
+HDR requests use ten bits and preserve the selected chroma format. Auto prefers AV1, then HEVC, then H.264 for SDR and HDR, subject to the runtime's exact decode profiles. AV1 Auto remains limited to 120 FPS and 5120x2880 pixels; explicit AV1 above 120 FPS also caps at 120 because higher throughput is not confirmed by the current probes. HDR 4:4:4 requires HEVC and a supported ten-bit 4:4:4 decode and conversion path. Unsupported HDR falls back to SDR before allocation and records a `stream_profile_fallback` diagnostic. An unavailable explicit codec still fails. An explicit server SDR response remains SDR; a saved HDR preference does not override the accepted session format. When the catalog shows that the store version being launched does not support HDR, the core requests that session as SDR, leaves the HDR setting on, and the stream shows a short "Streaming in SDR" note after the first frame of the first such session for that game. Unknown catalog metadata keeps the HDR request.
+
+Every H.264 selection caps at 120 FPS and fewer than 4,953,600 pixels. Per-codec maximum decode dimensions also constrain allocation: Windows enforces 4096x2304, and Linux Vulkan reports limits from the attached device. Core selects the closest supported aspect mode that fits those limits and logs each change without rewriting saved preferences. An oversized accepted session fails attachment instead of silently changing its mode.
 
 ## 10-bit 4:4:4
 
 Ten-bit 4:4:4 does not imply HDR. Select Auto or HEVC;
 the supported GFN request policy does not request AV1 4:4:4. Explicit incompatible codec
-choices fail before session allocation instead of silently reducing chroma. Enabling HDR
+choices become HEVC when the selected backend supports the requested 4:4:4 profile.
+Otherwise preflight reduces chroma to 4:2:0 and records the fallback. Enabling HDR
 preserves 4:4:4 and promotes an eight-bit selection to ten bits for that session without rewriting the saved SDR preference.
 
 - Linux uses the attached Vulkan Video device's exact HEVC range-extension profile and P410
@@ -48,13 +51,14 @@ preserves 4:4:4 and promotes an eight-bit selection to ten bits for that session
 
 Platform profile and conversion tests are not evidence of a successful GFN session or an HDR
 display's output. The exact GPU, driver, decoder, service tier, and compositor must support
-the requested mode. Unsupported profiles remain explicit errors rather than CPU fallbacks.
+the requested mode. New allocations log unsupported-profile reductions; an incompatible
+accepted profile fails attachment rather than switching to a CPU fallback.
 
 ## Color and ownership contract
 
 CloudMatch receives `sdrHdrMode=1` for native HDR and `trueHdr=false`. TrueHDR requests a separate server-side AI SDR-to-HDR filter, which OpenNOW does not offer. SDR requests send `displayData:null`. HDR requests include measured output luminance when a validated snapshot is available, or requested-content defaults of 1000 nits maximum, 400 nits frame average, and zero minimum. A complete, validated runtime metadata group can additionally supply maximum full-frame luminance and display primaries and white point. Missing or invalid optional metadata is omitted rather than inferred. The luminance defaults are not physical-display measurements. Wayland color-management continues to supply only its target luminance pair: its PQ description does not establish a display peak from primary color volume luminance or expose a sustained full-frame value. The accepted HDR mode is carried through resume, stream preparation, and NVST's dynamic-range and bit-depth settings.
 
-Decoder metadata carries transfer function, primaries, matrix, range, and supported chroma location. Explicit metadata takes precedence over negotiated defaults; unspecified fields use those defaults. Unsupported combinations and precision-losing paths fail explicitly. Pixel depth alone never selects an HDR transfer function.
+Decoder metadata carries transfer function, primaries, matrix, range, and supported chroma location. Recognized decoded metadata takes precedence over negotiated defaults; unspecified fields use those defaults. Windows MF and Linux FFmpeg also retain each negotiated field when a decoded descriptor is unsupported, with bounded warnings. Incompatible color combinations and precision-losing paths still fail explicitly. Pixel depth alone never selects an HDR transfer function.
 
 The texture format and encoded RGB color space are separate fields introduced in FFI ABI 6 and retained in later ABI releases. Windows publishes PQ BT.2020 in RGB10A2; Linux preserves PQ/HLG BT.2020 in RGBA16F. Qt performs the transfer-function and gamut conversion for the actual output. HDR/SDR changes retain per-frame metadata and bounded GPU resource ownership. Build and deploy the Qt shell and native streamer together; an older ABI is rejected.
 
@@ -69,12 +73,12 @@ SDR chrome is converted to the output's linear white level before blending. scRG
 Automated shader and native tests cannot prove an HDR monitor's optical output. Test the packaged build, rather than mixing a new shell with an older native runtime.
 
 1. Enable HDR in the OS and confirm that OpenNOW reports an available HDR output. Start an HDR-capable game with HDR enabled, Auto codec, and the normal native backend. Verify that in-game HDR controls become available and highlights extend beyond SDR white without lifting black levels or washing out colors.
-2. Repeat with explicit HEVC and AV1 where the GPU supports each codec. Confirm that an H.264 or software override produces an error rather than a falsely labeled HDR stream. Disable HDR and confirm that ordinary 8-bit and 10-bit SDR sessions retain their previous appearance.
+2. Repeat with explicit HEVC and AV1 where the GPU supports each codec. Confirm that an H.264 or software override starts an SDR session, records a `stream_profile_fallback` diagnostics event, and never produces a falsely labeled HDR stream. Disable HDR and confirm that ordinary 8-bit and 10-bit SDR sessions retain their previous appearance.
 3. Test windowed and fullscreen modes, resizing, and DPI changes. Open and close F3 statistics, the stream menu, and exit confirmation. Check text brightness, translucent edges, black backgrounds, pointer confinement, gameplay key routing, and uninterrupted audio/video.
 4. Move the active stream between HDR and SDR displays and toggle OS HDR. Verify deliberate SDR tone mapping on an SDR output, recovery when HDR returns, and no session restart. Repeat with overlays open.
 5. End the session and start another with the opposite HDR setting, then exercise reconnect/resume. Verify that the new or accepted session's color mode wins over stale frame textures and saved preferences.
 6. On Linux, test Vulkan Video and VAAPI separately when available. Check diagnostics for explicit import/decoder failures; audio continuing alone does not prove video health.
-7. Select HEVC, 10-bit 4:4:4, and HDR. Verify that the accepted session and decoded frames retain ten-bit 4:4:4 and PQ BT.2020, then check saturated colors and highlights in the game. Reconnect and resume with saved settings changed to SDR 4:2:0; the accepted HDR 4:4:4 profile must still win. Repeat the window, overlay, and display-transition checks above. An unsupported decoder must fail explicitly rather than reduce chroma or copy frames to the CPU.
+7. Select HEVC, 10-bit 4:4:4, and HDR. Verify that the accepted session and decoded frames retain ten-bit 4:4:4 and PQ BT.2020, then check saturated colors and highlights in the game. Reconnect and resume with saved settings changed to SDR 4:2:0; the accepted HDR 4:4:4 profile must still win. Repeat the window, overlay, and display-transition checks above. A decoder without HEVC 4:4:4 starts the session at 4:2:0 with a recorded fallback, and a resumed 4:4:4 session that the current decoder cannot present must fail explicitly rather than reduce chroma or copy frames to the CPU.
 
 When reporting a failure, include the OS/compositor, GPU and driver, display model, HDR setting, codec/backend, window mode, and whether the failure occurred during startup, decoding, presentation, or a display transition. Do not share account tokens or session credentials.
 

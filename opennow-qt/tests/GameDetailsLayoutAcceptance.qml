@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import OpenNOW
 
 OwnershipAcceptance {
@@ -15,6 +16,12 @@ OwnershipAcceptance {
     onKeyChanged: if (key !== 0) settling = true
     property int modifiers: 0
     readonly property bool owned: Qt.application.arguments.indexOf("--details-owned") >= 0
+    readonly property bool reportFocusCheck: Qt.application.arguments.indexOf("--details-session-report") >= 0
+    property int playCount: 0
+    property Connections playObserver: Connections {
+        target: root.reportFocusCheck ? root.modal : null
+        function onPlayRequested() { root.playCount++ }
+    }
 
     function inside(item, bounds) {
         const top = item.mapToItem(bounds, 0, 0)
@@ -51,6 +58,26 @@ OwnershipAcceptance {
             || top.y + control.height <= corner.y || top.y >= corner.y + close.height,
             "close button covers " + control.objectName)
     }
+    function verifyHomePlay(selected) {
+        const poster = find(host, "desktopHomePoster-" + selected.id)
+        check(poster, "Home rail poster was not created")
+        AppController.inputMode = "keyboard"
+        poster.current = true
+        const play = find(poster, "desktopPosterPlay")
+        check(play && play.visible, "Home poster Play button is not visible on the selected card")
+        poster.activateAt(play.mapToItem(poster, play.width / 2, play.height / 2))
+        const inspection = request(ShellStore.launchInspectRequestId)
+        check(AppController.route === "home" && inspection && inspection.method === "catalog.launch.inspect"
+            && inspection.params.appId === selected.id && inspection.params.variantId === selected.variants[0].id,
+            "Home Play opened details instead of launching the selected store version")
+        ShellStore.invalidateLaunchInspection()
+        ShellStore.pendingLaunchParams = null
+        ShellStore.streamState = "idle"
+        ShellStore.streamMessage = ""
+        poster.activateAt(Qt.point(poster.width / 2, DesktopTokens.px(8)))
+        check(AppController.route === "game-detail" && ShellStore.selectedGame.id === selected.id,
+            "Home card body no longer opens details")
+    }
     function run(windowHost) {
         host = windowHost
         const scaleIndex = Qt.application.arguments.indexOf("--details-scale")
@@ -77,8 +104,16 @@ OwnershipAcceptance {
         owner.catalogGames = [selected]
         owner.catalogState = "ready"
         owner.catalogComplete = true
+        if (owned && !reportFocusCheck) verifyHomePlay(selected)
         ShellStore.selectedGame = selected
         AppController.navigate("game-detail")
+        if (reportFocusCheck) {
+            modal = find(host, "desktopGameModal")
+            ShellStore.lastSessionReport = {gameTitle:selected.title, durationMs:120000,
+                decoderErrors:0, outputErrors:0, drops:{}}
+            AppController.showOverlay("session-report")
+            return true
+        }
         primary = bindDetail(host)
         detail(owned ? "ready" : "ownership_required")
         if (!owned) owner.selectedLaunchDecision = {status:"ownership_required",
@@ -89,6 +124,8 @@ OwnershipAcceptance {
         return true
     }
     function advance() {
+        if (reportFocusCheck)
+            return advanceReportFocus()
         polishLayout(modal)
         if (settling) {
             settling = false
@@ -187,6 +224,44 @@ OwnershipAcceptance {
             phase = 7
             return 0
         }
+        return 1
+    }
+
+    function advanceReportFocus() {
+        if (settling) {
+            settling = false
+            return 0
+        }
+        const window = host.Window.window
+        check(window.active, "the desktop report check requires an active window")
+        const loader = find(host, "mainRouteLoader")
+        const report = find(host, "desktopSessionReport")
+        if (phase === 0 || phase === 2) {
+            check(AppController.overlay === "session-report" && report,
+                  "the desktop session report is not displayed")
+            check(!loader.enabled, "the report left the background route enabled")
+            const done = find(report, "sessionReportDoneButton")
+            check(done.activeFocus, "the queued game modal callback stole report focus")
+            if (phase === 2)
+                find(report, "sessionReportDiagnosticsButton").forceActiveFocus()
+            key = Qt.Key_Return
+            phase++
+            return 0
+        }
+        if (phase === 1) {
+            check(AppController.overlay === "" && AppController.route === "game-detail",
+                  "Done did not dismiss only the report")
+            check(loader.enabled && playCount === 0,
+                  "report Enter reached the background game action")
+            check(find(modal, "desktopGamePlay").activeFocus,
+                  "closing the report did not restore game modal focus")
+            AppController.showOverlay("session-report")
+            phase++
+            return 0
+        }
+        check(phase === 3 && AppController.route === "diagnostics" && AppController.overlay === "",
+              "the focused report Diagnostics action did not navigate")
+        check(playCount === 0 && loader.enabled, "report input leaked to the game modal")
         return 1
     }
 }

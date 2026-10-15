@@ -17,7 +17,11 @@ QtObject {
         "controller": "controller_xboxseries",
         "xbox": "controller_xboxseries",
         "playstation": "controller_playstation5",
-        "keyboard": "keyboard"
+        "keyboard": "keyboard",
+        "stick": "flight_stick",
+        "throttle": "flight_throttle",
+        "pedals": "flight_pedals",
+        "wheel": "flight_wheel"
     })
 
     function sourceFor(glyph: string, ink: color): url {

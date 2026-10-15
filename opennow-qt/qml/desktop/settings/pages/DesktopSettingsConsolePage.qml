@@ -23,13 +23,8 @@ Column {
         DesktopSettingsSection { text: qsTr("STARTUP") }
         DesktopSettingsRow {
             width: parent.width; paperStyle: true; glyph: "controller"; title: qsTr("Start in console mode")
-            description: qsTr("Remember this choice for the next time OpenNOW launches")
+            description: qsTr("Remember this choice for the next time OpenNOW launches"); showDivider: false
             DesktopSettingsToggle { checked: page.settingsScreen.boolSetting("launchInConsoleMode",false); onValueChangedByUser: value => page.settingsScreen.setSetting("launchInConsoleMode",value) }
-        }
-        DesktopSettingsRow {
-            width: parent.width; paperStyle: true; glyph: "person"; title: qsTr("Controller profile picker")
-            description: qsTr("Choose a saved profile when console mode starts"); showDivider: false
-            DesktopSettingsToggle { checked: page.settingsScreen.boolSetting("consoleProfilePickerOnLaunch",true); onValueChangedByUser: value => page.settingsScreen.setSetting("consoleProfilePickerOnLaunch",value) }
         }
     }
     DesktopSettingsPanel {

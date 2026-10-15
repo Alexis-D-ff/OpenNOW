@@ -85,7 +85,9 @@ Column {
             width: parent.width; paperStyle: true; glyph: "sun"; title: qsTr("HDR")
             description: !ShellStore.tenBitAllowedByMembership() ? qsTr("HDR10 requires a Performance or Ultimate membership.")
                 : HdrOutput.supported && !ShellStore.hdrDecoderAvailable()
-                ? qsTr("HDR requires a supported 10-bit H.265 or AV1 hardware decoder.") : HdrOutput.status
+                ? qsTr("HDR requires a supported 10-bit H.265 or AV1 hardware decoder.")
+                : HdrOutput.supported ? HdrOutput.status + " " + qsTr("Games without HDR stream in SDR; you get a short note the first time.")
+                : HdrOutput.status
             DesktopSettingsToggle {
                 objectName: "enableHdrToggle"
                 checked: page.settingsScreen.boolSetting("enableHdr", false)
@@ -103,6 +105,10 @@ Column {
             value: page.settingsScreen.valueSetting("colorQuality", "8bit_420")
             onSelected: value => page.settingsScreen.setChoice("colorQuality", value)
         }
+    }
+    DesktopSettingsDlssOverrides {
+        width: parent.width
+        settingsScreen: page.settingsScreen
     }
     DesktopSettingsPanel {
         width: parent.width; paperStyle: true
@@ -208,11 +214,49 @@ Column {
             width: parent.width; paperStyle: true; glyph: "info"
             title: qsTr("Background stream reminder")
             description: qsTr("Request taskbar or dock attention every 5 minutes while a stream runs in the background. Availability depends on your desktop. Does not prevent AFK timeouts.")
-            showDivider: false
             DesktopSettingsToggle {
                 objectName: "backgroundStreamReminderToggle"
                 checked: page.settingsScreen.valueSetting("backgroundStreamReminder", false) === true
                 onValueChangedByUser: value => page.settingsScreen.setSetting("backgroundStreamReminder", value)
+            }
+        }
+        DesktopSettingsRow {
+            objectName: "antiAfkIndicatorRow"
+            width: parent.width; paperStyle: true; glyph: "info"; title: qsTr("Anti-AFK indicator")
+            description: qsTr("Show the ANTI-AFK ON badge while Anti-AFK is enabled during streaming.")
+            showDivider: !page.settingsScreen.boolSetting("showAntiAfkIndicator", true)
+            DesktopSettingsToggle {
+                objectName: "antiAfkIndicatorToggle"
+                checked: page.settingsScreen.boolSetting("showAntiAfkIndicator", true)
+                Accessible.name: qsTr("Anti-AFK indicator")
+                onValueChangedByUser: value => page.settingsScreen.setSetting("showAntiAfkIndicator", value)
+            }
+        }
+        DesktopSettingsRow {
+            objectName: "antiAfkReminderRow"
+            visible: !page.settingsScreen.boolSetting("showAntiAfkIndicator", true)
+            width: parent.width; paperStyle: true; glyph: "info"; title: qsTr("Anti-AFK reminder")
+            description: qsTr("With the indicator off, briefly show it again at this interval.")
+            DesktopSettingsSegmented {
+                objectName: "antiAfkReminderIntervalSelector"
+                readonly property int current: Number(page.settingsScreen.valueSetting("antiAfkReminderEveryMinutes", 15))
+                options: [5, 10, 15, 30, 60].map(value => ({label: qsTr("%1 min").arg(value), value: value}))
+                optionWidth: 56; selectedIndex: options.findIndex(item => item.value === current)
+                onSelected: (index,item) => page.settingsScreen.setSetting("antiAfkReminderEveryMinutes", item.value)
+            }
+        }
+        DesktopSettingsRow {
+            objectName: "antiAfkReminderDurationRow"
+            visible: !page.settingsScreen.boolSetting("showAntiAfkIndicator", true)
+            width: parent.width; paperStyle: true; glyph: "info"; title: qsTr("Anti-AFK reminder duration")
+            description: qsTr("How long each periodic Anti-AFK activation reminder stays visible.")
+            showDivider: false
+            DesktopSettingsSegmented {
+                objectName: "antiAfkReminderDurationSelector"
+                readonly property int current: Number(page.settingsScreen.valueSetting("antiAfkReminderDurationSeconds", 5))
+                options: [2, 3, 5, 8, 10].map(value => ({label: qsTr("%1 s").arg(value), value: value}))
+                optionWidth: 48; selectedIndex: options.findIndex(item => item.value === current)
+                onSelected: (index,item) => page.settingsScreen.setSetting("antiAfkReminderDurationSeconds", item.value)
             }
         }
     }

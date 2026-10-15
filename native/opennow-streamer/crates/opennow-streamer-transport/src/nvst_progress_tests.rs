@@ -428,7 +428,7 @@ fn pause_and_stop_never_report_a_progress_stall() {
         "resume must open a fresh stall window instead of inheriting the paused interval"
     );
 
-    receiver.stop();
+    receiver.stop(NvstStopCause::Requested);
     assert_eq!(
         receiver.poll_frame_progress(origin + Duration::from_secs(60), policy),
         None
@@ -672,5 +672,268 @@ fn resumed_progress_is_reported_once_when_an_episode_closes_on_assembly() {
     assert_eq!(
         receiver.frame_progress().stage,
         NvstFrameProgressStage::Tracking
+    );
+}
+
+#[test]
+fn unified_bundle_reports_the_same_frame_stall_events_as_dedicated_video() {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = socket.local_addr().unwrap();
+    let peer_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut config = config();
+    config.video_peer = peer_socket.local_addr().unwrap();
+    config.bundle_peer = Some(config.video_peer);
+    config.unified_socket = true;
+    config.timeout = Duration::from_millis(200);
+    let crypto = test_srtp(&config);
+    let (media_sender, _media_receiver) = mpsc::sync_channel(64);
+    let (event_sender, event_receiver) = mpsc::channel();
+    let session = spawn_receiver_thread(
+        "opennow-test-unified-recovery",
+        socket,
+        config,
+        media_sender,
+        event_sender,
+        NvstWorkerSetup {
+            rtc: Some(Rtc::new(Instant::now())),
+            hid_runtime: None,
+            upstream_ready: None,
+        },
+    )
+    .unwrap();
+    let feeder = thread::spawn(move || {
+        for index in 0..20_u16 {
+            let packet = protect_partial_frame(&crypto, index, 7);
+            peer_socket.send_to(&packet, destination).unwrap();
+            thread::sleep(Duration::from_millis(40));
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut states = Vec::new();
+    let mut recovered = false;
+    while Instant::now() < deadline {
+        match event_receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(NvstReceiveEvent::FrameProgressStall {
+                recovery_required, ..
+            }) => states.push(recovery_required),
+            Ok(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::FrameProgress {
+                last_assembled_frame_index,
+                ..
+            })) => {
+                assert_eq!(last_assembled_frame_index, None);
+                recovered = true;
+                break;
+            }
+            Ok(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout { .. })) => {
+                panic!("authenticated partial packets must keep media liveness healthy")
+            }
+            _ => {}
+        }
+    }
+    session.stop();
+    feeder.join().unwrap();
+    assert!(
+        recovered,
+        "unified Mjolnir must run the assembly-progress watchdog"
+    );
+    assert_eq!(states, [false, true]);
+}
+
+#[test]
+fn delayed_play_does_not_consume_the_dedicated_first_video_timeout() {
+    let mut config = config();
+    config.startup_timeout = Duration::from_secs(8);
+    let feedback = config.feedback();
+    feedback.wait_for_play();
+    let mut receiver = NvstVideoReceiver::new(config);
+    let started = receiver.timeout_origin;
+    let played = started + Duration::from_secs(19);
+    assert_eq!(receiver.poll_timeout(played), None);
+    assert_eq!(receiver.state(), NvstReceiverState::Running);
+    feedback.complete_play(played);
+    assert_eq!(
+        receiver.poll_timeout(played + Duration::from_secs(8) - Duration::from_nanos(1)),
+        None
+    );
+    assert_eq!(
+        receiver.poll_timeout(played + Duration::from_secs(8)),
+        Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout {
+            idle_for: Duration::from_secs(8)
+        }))
+    );
+    assert_eq!(receiver.poll_timeout(played + Duration::from_secs(9)), None);
+}
+
+#[test]
+fn pre_play_video_preserves_the_windows_first_video_allowance() {
+    for raw in [true, false] {
+        let mut config = config();
+        config.startup_timeout = Duration::from_secs(60);
+        config.timeout = Duration::from_secs(8);
+        let feedback = config.feedback();
+        let crypto = test_srtp(&config);
+        feedback.wait_for_play();
+        let mut receiver = NvstVideoReceiver::new(config);
+        let started = receiver.timeout_origin;
+        if raw {
+            receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 0, 7), started);
+        } else {
+            receiver.process_mjolnir_payload(1, 0, &[], started);
+        }
+        let played = started + Duration::from_secs(19);
+        feedback.complete_play(played);
+        assert_eq!(receiver.poll_timeout(played + Duration::from_secs(8)), None);
+        assert_eq!(
+            receiver.poll_frame_progress(played + Duration::from_secs(8), progress_policy()),
+            None
+        );
+        assert_eq!(
+            receiver.poll_timeout(played + Duration::from_secs(60) - Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(
+            receiver.poll_timeout(played + Duration::from_secs(60)),
+            Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout {
+                idle_for: Duration::from_secs(60)
+            }))
+        );
+    }
+}
+
+#[test]
+fn early_partial_video_cannot_start_a_frame_watchdog_before_play() {
+    let config = config();
+    let feedback = config.feedback();
+    let crypto = test_srtp(&config);
+    feedback.wait_for_play();
+    let mut receiver = NvstVideoReceiver::new(config);
+    let started = receiver.timeout_origin;
+    let packet = protect_partial_frame(&crypto, 0, 7);
+    receiver.process_datagram(peer(), &packet, started);
+    let played = started + Duration::from_secs(19);
+    assert_eq!(receiver.poll_timeout(played), None);
+    assert_eq!(
+        receiver.poll_frame_progress(played, progress_policy()),
+        None
+    );
+    feedback.complete_play(played);
+    assert_eq!(
+        receiver.poll_frame_progress(played, progress_policy()),
+        None
+    );
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 1, 7), played);
+    assert_eq!(
+        receiver.poll_frame_progress(
+            played + Duration::from_secs(2) - Duration::from_nanos(1),
+            progress_policy()
+        ),
+        None
+    );
+    assert!(matches!(
+        receiver.poll_frame_progress(played + Duration::from_secs(2), progress_policy()),
+        Some(NvstFrameProgressEvent::KeyframeRequested { .. })
+    ));
+}
+
+#[test]
+fn bundle_play_completion_arms_the_shared_dedicated_video_clock() {
+    let bundle_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let video_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let peer_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut config = config();
+    config.video_peer = peer_socket.local_addr().unwrap();
+    config.bundle_peer = Some(config.video_peer);
+    config.mjolnir_udp_port = Some(video_socket.local_addr().unwrap().port());
+    config.startup_timeout = Duration::from_millis(120);
+    let feedback = config.feedback();
+    let (play_sender, play_receiver) = mpsc::channel();
+    let (media_sender, _media_receiver) = mpsc::sync_channel(64);
+    let (event_sender, event_receiver) = mpsc::channel();
+    let bundle = spawn_receiver_thread(
+        "opennow-test-play-clock",
+        bundle_socket,
+        config.clone(),
+        media_sender.clone(),
+        event_sender.clone(),
+        NvstWorkerSetup {
+            rtc: Some(Rtc::new(Instant::now())),
+            hid_runtime: None,
+            upstream_ready: Some(play_receiver),
+        },
+    )
+    .unwrap();
+    assert_eq!(feedback.video_timeout_origin(Instant::now()), None);
+    let video =
+        spawn_nvst_mjolnir_receiver(video_socket, config, media_sender, event_sender).unwrap();
+    let before_play = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < before_play {
+        assert!(!matches!(
+            event_receiver.recv_timeout(Duration::from_millis(20)),
+            Ok(NvstReceiveEvent::RecoveryNeeded(
+                NvstRecovery::Timeout { .. }
+            ))
+        ));
+    }
+    let played = Instant::now();
+    play_sender.send(()).unwrap();
+    let deadline = played + Duration::from_secs(2);
+    let mut timeout = None;
+    while Instant::now() < deadline {
+        if let Ok(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout { idle_for })) =
+            event_receiver.recv_timeout(Duration::from_millis(20))
+        {
+            timeout = Some(idle_for);
+            break;
+        }
+    }
+    video.stop();
+    bundle.stop();
+    assert!(timeout.is_some_and(|idle| idle >= Duration::from_millis(120)));
+    assert!(
+        matches!(*feedback.video_startup.lock().unwrap(), VideoStartup::PlayComplete(at) if at >= played)
+    );
+}
+
+#[test]
+fn first_post_play_packet_starts_the_idle_budget_and_frame_watchdog() {
+    let mut config = config();
+    config.startup_timeout = Duration::from_secs(60);
+    config.timeout = Duration::from_secs(8);
+    let feedback = config.feedback();
+    let crypto = test_srtp(&config);
+    feedback.wait_for_play();
+    let mut receiver = NvstVideoReceiver::new(config);
+    let started = receiver.timeout_origin;
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 0, 7), started);
+    let played = started + Duration::from_secs(19);
+    feedback.complete_play(played);
+    let received = played + Duration::from_secs(30);
+    assert_eq!(receiver.poll_timeout(received), None);
+    receiver.process_datagram(peer(), &protect_partial_frame(&crypto, 1, 7), received);
+    assert!(!receiver.initial_timeout_pending);
+    assert_eq!(
+        receiver.frame_progress.first_authenticated_at,
+        Some(received)
+    );
+    assert_eq!(
+        receiver.poll_frame_progress(
+            received + Duration::from_secs(2) - Duration::from_nanos(1),
+            progress_policy()
+        ),
+        None
+    );
+    assert!(matches!(
+        receiver.poll_frame_progress(received + Duration::from_secs(2), progress_policy()),
+        Some(NvstFrameProgressEvent::KeyframeRequested { .. })
+    ));
+    assert_eq!(
+        receiver.poll_timeout(received + Duration::from_secs(8) - Duration::from_nanos(1)),
+        None
+    );
+    assert_eq!(
+        receiver.poll_timeout(received + Duration::from_secs(8)),
+        Some(NvstReceiveEvent::RecoveryNeeded(NvstRecovery::Timeout {
+            idle_for: Duration::from_secs(8)
+        }))
     );
 }

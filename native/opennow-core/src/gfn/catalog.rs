@@ -23,6 +23,11 @@ pub(super) const STORE_PANELS_QUERY: &str = r#"query GetStorePanels($vpcId: Stri
               supportedControls
               gfn {
                 status
+                features {
+                  __typename
+                  ... on GfnSubscriptionFeatureValue { key value }
+                  ... on GfnSubscriptionFeatureValueList { key values }
+                }
                 library { status selected }
               }
             }
@@ -424,6 +429,14 @@ impl GfnService {
         })
     }
 
+    /// Sets `dlss` on every catalog game in a response from NVIDIA's DLSS games list.
+    /// An unavailable list omits the `dlss` key, a loaded list sets `dlss: null` for a
+    /// game it does not list, and neither ever fails the response.
+    pub fn annotate_dlss(&self, response: &mut Value, settings: &Value) {
+        let index = self.dlss_games.index(settings);
+        super::dlss_support::annotate(response, index.as_deref());
+    }
+
     pub(super) fn check_catalog_revision(&self, revision: u64) -> Result<(), ServiceError> {
         if self
             .catalog_revision
@@ -665,7 +678,7 @@ impl GfnService {
             vpc,
             self.catalog_revision
                 .load(std::sync::atomic::Ordering::Acquire),
-            "catalog-v2"
+            "catalog-v3"
         ]))
     }
 
@@ -829,6 +842,8 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
             "stateDetails":serde_json::from_value::<crate::catalog_types::PatchDetails>(variant["gfn"]["stateDetails"].clone()).ok(),
             "gfnStatus":variant["gfn"]["status"],
             "supportsInGameSettingsPersistence":supports_persistence,
+            "features":matches!(variant["gfn"]["features"], Value::Array(_) | Value::Object(_))
+                .then(|| crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"])),
         }))
     }).collect::<Vec<_>>();
     let mut variant_ids = std::collections::HashSet::new();
@@ -912,7 +927,7 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
         .filter_map(|variant| variant["lastPlayedDate"].as_str())
         .next()
         .map(ToOwned::to_owned);
-    Some(json!({
+    let mut game = json!({
         "id":id,
         "uuid":id,
         "launchAppId":launch_id,
@@ -940,7 +955,9 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
         "isInLibrary":is_in_library,
         "selectedVariantIndex":selected_index,
         "variants":variants,
-    }))
+    });
+    game["requiresPaidMembership"] = json!(super::catalog_actions::requires_paid_membership(&game));
+    Some(game)
 }
 
 pub(super) fn bounded_id(

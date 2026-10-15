@@ -13,6 +13,74 @@ This crate exposes `opennow-streamer-core::Engine` as a C-compatible in-process 
 - `opennow_streamer_destroy` consumes the handle exactly once, waits for the engine and both callback queues to drain, and then returns. No call may race with destroy. A null handle is rejected; reusing a destroyed pointer is caller-side undefined behavior.
 - Every exported function catches Rust panics before they can unwind through the C ABI. A worker-thread panic closes the command queue.
 
+### Generic flight controls and wheels (ABI 15)
+
+Rebuild Qt and the native library together with ABI 15. The generic-HID exports are
+`opennow_streamer_replace_generic_hid_inventory`,
+`opennow_streamer_submit_generic_hid_report`,
+`opennow_streamer_take_generic_hid_output`, and
+`opennow_streamer_get_generic_hid_admissions`.
+
+The admission query takes a versioned `OpenNowGenericHidAdmissions` snapshot initialized
+with `OPENNOW_STREAMER_GENERIC_HID_VERSION` and its C size. It returns at most eight
+rows keyed by slot and incarnation: Pending until a sent attach receives a valid
+control-1 response, Admitted after acceptance, or Declined after refusal. Detach
+fallback and session replacement reset admission to Pending without inventing acceptance.
+
+Inventory rows use versioned `OpenNowGenericHidInterface` structures. Each row identifies
+one interface of a source slot and carries the source incarnation, VID, PID, revision,
+and a descriptor byte slice. Rows with the same slot must agree on device identity.
+Replacement is atomic. There are at most eight sources and 16 interfaces per source,
+with descriptors of at most 4,096 bytes. Empty descriptors retain explicit detach-on-pause
+fallback behavior. The caller's descriptor memory is copied before the call returns.
+
+`OpenNowGenericHidReport` submits an owned copy of at most 256 bytes. Normal input uses
+operation 0. Output and feature responses use their corresponding operation and an error
+byte. Source incarnations and interfaces are validated before queue admission. Each source
+has a 64-report, 16-KiB bound; overflow faults the source and preserves its release path.
+
+Before calling `opennow_streamer_take_generic_hid_output`, initialize the output's
+`version` to `OPENNOW_STREAMER_GENERIC_HID_VERSION` and `struct_size` to its C size.
+It returns `OK` with one copied command, or `CLOSED` when no command is pending.
+The output queue holds at most 32 commands and 8 KiB. The Qt host executes physical
+HID operations on its input worker, never inside an FFI callback or graphics callback.
+
+Capture closure generates descriptor-derived releases before forwarding stops. Missing
+or unsafe descriptors use detach and reattach instead. Session and device identity checks
+prevent old reports and outputs from reaching a replacement device. See
+[`docs/flight-controls.md`](../../../../docs/flight-controls.md) for wire semantics and
+the physical checks still required.
+
+### Server timers and termination (ABI 13)
+
+Rebuild Qt and the native library together with the current ABI 15. Structure layouts and callback
+ownership are unchanged. `event_callback` now delivers generation-scoped
+`session-timer` events with `startId`, `timerType`, `secondsLeft` and `active`.
+Timer type 4 warns of idle expiry; type 5 clears the warning. Successful gameplay
+input also clears an active warning with a type-4 event whose `active` is false.
+The shell displays this state above its existing video item without changing capture
+or media ownership.
+
+Server termination uses the existing error and stopped-status events. Their
+`termination` object has `source: "nvst-server"`, `startId`, `code: "server-terminated"`,
+the original `wireCode`, optional `reason` and `extendedCode`, and `resumable`.
+The wire result and the application's termination reason are different namespaces.
+Unknown classification fields are null; the shell retains CloudMatch reconciliation
+for these rather than guessing that the session has ended. A false `resumable` is
+authoritative and must prevent automatic native restarts and seat-resume attempts.
+Lifecycle timers coalesce to their latest state when the callback queue is full;
+terminal delivery waits on that bounded queue from the stopped session's event worker,
+never from the network or render thread.
+
+### Deterministic presentation incompatibility (ABI 12)
+
+`opennow_streamer_record_frame` returns `OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED` when the decoder's
+output kind cannot be imported with the graphics context's enabled capabilities, for example a
+DMA-BUF frame on a Vulkan context without `OPENNOW_STREAMER_GRAPHICS_CAP_VULKAN_DMABUF_IMPORT`.
+The same decoder and device fail identically on every attempt, so the host must not restart the
+media transport for it. `OPENNOW_STREAMER_RENDER_FAILED` remains the status for failures that a
+fresh device, surface, or session may clear. Rebuild Qt and the native library together.
+
 ### Windows adapter selection (ABI 10)
 
 ABI 10 appends `uint64_t windows_adapter_luid` to `OpenNowStreamerConfig`; rebuild the Qt shell
@@ -53,6 +121,17 @@ reservation through the ordered transport command queue. A second paste or a ful
 256-entry capture queue returns `QUEUE_FULL` without admitting any text, evicting
 gameplay input, or triggering the control-overflow shutdown. `OK` acknowledges whole
 local admission, not delivery to or insertion by the remote application.
+
+Deferred discrete input and paste share one ordered transport FIFO. One accepted
+paste keeps its single-flight reservation until all encoded chunks are admitted,
+cancelled, or the session stops. A paste retains at most 65,536 UTF-8 bytes plus
+bounded wire framing; the separate encoded-text bound is 128 KiB. Later gameplay
+input cannot overtake it, and successful prefixes are never resent. Cancellation
+discards only the remaining text and preserves queued key/button releases.
+Temporary SCTP pressure retries without ending media. If a second paste or an
+oversized encoded batch is rejected locally, ABI 13 emits a generation-scoped
+`text-input-error` event with `startId` and `reason`; Qt displays nonterminal retry
+feedback without including text contents in diagnostics.
 
 Capture loss, input unavailability, and session teardown cancel text still pending
 in capture or transport. Readiness changes are generation-scoped, so stale session
@@ -137,6 +216,16 @@ The returned texture dimensions describe the actual output;
 timestamps, color precision, frame-slot ownership, and scene-graph retirement
 remain unchanged. Qt must refresh the target after resize, fullscreen, or display
 scale changes, and must not infer source video geometry from upscaled textures.
+
+Qt publishes the decoded display size after a successful frame recording, using
+the actual recorded size for the Windows pending-frame path and retaining the
+decoded source size when MetalFX changes the texture size. Updates are coalesced
+and tagged with Qt's presentation generation, so a queued resize from a stopped
+or replaced session cannot change the next session's geometry. The existing video
+item uses the requested profile only until decoded dimensions arrive, then uses
+the decoded size for aspect fitting, pointer mapping and confinement. A decoded
+resize does not recreate the item, transport or session. This does not change the
+FFI layout or equate texture-slot generations with presentation generations.
 
 ### HDR texture metadata (introduced in ABI 6)
 

@@ -132,6 +132,7 @@ jobs:
           Older builds without the production update key (including v1.0.0) require one manual installation to enable verified updates.
           Linux AppImages include embedded update information and .zsync sidecars for external delta-update tools. Make the AppImage executable before launching.
           DEBs bundle Qt and SDL3; install with \`sudo apt install ./OpenNOW-Qt-$RELEASE_VERSION-Linux-x64.deb\` (use arm64 on ARM systems) to install system dependencies, including pkexec for update authorization.
+          Flatpak bundles are included for x64 and arm64; install with \`flatpak install --user ./OpenNOW-Qt-$RELEASE_VERSION-Linux-x64.flatpak\` (use arm64 on ARM systems). Flatpak updates are managed externally, not by the in-app updater.
 
           Intel macOS is not included. Windows ARM64 is cross-built, not runtime-tested by CI. Hardware-specific gameplay acceptance is not implied by CI passing.
           **Known issue: Alliance Partners may not work correctly.**

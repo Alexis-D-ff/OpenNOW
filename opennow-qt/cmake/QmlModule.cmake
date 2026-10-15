@@ -2,8 +2,17 @@ set_source_files_properties(qml/theme/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE
 set_source_files_properties(qml/state/ShellStore.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/desktop/components/DesktopTokens.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/InputPromptIcons.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/components/ConsoleStores.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 set(OPENNOW_CONTROLLER_ICON_FILES
+    res/input-prompts/flight_stick.svg
+    res/input-prompts/flight_stick-dark.svg
+    res/input-prompts/flight_throttle.svg
+    res/input-prompts/flight_throttle-dark.svg
+    res/input-prompts/flight_pedals.svg
+    res/input-prompts/flight_pedals-dark.svg
+    res/input-prompts/flight_wheel.svg
+    res/input-prompts/flight_wheel-dark.svg
     res/input-prompts/controller_playstation5-dark.svg
     res/input-prompts/controller_playstation5.svg
     res/input-prompts/controller_xboxseries-dark.svg
@@ -223,36 +232,63 @@ qt_add_qml_module(opennow-qt
         qml/components/ControllerGlyph.qml
         qml/components/InputPromptIcons.qml
         qml/components/KeyboardGlyph.qml
-        qml/components/FilterDropdown.qml
         qml/components/FocusFrame.qml
         qml/components/GameTile.qml
         qml/components/GlassButton.qml
+        qml/components/ConsoleActionButton.qml
+        qml/components/ConsoleActionColumn.qml
+        qml/components/ConsoleLaunchAnimation.qml
+        qml/components/ConsoleListRow.qml
+        qml/components/ConsoleSheetFrame.qml
+        qml/components/ConsoleChoiceSheet.qml
+        qml/components/ConsoleFilterSheet.qml
+        qml/components/ConsoleWarningSheet.qml
+        qml/components/ConsoleStores.qml
+        qml/components/ConsoleStoreMark.qml
+        qml/components/ConsoleStoreChip.qml
+        qml/components/LaunchStage.qml
+        qml/components/SessionGlyphs.qml
+        qml/components/QueueAdPlayback.qml
+        qml/overlays/ConsoleFriendsOverlay.qml
+        qml/overlays/ConsoleSessionConflict.qml
+        qml/overlays/ConsoleSessionReport.qml
+        qml/overlays/ConsoleQueueAd.qml
         qml/components/GlassPanel.qml
         qml/components/HintBar.qml
         qml/components/HomeTileMenu.qml
         qml/components/MotionProgress.qml
         qml/components/NavPill.qml
         qml/components/PageEntrance.qml
-        qml/components/PlatformPicker.qml
         qml/components/CloudLibraryActions.qml
         qml/components/PosterTile.qml
         qml/components/ReleaseNotes.qml
         qml/components/RoundedArtwork.qml
         qml/components/ScreenBackground.qml
         qml/components/SettingRow.qml
-        qml/components/StoreBadge.qml
         qml/components/StreamCaptureStatus.qml
+        qml/components/StreamIdleWarning.qml
         qml/components/StreamInputNotice.qml
         qml/components/TogglePill.qml
         qml/components/TenBitWarningDialog.qml
         qml/components/VirtualKeyboard.qml
+        qml/desktop/auth/DesktopAccountChip.qml
+        qml/desktop/auth/DesktopAccountPicker.qml
+        qml/desktop/auth/DesktopAccountTile.qml
         qml/desktop/auth/DesktopSignInScreen.qml
         qml/desktop/components/DesktopBackdrop.qml
         qml/desktop/components/DesktopBrandLockup.qml
         qml/desktop/components/DesktopButton.qml
         qml/desktop/components/DesktopGameModal.qml
+        qml/desktop/components/DesktopGameDlss.qml
+        qml/desktop/components/DesktopGameDlssChips.qml
+        qml/desktop/components/DesktopGameDlssPanel.qml
+        qml/desktop/components/DesktopDashedOutline.qml
+        qml/desktop/components/DesktopTextLink.qml
         qml/desktop/components/DesktopQueueSelector.qml
+        qml/desktop/components/DesktopGameLabels.qml
+        qml/desktop/components/DesktopGameLabelTip.qml
         qml/desktop/components/DesktopGlyph.qml
+        qml/desktop/components/DesktopIconGuide.qml
         qml/desktop/components/DesktopKeyHint.qml
         qml/desktop/components/DesktopPoster.qml
         qml/desktop/components/DesktopPosterOverlay.qml
@@ -269,11 +305,14 @@ qt_add_qml_module(opennow-qt
         qml/desktop/onboarding/DesktopOnboardingPicture.qml
         qml/desktop/onboarding/DesktopOnboardingBoost.qml
         qml/desktop/onboarding/DesktopOnboardingNetwork.qml
+        qml/desktop/reporting/DesktopBugReportNotice.qml
+        qml/desktop/reporting/DesktopBugReportToast.qml
         qml/desktop/settings/controls/DesktopSettingsAdvanced.qml
         qml/desktop/settings/controls/DesktopSettingsButton.qml
         qml/desktop/settings/controls/DesktopSettingsHevcHelp.qml
         qml/desktop/settings/controls/DesktopSettingsChoice.qml
         qml/desktop/settings/controls/DesktopSettingsDisclosure.qml
+        qml/desktop/settings/controls/DesktopSettingsDlssOverrides.qml
         qml/desktop/settings/controls/DesktopSettingsDropdown.qml
         qml/desktop/settings/controls/DesktopSettingsField.qml
         qml/desktop/settings/controls/DesktopSettingsShortcutBinding.qml
@@ -293,6 +332,7 @@ qt_add_qml_module(opennow-qt
         qml/desktop/settings/pages/DesktopSettingsConsolePage.qml
         qml/desktop/settings/pages/DesktopSettingsControllersPage.qml
         qml/desktop/settings/pages/DesktopSettingsControlsPage.qml
+        qml/desktop/settings/controls/DesktopSettingsFlightControlsPanel.qml
         qml/desktop/settings/pages/DesktopSettingsInterfacePage.qml
         qml/desktop/settings/pages/DesktopSettingsLookPage.qml
         qml/desktop/settings/pages/DesktopSettingsNetworkPage.qml
@@ -303,7 +343,9 @@ qt_add_qml_module(opennow-qt
         qml/desktop/settings/pages/DesktopSettingsStoresPage.qml
         qml/desktop/settings/pages/DesktopSettingsStreamPage.qml
         qml/desktop/settings/pages/DesktopSettingsSubscriptionPage.qml
+        qml/desktop/settings/pages/DesktopSettingsUpdatesPage.qml
         qml/desktop/shell/DesktopApp.qml
+        qml/desktop/shell/DesktopAccountSwitcher.qml
         qml/desktop/shell/DesktopCommandPalette.qml
         qml/desktop/shell/DesktopShell.qml
         qml/desktop/shell/DesktopSidebar.qml
@@ -314,13 +356,19 @@ qt_add_qml_module(opennow-qt
         qml/desktop/store/DesktopStoreShelf.qml
         qml/desktop/stream/DesktopInStreamMenu.qml
         qml/desktop/stream/DesktopSessionStarting.qml
+        qml/desktop/stream/DesktopStreamControllersPage.qml
+        qml/desktop/stream/DesktopStreamDrawerButton.qml
         qml/desktop/stream/DesktopStreamExitConfirm.qml
         qml/desktop/stream/DesktopStreamOverlayHost.qml
         qml/desktop/stream/DesktopStreamScreen.qml
         qml/desktop/stream/DesktopStreamStats.qml
         qml/desktop/stream/DesktopStreamToast.qml
         qml/desktop/stream/DesktopStreamToasts.qml
-        qml/desktop/updates/DesktopUpdateScreen.qml
+        qml/desktop/updates/DesktopUpdateChip.qml
+        qml/desktop/updates/DesktopUpdateHeadline.qml
+        qml/desktop/updates/DesktopUpdatePanel.qml
+        qml/desktop/updates/DesktopUpdatePrimaryAction.qml
+        qml/desktop/updates/DesktopUpdateProgress.qml
         qml/overlays/FriendsOverlay.qml
         qml/overlays/GuideOverlay.qml
         qml/overlays/OverlayHost.qml
@@ -328,7 +376,6 @@ qt_add_qml_module(opennow-qt
         qml/overlays/QuickSettingsOverlay.qml
         qml/overlays/SessionConflictOverlay.qml
         qml/overlays/SessionReportOverlay.qml
-        qml/screens/AccountsScreen.qml
         qml/screens/DiagnosticsScreen.qml
         qml/screens/FeedbackScreen.qml
         qml/screens/GameAccountsScreen.qml
@@ -352,6 +399,7 @@ qt_add_qml_module(opennow-qt
         qml/state/account/QueueSelectorState.qml
         qml/state/catalog/ArtworkState.qml
         qml/state/catalog/CatalogState.qml
+        qml/state/reporting/BugReportState.qml
         qml/state/settings/SettingsState.qml
         qml/state/BackgroundStreamState.qml
         qml/state/ConnectionHealthState.qml
@@ -385,6 +433,8 @@ qt_add_qml_module(opennow-qt
         res/icons/store-ubisoft.svg
         res/icons/store-battlenet.svg
         res/brand/opennow-mark.png
+        res/sounds/launch-air.wav
+        res/sounds/launch-open.wav
         res/brand/signin-hero.jpg
         res/brand/desktop-renew.jpg
         res/onboarding/desktop-preview.png
@@ -410,6 +460,9 @@ qt_add_qml_module(opennow-qt
         res/icons/desktop-clock.svg
         res/icons/desktop-coop.svg
         res/icons/desktop-rtx.svg
+        res/icons/desktop-hdr.svg
+        res/icons/desktop-reflex.svg
+        res/icons/desktop-dlss.svg
         res/icons/desktop-gamepad.svg
         res/icons/desktop-chevron-up.svg
         res/icons/desktop-chevron-down.svg
@@ -451,6 +504,11 @@ qt_add_qml_module(opennow-qt
         res/icons/desktop-sliders-on-light.svg
         res/icons/desktop-user-plus.svg
         res/icons/desktop-user-plus-on-light.svg
+        res/icons/desktop-users.svg
+        res/icons/desktop-users-on-light.svg
+        res/icons/desktop-pencil.svg
+        res/icons/desktop-pencil-on-light.svg
+        res/icons/desktop-lock-badge.svg
         res/icons/desktop-logout.svg
         res/icons/desktop-logout-on-light.svg
         res/icons/desktop-plus-ink.svg

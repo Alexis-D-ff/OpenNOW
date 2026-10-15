@@ -421,7 +421,7 @@ impl VideoDecoder for VaApiDecoder {
                     }
                 }
                 Err(error) => {
-                    return Err(Error::backend(Subsystem::VaApi, error.to_string()));
+                    return Err(decode_error(error));
                 }
             }
         }
@@ -438,6 +438,16 @@ impl VideoDecoder for VaApiDecoder {
 
     fn take_format_change(&mut self) -> Option<StreamFormat> {
         self.pending_format_change.take()
+    }
+}
+
+fn decode_error(error: DecodeError) -> Error {
+    match error {
+        DecodeError::ReferenceLost(reason) => Error::ReferenceLost {
+            subsystem: Subsystem::VaApi,
+            reason,
+        },
+        other => Error::backend(Subsystem::VaApi, other.to_string()),
     }
 }
 
@@ -464,6 +474,31 @@ fn validate_h264_display(display: &Display) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_num_gap_uses_bounded_reference_recovery() {
+        let reason = "Invalid frame_num: 66. Assuming unintentional loss of pictures";
+        assert!(matches!(
+            decode_error(DecodeError::ReferenceLost(reason.to_owned())),
+            Error::ReferenceLost { subsystem: Subsystem::VaApi, reason: actual } if actual == reason
+        ));
+    }
+
+    #[test]
+    fn other_decode_errors_remain_backend_failures() {
+        for error in [
+            DecodeError::ParseFrameError("invalid slice".to_owned()),
+            DecodeError::DecoderError(anyhow::anyhow!(
+                "Invalid frame_num: 66. Assuming unintentional loss of pictures"
+            )),
+        ] {
+            let reason = error.to_string();
+            assert!(matches!(
+                decode_error(error),
+                Error::Backend { subsystem: Subsystem::VaApi, reason: actual } if actual == reason
+            ));
+        }
+    }
 
     #[test]
     #[ignore = "requires the isolated VA-API mock driver harness"]

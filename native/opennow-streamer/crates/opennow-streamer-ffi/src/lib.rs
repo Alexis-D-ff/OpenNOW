@@ -7,6 +7,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use opennow_streamer_core::{Engine, EventSender};
+use opennow_streamer_hid::generic::{
+    GenericAdmission, GenericDevice, GenericError, GenericInterface, GenericReport,
+};
 use opennow_streamer_hid::{
     HidRuntime, InventoryOutcome, SdlDeviceClaim, SnapshotAdmission, SonySnapshot,
 };
@@ -23,7 +26,7 @@ use serde_json::Value;
 
 static FIRST_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
 
-pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 11;
+pub const OPENNOW_STREAMER_FFI_ABI_VERSION: u32 = 15;
 pub const OPENNOW_STREAMER_MAX_TEXT_BYTES: usize =
     opennow_streamer_protocol::text_input::MAX_TEXT_BYTES;
 pub const OPENNOW_STREAMER_VULKAN_DEVICE_INFO_VERSION: u32 = 1;
@@ -73,6 +76,71 @@ pub struct OpenNowSonySnapshot {
 }
 
 pub const OPENNOW_STREAMER_SONY_SNAPSHOT_VERSION: u32 = 1;
+
+pub const OPENNOW_STREAMER_GENERIC_HID_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OpenNowGenericHidAdmission {
+    pub slot: u8,
+    pub admission: u8,
+    pub reserved: [u8; 6],
+    pub incarnation: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenNowGenericHidAdmissions {
+    pub version: u32,
+    pub struct_size: usize,
+    pub count: usize,
+    pub devices: [OpenNowGenericHidAdmission; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenNowGenericHidInterface {
+    pub version: u32,
+    pub struct_size: usize,
+    pub slot: u8,
+    pub interface_number: u8,
+    pub reserved: u16,
+    pub incarnation: u64,
+    pub vendor: u16,
+    pub product: u16,
+    pub revision: u16,
+    pub reserved2: u16,
+    pub descriptor: *const u8,
+    pub descriptor_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenNowGenericHidReport {
+    pub version: u32,
+    pub struct_size: usize,
+    pub slot: u8,
+    pub interface_number: u8,
+    pub operation: u8,
+    pub error: u8,
+    pub incarnation: u64,
+    pub bytes: *const u8,
+    pub byte_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenNowGenericHidOutput {
+    pub version: u32,
+    pub struct_size: usize,
+    pub slot: u8,
+    pub interface_number: u8,
+    pub operation: u8,
+    pub reserved: u8,
+    pub incarnation: u64,
+    pub byte_count: usize,
+    pub bytes: [u8; 256],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -132,7 +200,7 @@ pub unsafe extern "C" fn opennow_streamer_vulkan_device_create(
                     let reason: String = error
                         .to_string()
                         .chars()
-                        .take(512)
+                        .take(1536)
                         .map(|character| {
                             if character.is_control() {
                                 ' '
@@ -243,6 +311,7 @@ pub enum OpenNowStreamerStatus {
     FrameAlreadyRecorded = 12,
     SonyInactive = 13,
     SdlClaimRejected = 14,
+    GraphicsUnsupported = 15,
     Panic = 255,
 }
 
@@ -764,6 +833,7 @@ fn graphics_status(error: GraphicsRuntimeError) -> OpenNowStreamerStatus {
         GraphicsRuntimeError::NoFrame => OpenNowStreamerStatus::NoFrame,
         GraphicsRuntimeError::StaleFrame => OpenNowStreamerStatus::StaleFrame,
         GraphicsRuntimeError::FrameAlreadyRecorded => OpenNowStreamerStatus::FrameAlreadyRecorded,
+        GraphicsRuntimeError::RecordUnsupported(_) => OpenNowStreamerStatus::GraphicsUnsupported,
         GraphicsRuntimeError::RecordFailed(_) => OpenNowStreamerStatus::RenderFailed,
     }
 }
@@ -1161,6 +1231,249 @@ unsafe extern "C" fn opennow_streamer_replace_sdl_device_claims(
     })
 }
 
+fn generic_hid_status(result: Result<(), GenericError>) -> OpenNowStreamerStatus {
+    match result {
+        Ok(()) => OpenNowStreamerStatus::Ok,
+        Err(GenericError::StaleSource | GenericError::Unbound | GenericError::Inactive) => {
+            OpenNowStreamerStatus::Closed
+        }
+        Err(GenericError::Overflow | GenericError::Faulted) => OpenNowStreamerStatus::QueueFull,
+        Err(GenericError::DescriptorTooLarge) => OpenNowStreamerStatus::MessageTooLarge,
+        Err(_) => OpenNowStreamerStatus::InvalidConfig,
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Atomically replaces generic HID inventory, copying all descriptors before returning.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle not being destroyed. `interfaces` must be null
+/// or point to `count` readable entries, each with a readable version and size header.
+/// Entries with a valid header must be fully readable and their nonempty descriptors
+/// must point to `descriptor_len` readable bytes for the duration of this call.
+pub unsafe extern "C" fn opennow_streamer_replace_generic_hid_inventory(
+    handle: *const OpenNowStreamer,
+    interfaces: *const OpenNowGenericHidInterface,
+    count: usize,
+) -> OpenNowStreamerStatus {
+    ffi_status(|| {
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return OpenNowStreamerStatus::NullPointer;
+        };
+        if count > 128 {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        if count > 0 && interfaces.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let mut devices: Vec<GenericDevice> = Vec::with_capacity(8);
+        for index in 0..count {
+            let entry = unsafe { interfaces.add(index) };
+            let version = unsafe { ptr::addr_of!((*entry).version).read() };
+            let struct_size = unsafe { ptr::addr_of!((*entry).struct_size).read() };
+            if version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+                || struct_size < size_of::<OpenNowGenericHidInterface>()
+            {
+                return OpenNowStreamerStatus::InvalidConfig;
+            }
+            let entry = unsafe { entry.read() };
+            if entry.slot >= 8
+                || entry.incarnation == 0
+                || entry.reserved != 0
+                || entry.reserved2 != 0
+            {
+                return OpenNowStreamerStatus::InvalidConfig;
+            }
+            if entry.descriptor_len > 4096 {
+                return OpenNowStreamerStatus::MessageTooLarge;
+            }
+            if entry.descriptor_len > 0 && entry.descriptor.is_null() {
+                return OpenNowStreamerStatus::NullPointer;
+            }
+            let device =
+                if let Some(device) = devices.iter_mut().find(|device| device.slot == entry.slot) {
+                    if device.incarnation != entry.incarnation
+                        || device.vendor != entry.vendor
+                        || device.product != entry.product
+                        || device.revision != entry.revision
+                    {
+                        return OpenNowStreamerStatus::InvalidConfig;
+                    }
+                    device
+                } else {
+                    devices.push(GenericDevice {
+                        slot: entry.slot,
+                        incarnation: entry.incarnation,
+                        vendor: entry.vendor,
+                        product: entry.product,
+                        revision: entry.revision,
+                        interfaces: Vec::new(),
+                    });
+                    devices.last_mut().expect("inserted device")
+                };
+            if device.interfaces.len() >= 16 {
+                return OpenNowStreamerStatus::InvalidConfig;
+            }
+            let descriptor = if entry.descriptor_len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(entry.descriptor, entry.descriptor_len) }
+                    .to_vec()
+            };
+            device.interfaces.push(GenericInterface {
+                number: entry.interface_number,
+                descriptor,
+            });
+        }
+        generic_hid_status(handle.hid.generic.replace_inventory(devices))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Copies one bounded generic HID report into the runtime queue.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle not being destroyed. `report` must be null
+/// or have a readable version and size header. A valid header requires a fully
+/// readable report and `byte_count` readable bytes when the payload is nonempty.
+pub unsafe extern "C" fn opennow_streamer_submit_generic_hid_report(
+    handle: *const OpenNowStreamer,
+    report: *const OpenNowGenericHidReport,
+) -> OpenNowStreamerStatus {
+    ffi_status(|| {
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return OpenNowStreamerStatus::NullPointer;
+        };
+        if report.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let version = unsafe { ptr::addr_of!((*report).version).read() };
+        let struct_size = unsafe { ptr::addr_of!((*report).struct_size).read() };
+        if version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+            || struct_size < size_of::<OpenNowGenericHidReport>()
+        {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        let report = unsafe { report.read() };
+        if report.slot >= 8 || report.incarnation == 0 || report.error > 1 || report.operation > 4 {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        if report.byte_count > 256 {
+            return OpenNowStreamerStatus::MessageTooLarge;
+        }
+        if report.byte_count > 0 && report.bytes.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let bytes = if report.byte_count == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(report.bytes, report.byte_count) }.to_vec()
+        };
+        generic_hid_status(handle.hid.generic.submit_report(GenericReport {
+            slot: report.slot,
+            incarnation: report.incarnation,
+            interface: report.interface_number,
+            operation: report.operation,
+            error: report.error == 1,
+            bytes,
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Takes one pending generic HID output command, or returns Closed if none is pending.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle not being destroyed. `output` must be null
+/// or have a readable version and size header. A valid header requires writable
+/// storage for one complete `OpenNowGenericHidOutput` for the duration of this call.
+pub unsafe extern "C" fn opennow_streamer_take_generic_hid_output(
+    handle: *const OpenNowStreamer,
+    output: *mut OpenNowGenericHidOutput,
+) -> OpenNowStreamerStatus {
+    ffi_status(|| {
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return OpenNowStreamerStatus::NullPointer;
+        };
+        if output.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let version = unsafe { ptr::addr_of!((*output).version).read() };
+        let struct_size = unsafe { ptr::addr_of!((*output).struct_size).read() };
+        if version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+            || struct_size < size_of::<OpenNowGenericHidOutput>()
+        {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        let Some(command) = handle.hid.generic.take_output() else {
+            return OpenNowStreamerStatus::Closed;
+        };
+        let mut result = OpenNowGenericHidOutput {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidOutput>(),
+            slot: command.slot,
+            interface_number: command.interface,
+            operation: command.operation,
+            reserved: 0,
+            incarnation: command.incarnation,
+            byte_count: command.bytes.len(),
+            bytes: [0; 256],
+        };
+        result.bytes[..command.bytes.len()].copy_from_slice(&command.bytes);
+        unsafe { output.write(result) };
+        OpenNowStreamerStatus::Ok
+    })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `handle` must be null or live and not being destroyed. `admissions` must be null
+/// or have a readable version/size header and writable storage for the complete snapshot.
+pub unsafe extern "C" fn opennow_streamer_get_generic_hid_admissions(
+    handle: *const OpenNowStreamer,
+    admissions: *mut OpenNowGenericHidAdmissions,
+) -> OpenNowStreamerStatus {
+    ffi_status(|| {
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return OpenNowStreamerStatus::NullPointer;
+        };
+        if admissions.is_null() {
+            return OpenNowStreamerStatus::NullPointer;
+        }
+        let version = unsafe { ptr::addr_of!((*admissions).version).read() };
+        let struct_size = unsafe { ptr::addr_of!((*admissions).struct_size).read() };
+        if version != OPENNOW_STREAMER_GENERIC_HID_VERSION
+            || struct_size < size_of::<OpenNowGenericHidAdmissions>()
+        {
+            return OpenNowStreamerStatus::InvalidConfig;
+        }
+        let snapshot = handle.hid.generic.admissions_snapshot();
+        let mut result = OpenNowGenericHidAdmissions {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidAdmissions>(),
+            count: snapshot.len(),
+            devices: [OpenNowGenericHidAdmission::default(); 8],
+        };
+        for (target, source) in result.devices.iter_mut().zip(snapshot) {
+            *target = OpenNowGenericHidAdmission {
+                slot: source.slot,
+                incarnation: source.incarnation,
+                admission: match source.admission {
+                    GenericAdmission::Pending => 0,
+                    GenericAdmission::Admitted => 1,
+                    GenericAdmission::Declined => 2,
+                },
+                reserved: [0; 6],
+            };
+        }
+        unsafe { admissions.write(result) };
+        OpenNowStreamerStatus::Ok
+    })
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn opennow_streamer_submit_sony_snapshot(
     handle: *const OpenNowStreamer,
@@ -1357,7 +1670,10 @@ pub unsafe extern "C" fn opennow_streamer_set_graphics_context(
                 "WARN"
             },
             "graphics",
-            &format!("graphics context initialized (api={api_name}): {status:?}"),
+            &format!(
+                "graphics context initialized (api={api_name} dmabuf_image_import={} dmabuf_buffer_import={}): {status:?}",
+                context.vulkan_dmabuf_import_enabled, context.vulkan_dmabuf_buffer_import_enabled
+            ),
         );
         status
     })) {
@@ -1776,8 +2092,16 @@ mod tests {
     }
 
     #[test]
+    fn abi_twelve_adds_the_deterministic_graphics_unsupported_status() {
+        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 15);
+        assert_eq!(OpenNowStreamerStatus::GraphicsUnsupported as i32, 15);
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED = 15,"));
+    }
+
+    #[test]
     fn abi_eleven_appends_the_sony_snapshot_contract() {
-        assert_eq!(OPENNOW_STREAMER_FFI_ABI_VERSION, 11);
+        const { assert!(OPENNOW_STREAMER_FFI_ABI_VERSION >= 11) };
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, incarnation), 8);
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, vendor), 16);
         assert_eq!(std::mem::offset_of!(OpenNowSdlDeviceClaim, product), 18);
@@ -1957,6 +2281,108 @@ mod tests {
         let now = Instant::now();
         let mut last = now;
         assert!(!should_log_event("controller-rumble", &mut last, now));
+    }
+
+    #[test]
+    fn server_timer_and_termination_cross_the_bounded_json_callback() {
+        let messages = CallbackMessages::default();
+        let (sender, receiver) = sync_channel(3);
+        let dispatcher = spawn_dispatcher(
+            "test-server-control-events",
+            receiver,
+            Callback {
+                function: Some(collect_response),
+                user_data: ptr::from_ref(&messages) as usize,
+            },
+        )
+        .unwrap();
+        let events = vec![
+            json!({"type":"session-timer", "startId":"start-7", "timerType":4,"secondsLeft":60,"active":true}),
+            json!({"type":"session-timer", "startId":"start-7", "timerType":4,"secondsLeft":0,"active":false}),
+            json!({"type":"status", "status":"stopped", "termination":{"source":"nvst-server","wireCode":0x8003_0023_u32,"reason":56,"extendedCode":0x8003_0007_u32,"resumable":false}}),
+        ];
+        for event in &events {
+            sender.send(event.clone()).unwrap();
+        }
+        drop(sender);
+        dispatcher.join().unwrap();
+        assert_eq!(*messages.values.lock().unwrap(), events);
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("#define OPENNOW_STREAMER_EVENT_SESSION_TIMER \"session-timer\""));
+        assert!(
+            header.contains("#define OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER \"nvst-server\"")
+        );
+        assert!(header.contains("#define OPENNOW_STREAMER_TIMER_IDLE_WARNING 4u"));
+        assert!(header.contains("#define OPENNOW_STREAMER_TIMER_IDLE_EXPIRY 5u"));
+    }
+
+    #[test]
+    fn text_input_rejection_crosses_the_bounded_json_callback() {
+        let messages = CallbackMessages::default();
+        let (sender, receiver) = sync_channel(1);
+        let dispatcher = spawn_dispatcher(
+            "test-text-input-events",
+            receiver,
+            Callback {
+                function: Some(collect_response),
+                user_data: ptr::from_ref(&messages) as usize,
+            },
+        )
+        .unwrap();
+        let event = json!({"type":"text-input-error", "startId":"paste-session", "reason":"paste-queue-full"});
+        sender.send(event.clone()).unwrap();
+        drop(sender);
+        dispatcher.join().unwrap();
+        assert_eq!(*messages.values.lock().unwrap(), vec![event]);
+        assert!(
+            include_str!("../include/opennow_streamer_ffi.h")
+                .contains("#define OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR \"text-input-error\"")
+        );
+    }
+
+    #[test]
+    fn recording_completion_metadata_crosses_the_unchanged_json_callback() {
+        use opennow_streamer_protocol::{
+            PROTOCOL_VERSION, RecordingCompletion, RecordingCutReason,
+        };
+
+        let messages = CallbackMessages::default();
+        let (sender, receiver) = sync_channel(4);
+        let dispatcher = spawn_dispatcher(
+            "test-recording-events",
+            receiver,
+            Callback {
+                function: Some(collect_response),
+                user_data: ptr::from_ref(&messages) as usize,
+            },
+        )
+        .unwrap();
+        let expected: Vec<_> = [
+            RecordingCompletion::Complete,
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::Discontinuity,
+            },
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::QueueOverflow,
+            },
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::Interrupted,
+            },
+        ]
+        .into_iter()
+        .map(|completion| {
+            json!({"type":"recording-state", "state":"saved",
+            "requestId":"recording-start-9", "path":"fixture.mkv", "videoPackets":3,
+            "audioPackets":3, "completion":completion})
+        })
+        .collect();
+        for event in &expected {
+            sender.send(event.clone()).unwrap();
+        }
+        drop(sender);
+        dispatcher.join().unwrap();
+        assert_eq!(*messages.values.lock().unwrap(), expected);
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 
     fn create_with_test_runtime(
@@ -2376,6 +2802,419 @@ mod tests {
         assert!(header.contains("#define OPENNOW_STREAMER_MAX_TEXT_BYTES 65536u"));
         assert_eq!(OPENNOW_STREAMER_MAX_TEXT_BYTES, 65_536);
         assert!(header.contains("opennow_streamer_submit_text("));
+    }
+
+    fn generic_interface(slot: u8, number: u8) -> OpenNowGenericHidInterface {
+        OpenNowGenericHidInterface {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidInterface>(),
+            slot,
+            interface_number: number,
+            reserved: 0,
+            incarnation: u64::from(slot) + 41,
+            vendor: 0x044f,
+            product: 0x0402,
+            revision: 1,
+            reserved2: 0,
+            descriptor: ptr::null(),
+            descriptor_len: 0,
+        }
+    }
+
+    #[test]
+    fn generic_inventory_boundary_validates_before_atomic_replacement() {
+        let messages = Box::new(CallbackMessages::default());
+        let handle = graphics_test_handle(&messages);
+        let replace = |entries: &[OpenNowGenericHidInterface]| unsafe {
+            opennow_streamer_replace_generic_hid_inventory(&handle, entries.as_ptr(), entries.len())
+        };
+        assert_eq!(
+            unsafe { opennow_streamer_replace_generic_hid_inventory(ptr::null(), ptr::null(), 0) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_replace_generic_hid_inventory(&handle, ptr::null(), 129) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_replace_generic_hid_inventory(&handle, ptr::null(), 1) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        let descriptor = [0x05, 0x01];
+        let mut entry = generic_interface(0, 3);
+        entry.descriptor = descriptor.as_ptr();
+        entry.descriptor_len = descriptor.len();
+        assert_eq!(
+            replace(&[entry, generic_interface(0, 4)]),
+            OpenNowStreamerStatus::Ok
+        );
+        let inventory = handle.hid.generic.inventory_snapshot().0;
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].interfaces.len(), 2);
+        assert_eq!(inventory[0].interfaces[0].descriptor, descriptor);
+        for malformed in [
+            OpenNowGenericHidInterface {
+                version: 2,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                struct_size: size_of::<OpenNowGenericHidInterface>() - 1,
+                ..entry
+            },
+            OpenNowGenericHidInterface { slot: 8, ..entry },
+            OpenNowGenericHidInterface {
+                incarnation: 0,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                reserved: 1,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                reserved2: 1,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                product: 0xffff,
+                ..entry
+            },
+        ] {
+            assert_eq!(replace(&[malformed]), OpenNowStreamerStatus::InvalidConfig);
+            assert_eq!(handle.hid.generic.inventory_snapshot().0, inventory);
+        }
+        for malformed in [
+            OpenNowGenericHidInterface {
+                incarnation: 99,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                vendor: 0x046d,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                product: 0xb67c,
+                ..entry
+            },
+            OpenNowGenericHidInterface {
+                revision: 2,
+                ..entry
+            },
+            entry,
+        ] {
+            assert_eq!(
+                replace(&[entry, malformed]),
+                OpenNowStreamerStatus::InvalidConfig
+            );
+            assert_eq!(handle.hid.generic.inventory_snapshot().0, inventory);
+        }
+        assert_eq!(
+            replace(&[OpenNowGenericHidInterface {
+                descriptor: ptr::null(),
+                ..entry
+            }]),
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            replace(&[OpenNowGenericHidInterface {
+                descriptor_len: 4097,
+                ..entry
+            }]),
+            OpenNowStreamerStatus::MessageTooLarge
+        );
+        let entries: Vec<_> = (0..17).map(|number| generic_interface(0, number)).collect();
+        assert_eq!(replace(&entries), OpenNowStreamerStatus::InvalidConfig);
+        let entries: Vec<_> = (0..8)
+            .flat_map(|slot| (0..16).map(move |number| generic_interface(slot, number)))
+            .collect();
+        assert_eq!(replace(&entries), OpenNowStreamerStatus::Ok);
+        assert_eq!(handle.hid.generic.inventory_snapshot().0.len(), 8);
+        assert_eq!(
+            unsafe { opennow_streamer_replace_generic_hid_inventory(&handle, ptr::null(), 0) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert!(handle.hid.generic.inventory_snapshot().0.is_empty());
+    }
+
+    #[test]
+    fn generic_reports_reject_malformed_and_stale_sources_and_copy_payloads() {
+        let messages = Box::new(CallbackMessages::default());
+        let handle = graphics_test_handle(&messages);
+        assert_eq!(
+            unsafe {
+                opennow_streamer_replace_generic_hid_inventory(&handle, &generic_interface(0, 3), 1)
+            },
+            OpenNowStreamerStatus::Ok
+        );
+        handle.hid.generic.bind_session(1);
+        handle.hid.generic.set_capture(true);
+        let mut bytes = [7u8; 256];
+        let report = OpenNowGenericHidReport {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidReport>(),
+            slot: 0,
+            interface_number: 3,
+            operation: 0,
+            error: 0,
+            incarnation: 41,
+            bytes: bytes.as_ptr(),
+            byte_count: bytes.len(),
+        };
+        let submit = |report: &OpenNowGenericHidReport| unsafe {
+            opennow_streamer_submit_generic_hid_report(&handle, report)
+        };
+        assert_eq!(
+            unsafe { opennow_streamer_submit_generic_hid_report(&handle, ptr::null()) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_submit_generic_hid_report(ptr::null(), &report) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        for malformed in [
+            OpenNowGenericHidReport {
+                version: 2,
+                ..report
+            },
+            OpenNowGenericHidReport {
+                struct_size: size_of::<OpenNowGenericHidReport>() - 1,
+                ..report
+            },
+            OpenNowGenericHidReport { slot: 8, ..report },
+            OpenNowGenericHidReport {
+                incarnation: 0,
+                ..report
+            },
+            OpenNowGenericHidReport {
+                operation: 5,
+                ..report
+            },
+            OpenNowGenericHidReport { error: 2, ..report },
+            OpenNowGenericHidReport {
+                interface_number: 4,
+                ..report
+            },
+        ] {
+            assert_eq!(submit(&malformed), OpenNowStreamerStatus::InvalidConfig);
+        }
+        assert_eq!(
+            submit(&OpenNowGenericHidReport {
+                incarnation: 40,
+                ..report
+            }),
+            OpenNowStreamerStatus::Closed
+        );
+        assert_eq!(
+            submit(&OpenNowGenericHidReport {
+                byte_count: 257,
+                ..report
+            }),
+            OpenNowStreamerStatus::MessageTooLarge
+        );
+        assert_eq!(
+            submit(&OpenNowGenericHidReport {
+                bytes: ptr::null(),
+                ..report
+            }),
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(submit(&report), OpenNowStreamerStatus::Ok);
+        bytes.fill(9);
+        let queued = handle.hid.generic.drain(1);
+        let opennow_streamer_hid::generic_runtime::GenericIngress::Report(queued) = &queued[0]
+        else {
+            panic!("report expected")
+        };
+        assert_eq!(queued.bytes, vec![7; 256]);
+        for operation in 0..=4 {
+            assert_eq!(
+                submit(&OpenNowGenericHidReport {
+                    operation,
+                    error: 1,
+                    ..report
+                }),
+                OpenNowStreamerStatus::Ok
+            );
+        }
+    }
+
+    #[test]
+    fn generic_output_contract_is_versioned_bounded_and_matches_header() {
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("#define OPENNOW_STREAMER_FFI_ABI_VERSION 15u"));
+        assert!(header.contains("#define OPENNOW_STREAMER_GENERIC_HID_VERSION 1u"));
+        for name in [
+            "OpenNowGenericHidInterface",
+            "OpenNowGenericHidReport",
+            "OpenNowGenericHidOutput",
+            "opennow_streamer_replace_generic_hid_inventory(",
+            "opennow_streamer_submit_generic_hid_report(",
+            "opennow_streamer_take_generic_hid_output(",
+        ] {
+            assert!(header.contains(name));
+        }
+        assert_eq!(size_of::<OpenNowGenericHidInterface>(), 56);
+        assert_eq!(size_of::<OpenNowGenericHidReport>(), 48);
+        assert_eq!(size_of::<OpenNowGenericHidOutput>(), 296);
+        assert_eq!(
+            std::mem::offset_of!(OpenNowGenericHidInterface, incarnation),
+            24
+        );
+        assert_eq!(std::mem::offset_of!(OpenNowGenericHidReport, bytes), 32);
+        assert_eq!(std::mem::offset_of!(OpenNowGenericHidOutput, bytes), 40);
+        let messages = Box::new(CallbackMessages::default());
+        let handle = graphics_test_handle(&messages);
+        let mut output = OpenNowGenericHidOutput {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidOutput>(),
+            slot: 0,
+            interface_number: 0,
+            operation: 0,
+            reserved: 0,
+            incarnation: 0,
+            byte_count: 0,
+            bytes: [0; 256],
+        };
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(&handle, ptr::null_mut()) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(ptr::null(), &mut output) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe {
+                opennow_streamer_replace_generic_hid_inventory(&handle, &generic_interface(0, 3), 1)
+            },
+            OpenNowStreamerStatus::Ok
+        );
+        handle.hid.generic.bind_session(1);
+        handle.hid.generic.set_capture(true);
+        handle
+            .hid
+            .generic
+            .push_output(opennow_streamer_hid::generic::GenericOutput {
+                slot: 0,
+                incarnation: 41,
+                interface: 3,
+                operation: 4,
+                bytes: vec![8; 256],
+            })
+            .expect("queued output");
+        output.version = 2;
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
+        output.struct_size -= 1;
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.struct_size += 1;
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(
+            (
+                output.slot,
+                output.interface_number,
+                output.operation,
+                output.incarnation
+            ),
+            (0, 3, 4, 41)
+        );
+        assert_eq!(output.reserved, 0);
+        assert_eq!(output.byte_count, 256);
+        assert_eq!(output.bytes, [8; 256]);
+        assert_eq!(
+            unsafe { opennow_streamer_take_generic_hid_output(&handle, &mut output) },
+            OpenNowStreamerStatus::Closed
+        );
+    }
+
+    #[test]
+    fn generic_admission_query_is_versioned_bounded_and_keyed_by_identity() {
+        use opennow_streamer_hid::generic::GenericSession;
+        let header = include_str!("../include/opennow_streamer_ffi.h");
+        assert!(header.contains("opennow_streamer_get_generic_hid_admissions("));
+        assert_eq!(size_of::<OpenNowGenericHidAdmission>(), 16);
+        assert_eq!(size_of::<OpenNowGenericHidAdmissions>(), 152);
+        let messages = Box::new(CallbackMessages::default());
+        let handle = graphics_test_handle(&messages);
+        let mut output = OpenNowGenericHidAdmissions {
+            version: OPENNOW_STREAMER_GENERIC_HID_VERSION,
+            struct_size: size_of::<OpenNowGenericHidAdmissions>(),
+            count: 0,
+            devices: [OpenNowGenericHidAdmission::default(); 8],
+        };
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(ptr::null(), &mut output) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, ptr::null_mut()) },
+            OpenNowStreamerStatus::NullPointer
+        );
+        output.version = 2;
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.version = OPENNOW_STREAMER_GENERIC_HID_VERSION;
+        output.struct_size -= 1;
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::InvalidConfig
+        );
+        output.struct_size += 1;
+        let interfaces = (0..8)
+            .map(|slot| generic_interface(slot, 3))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unsafe {
+                opennow_streamer_replace_generic_hid_inventory(
+                    &handle,
+                    interfaces.as_ptr(),
+                    interfaces.len(),
+                )
+            },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(output.count, 8);
+        for (slot, row) in output.devices.iter().enumerate() {
+            assert_eq!(row.slot, slot as u8);
+            assert_eq!(row.incarnation, slot as u64 + 41);
+            assert_eq!(row.admission, 0);
+            assert_eq!(row.reserved, [0; 6]);
+        }
+        handle.hid.generic.bind_session(1);
+        let mut session = GenericSession::new(1);
+        let (inventory, _) = handle.hid.generic.inventory_snapshot();
+        for action in session.reconcile(&inventory, true) {
+            session.sent(&action);
+        }
+        session.handle_response(10, 1, 0, 22);
+        session.handle_response(11, 0, 0, 23);
+        handle.hid.generic.publish_admissions(&session);
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert_eq!(output.devices[0].admission, 1);
+        assert_eq!(output.devices[1].admission, 2);
+        handle.hid.generic.unbind_session(1);
+        assert_eq!(
+            unsafe { opennow_streamer_get_generic_hid_admissions(&handle, &mut output) },
+            OpenNowStreamerStatus::Ok
+        );
+        assert!(output.devices.iter().all(|row| row.admission == 0));
     }
 
     #[test]
@@ -2970,6 +3809,10 @@ mod tests {
             ),
             (None, OpenNowStreamerStatus::Ok),
             (
+                Some(GraphicsFrameError::Unsupported("no DMA-BUF import".into())),
+                OpenNowStreamerStatus::GraphicsUnsupported,
+            ),
+            (
                 Some(GraphicsFrameError::Failed("device removed".into())),
                 OpenNowStreamerStatus::RenderFailed,
             ),
@@ -3011,7 +3854,7 @@ mod tests {
             );
             assert_eq!(recorded.drops.load(Ordering::Relaxed), index + 1);
         }
-        assert_eq!(messages.frames_available.load(Ordering::Relaxed), 4);
+        assert_eq!(messages.frames_available.load(Ordering::Relaxed), 5);
         assert_eq!(recorded.values.lock().unwrap().len(), 1);
         assert_eq!(
             unsafe { opennow_streamer_scene_graph_shutdown(&handle) },

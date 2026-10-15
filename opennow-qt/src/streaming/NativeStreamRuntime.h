@@ -2,10 +2,12 @@
 
 #include "opennow_streamer_ffi.h"
 #include "input/SdlDeviceClaim.h"
+#include "input/GenericHidWire.h"
 
 #include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QSize>
 #include <QString>
 
 #include <cstddef>
@@ -16,6 +18,7 @@ class NativeStreamRuntime final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool streaming READ streaming NOTIFY streamingChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
 public:
@@ -58,6 +61,14 @@ public:
             const OpenNowStreamer *, const OpenNowSdlDeviceClaim *, std::size_t);
         using SubmitSonySnapshot = OpenNowStreamerStatus (*)(
             const OpenNowStreamer *, const OpenNowSonySnapshot *);
+        using ReplaceGenericHidInventory = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, const OpenNowGenericHidInterface *, std::size_t);
+        using SubmitGenericHidReport = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, const OpenNowGenericHidReport *);
+        using TakeGenericHidOutput = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, OpenNowGenericHidOutput *);
+        using GetGenericHidAdmissions = OpenNowStreamerStatus (*)(
+            const OpenNowStreamer *, OpenNowGenericHidAdmissions *);
 
         Create create = nullptr;
         Send send = nullptr;
@@ -79,6 +90,10 @@ public:
         SubmitSonySnapshot submitSonySnapshot = nullptr;
         SetLogFile setLogFile = nullptr;
         Send submitText = nullptr;
+        ReplaceGenericHidInventory replaceGenericHidInventory = nullptr;
+        SubmitGenericHidReport submitGenericHidReport = nullptr;
+        TakeGenericHidOutput takeGenericHidOutput = nullptr;
+        GetGenericHidAdmissions getGenericHidAdmissions = nullptr;
     };
 
     static constexpr int DefaultShutdownTimeoutMs = 1'500;
@@ -96,9 +111,11 @@ public:
     ~NativeStreamRuntime() override;
 
     [[nodiscard]] bool running() const;
+    [[nodiscard]] bool streaming() const;
     [[nodiscard]] QString lastError() const;
     [[nodiscard]] quint64 presentationGeneration() const;
     [[nodiscard]] bool presentationAllowed() const;
+    [[nodiscard]] QSize decodedDisplaySize() const;
     struct UpstreamProgress
     {
         bool stalled = false;
@@ -109,10 +126,14 @@ public:
     [[nodiscard]] UpstreamProgress upstreamProgress() const;
     [[nodiscard]] bool inputAllowed() const;
     [[nodiscard]] bool serverCursorComposited() const;
+    [[nodiscard]] bool defaultRelativeMouse() const;
     [[nodiscard]] const OpenNowStreamerVulkanDevice *vulkanDevice() const;
+    enum class PresentationFailure { Recoverable, Unsupported };
+    void logRenderDiagnostic(const QString &detail);
     // Called at most once per presentation failure from the scene-graph thread.
     void reportPresentationError(const QString &message);
-    void reportPresentationError(const QString &message, quint64 generation);
+    void reportPresentationError(const QString &message, quint64 generation,
+                                 PresentationFailure failure = PresentationFailure::Recoverable);
 
     Q_INVOKABLE bool start();
     Q_INVOKABLE bool send(const QJsonObject &command);
@@ -147,16 +168,21 @@ public:
                                            bool *rawInputActive);
     OpenNowStreamerStatus replaceSdlDeviceClaims(const QList<SdlDeviceClaim> &claims);
     OpenNowStreamerStatus submitSonySnapshot(const OpenNowSonySnapshot &snapshot);
+    OpenNowStreamerStatus replaceGenericHidInventory(const QList<GenericHidDeviceClaim> &claims);
+    OpenNowStreamerStatus submitGenericHidReport(const GenericHidReport &report);
 
 signals:
     void inputCaptureReset();
     void inputAllowedChanged();
-    void presentationError(const QString &message);
+    void presentationError(const QString &message, const QString &errorCode);
     void runningChanged();
+    void streamingChanged();
     void lastErrorChanged();
     void responseReceived(const QJsonObject &response);
     void eventReceived(const QJsonObject &event);
+    void sessionTimerReceived(quint8 timerType, quint32 secondsLeft, bool active);
     void frameAvailable();
+    void decodedDisplaySizeChanged(const QSize &size, quint64 generation);
     void cursorUpdated(const QByteArray &bytes);
     void cursorCaptureChanged(bool composited);
     void cursorStateReset();
@@ -164,6 +190,10 @@ signals:
                                    quint16 highFrequency, quint32 durationMs,
                                    quint64 sourceIncarnation);
     void controllerRumbleStopped();
+    void genericHidOutputRequested(const GenericHidReport &report);
+    void genericHidOutputStopped();
+    void genericHidAdmissionChanged(quint8 slot, quint64 incarnation, GenericHidAdmission admission);
+    void genericHidAdmissionsReset();
     void callbacksDropped(int count);
 
 private:
@@ -184,7 +214,11 @@ private:
     void drainCallbacks(const std::shared_ptr<CallbackState> &state);
     void setLastError(const QString &error);
     void invalidatePresentation();
+    void publishDecodedDisplaySize(const QSize &size, quint64 generation);
     void resetInputCapture();
+    void updateGenericHidOutputPolling();
+    void pollGenericHidAdmissions();
+    void setStreaming(bool streaming);
 
     std::unique_ptr<Private> d;
 };

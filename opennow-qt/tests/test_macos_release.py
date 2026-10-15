@@ -288,7 +288,7 @@ class MacOSCandidateWorkflowTest(unittest.TestCase):
     def names(self):
         names = [f"OpenNOW-Qt-1.2.3-{platform}-{arch}.{extension}"
                  for platform, arches, extensions in (
-                     ("Linux", ("x64", "arm64"), ("AppImage", "AppImage.zsync", "deb")),
+                     ("Linux", ("x64", "arm64"), ("AppImage", "AppImage.zsync", "deb", "flatpak")),
                      ("Windows", ("x64", "arm64"), ("msi", "zip")),
                      ("Darwin", ("arm64",), ("dmg", "zip")))
                  for arch in arches for extension in extensions]
@@ -298,7 +298,7 @@ class MacOSCandidateWorkflowTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "Inventory uses GNU find on the Linux signing runner")
     def test_exact_platform_artifacts_are_required(self):
         names = self.names()
-        self.assertEqual(len(names), 14)
+        self.assertEqual(len(names), 16)
         self.assertEqual([name for name in names if name.endswith("-setup.exe")], [
             "OpenNOW-Qt-1.2.3-Windows-x64-setup.exe",
             "OpenNOW-Qt-1.2.3-Windows-arm64-setup.exe",
@@ -318,7 +318,7 @@ class MacOSCandidateWorkflowTest(unittest.TestCase):
     def test_production_candidate_is_native_protected_and_never_published(self):
         workflow = WORKFLOW.read_text()
         macos = workflow.split("  macos:\n", 1)[1].split("  inventory:\n", 1)[0]
-        self.assertIn("needs: [preflight, linux, windows, macos]", workflow)
+        self.assertIn("needs: [preflight, linux, windows, macos, flatpak]", workflow)
         for required in ("blacksmith-6vcpu-macos-15", "environment: qt-production-release",
                          "CMAKE_OSX_ARCHITECTURES=arm64",
                          "OPENNOW_UPDATE_ED25519_PUBLIC_KEY=", "--locked", "ctest --test-dir",

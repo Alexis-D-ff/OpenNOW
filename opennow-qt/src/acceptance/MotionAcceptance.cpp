@@ -79,7 +79,7 @@ void startSettingsMotionAcceptance(QQuickWindow *window, AppController *controll
         if (tick == 20) {
             state->settings = find("desktopSettingsScreen");
             auto *sharing = find("accountActivitySharing");
-            auto *reports = find("accountCrashReports");
+            auto *reports = find("accountAutomaticBugReports");
             if (!require(state->settings && !state->settings->property("advancedOpen").toBool()
                          && sharing && sharing->isVisible() && reports && reports->isVisible(),
                          "privacy controls hidden behind Advanced")) return;
@@ -381,7 +381,7 @@ void startMotionAcceptance(QQuickWindow *window, AppController *controller,
             if (tick == 53) {
                 if (!require(motion->property("progress").toDouble() == 1, "stream menu failed to reopen")) return;
                 // Invoke the real resume action, including its close completion.
-                if (!require(QMetaObject::invokeMethod(motion->parent(), "runAction", Q_ARG(QVariant, QVariant(0))),
+                if (!require(QMetaObject::invokeMethod(motion->parent(), "runAction", Q_ARG(QVariant, QVariant(QStringLiteral("resume")))),
                              "resume action unavailable")) return;
             }
             if (tick == 62) {

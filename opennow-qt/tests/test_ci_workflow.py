@@ -56,11 +56,12 @@ class CIWorkflowTest(unittest.TestCase):
 
     def test_manual_packages_cannot_bypass_dispatch_gate(self):
         entries = jobs((WORKFLOWS / "qt-build.yml").read_text())
-        self.assertEqual(set(entries), {"metadata", "packages", "artifact-inventory"})
+        self.assertEqual(set(entries), {"metadata", "packages", "flatpak", "artifact-inventory"})
         self.assertIn("    if: github.event_name == 'workflow_dispatch'\n", entries["metadata"])
         self.assertIn("    needs: metadata\n", entries["packages"])
         self.assertNotIn("always()", entries["packages"])
-        self.assertIn("    needs: [metadata, packages]\n", entries["artifact-inventory"])
+        self.assertIn("    needs: metadata\n", entries["flatpak"])
+        self.assertIn("    needs: [metadata, packages, flatpak]\n", entries["artifact-inventory"])
         self.assertIn("        if: inputs.upload_complete\n", entries["artifact-inventory"])
 
     def test_all_platforms_share_one_packaging_matrix(self):
@@ -180,6 +181,7 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn('--target opennow-ci-unit-tests --parallel "$BUILD_PARALLEL"', checks)
         self.assertIn("--no-tests=error", checks)
         self.assertIn('-L ci-unit --parallel "$BUILD_PARALLEL" --output-junit qt-unit-tests.xml', checks)
+        self.assertIn("Testing/Temporary/LastTest.log", checks)
         self.assertIn("cargo clippy --locked", checks)
         self.assertIn("cargo test --locked", checks)
         self.assertIn("--workspace --all-targets -- -D warnings", checks)
@@ -188,8 +190,10 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn("ensure-windows-media-foundation.ps1", checks)
         cmake = (ROOT / "opennow-qt/cmake/Tests.cmake").read_text()
         targets = re.search(r"set\(OPENNOW_CI_UNIT_TEST_TARGETS\s+(.*?)\)", cmake, re.DOTALL)[1].split()
-        self.assertEqual(len(targets), 31)
-        self.assertEqual(len(set(targets)), 31)
+        self.assertEqual(len(targets), 36)
+        self.assertEqual(len(set(targets)), 36)
+        self.assertIn("opennow-generichidinput-tests", targets)
+        self.assertIn("opennow-windowtheme-tests", targets)
         self.assertIn("opennow-updatefailure-tests", targets)
         self.assertIn('add_test(NAME opennow-updatefailure-tests COMMAND opennow-updatefailure-tests', cmake)
         self.assertIn('-input "${CMAKE_CURRENT_SOURCE_DIR}/tests/qml-updater"', cmake)
@@ -204,6 +208,9 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn("opennow-controllernavigation-tests", targets)
         self.assertIn("opennow-graphicsdevices-tests", targets)
         self.assertIn("opennow-consolelayout-tests", targets)
+        self.assertIn("opennow-consolecontrols-tests", targets)
+        self.assertIn("opennow-consolelaunch-tests", targets)
+        self.assertIn("opennow-consolelaunchinput-tests", targets)
         self.assertIn("opennow-macawdl-tests", targets)
         self.assertIn("opennow-controllericons-tests", targets)
         self.assertIn("opennow-streamtoasts-tests", targets)
@@ -317,6 +324,70 @@ class CIWorkflowTest(unittest.TestCase):
                     self.assertIn(f"restore-keys: {key}\n", cache)
                     self.assertIn("verbose: 1", cache)
                     self.assertNotIn("append-timestamp: false", cache)
+
+    def test_release_candidates_reuse_the_nightly_package_caches(self):
+        def block(job, action):
+            return job.split(f"uses: {action}@", 1)[1].split("\n      -", 1)[0]
+
+        def key_expression(cache, name):
+            return re.search(rf"^\s+{name}: (.+)$", cache, re.MULTILINE).group(1)
+
+        nightly = jobs((WORKFLOWS / "qt-build.yml").read_text())["packages"]
+        candidates = jobs((WORKFLOWS / "qt-release-candidate.yml").read_text())
+
+        # Resolve the nightly package job's own key expression per matrix entry,
+        # so a rename in either workflow has to move both sides together.
+        nightly_rust = block(nightly, "Swatinem/rust-cache")
+        self.assertEqual(key_expression(nightly_rust, "shared-key"),
+                         key_expression(block(nightly, "hendrikmuhs/ccache-action"), "key"))
+        expression = key_expression(nightly_rust, "shared-key")
+        macos = re.search(r"runner\.os == 'macOS' && '(qt-ci-[^']+)'", expression)
+        template = re.search(r"format\('(\S+)', matrix\.os, matrix\.label\)", expression)
+        self.assertIsNotNone(macos, expression)
+        self.assertIsNotNone(template, expression)
+        platforms = {
+            label: macos[1] if "macos" in image
+            else template[1].replace("{0}", image).replace("{1}", label)
+            for label, image in re.findall(r"- label: (\S+)\n\s+os: (\S+)\n", nightly)
+        }
+        self.assertEqual(set(platforms), {
+            "linux-x64", "linux-arm64", "windows-x64", "windows-arm64", "macos-arm64",
+        })
+        # A candidate restores the nightly cache only when its own key pattern
+        # resolves to that platform's key.
+        linux = key_expression(block(candidates["linux"], "Swatinem/rust-cache"), "shared-key")
+        windows = key_expression(block(candidates["windows"], "Swatinem/rust-cache"), "shared-key")
+        self.assertEqual({
+            **{
+                f"linux-{arch}": linux.replace("${{ matrix.runner }}", runner)
+                                      .replace("${{ matrix.arch }}", arch)
+                for arch, runner in re.findall(r"- arch: (\S+)\n\s+runner: (\S+)\n", candidates["linux"])
+            },
+            **{
+                f"windows-{arch}": windows.replace("${{ matrix.arch }}", arch)
+                for arch in re.findall(r"- arch: (\S+)\n", candidates["windows"])
+            },
+            "macos-arm64": key_expression(block(candidates["macos"], "Swatinem/rust-cache"), "shared-key"),
+        }, platforms)
+
+        nightly_workspaces = nightly_rust.split("workspaces: |", 1)[1].strip()
+        self.assertIn("native/opennow-core -> ../../build/opennow-qt-release/rust-target", nightly_workspaces)
+        for name in ("linux", "windows", "macos"):
+            with self.subTest(candidate=name):
+                rust = block(candidates[name], "Swatinem/rust-cache")
+                ccache = block(candidates[name], "hendrikmuhs/ccache-action")
+                self.assertEqual(key_expression(rust, "shared-key"), key_expression(ccache, "key"))
+                self.assertEqual(rust.split("workspaces: |", 1)[1].strip(), nightly_workspaces)
+                self.assertEqual(key_expression(ccache, "restore-keys"), key_expression(ccache, "key"))
+                self.assertIn("max-size: 1G", ccache)
+
+        self.assertEqual(re.search(r"cache-key-prefix: (qt-target-.+)$", nightly, re.MULTILINE).group(1),
+                         "qt-target-${{ matrix.label }}")
+        for name, prefix in (("linux", "qt-target-linux-${{ matrix.arch }}"),
+                             ("windows", "qt-target-windows-${{ matrix.arch }}"),
+                             ("macos", "qt-target-macos-arm64")):
+            with self.subTest(candidate=name):
+                self.assertIn(f"cache-key-prefix: {prefix}\n", candidates[name])
 
     def test_relocated_core_probe_matches_shell_protocol(self):
         header = (ROOT / "opennow-qt/src/core/CoreClient.h").read_text()

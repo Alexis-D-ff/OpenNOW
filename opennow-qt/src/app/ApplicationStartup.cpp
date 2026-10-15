@@ -1,5 +1,6 @@
 #include "app/AppController.h"
 #include "app/platform/GraphicsDeviceSelection.h"
+#include "app/platform/WindowTheme.h"
 #include "acceptance/AcceptanceSession.h"
 #include "app/ApplicationStartup.h"
 #include "app/platform/MacAwdlController.h"
@@ -68,6 +69,10 @@ private:
 
 static int runApplicationSession(int argc, char *argv[], QString &restartExecutable)
 {
+#ifdef Q_OS_WIN
+    if (!qEnvironmentVariableIsSet("QT_D3D_NO_VBLANK_THREAD"))
+        qputenv("QT_D3D_NO_VBLANK_THREAD", "1");
+#endif
     qputenv("QT_TLS_BACKEND", "schannel");
     QElapsedTimer startupTimer;
     startupTimer.start();
@@ -196,6 +201,29 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
             nativeStreamRuntime.submitSonySnapshot(openNowWireSonySnapshot(snapshot));
         });
     nativeStreamRuntime.replaceSdlDeviceClaims(controllerInput.deviceClaims());
+    QObject::connect(&controllerInput, &ControllerInput::genericDeviceClaimsChanged,
+                     &nativeStreamRuntime, [&controllerInput, &nativeStreamRuntime] {
+                         nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
+                     });
+    QObject::connect(&controllerInput, &ControllerInput::genericHidReport,
+                     &nativeStreamRuntime, [&nativeStreamRuntime](const GenericHidReport &report) {
+                         nativeStreamRuntime.submitGenericHidReport(report);
+                     });
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidOutputRequested,
+                     &controllerInput, &ControllerInput::handleGenericHidOutput);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidOutputStopped,
+                     &controllerInput, &ControllerInput::stopGenericHidOutput);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionChanged,
+                     &controllerInput, &ControllerInput::setGenericHidAdmission);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::genericHidAdmissionsReset,
+                     &controllerInput, &ControllerInput::resetGenericHidAdmissions);
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::runningChanged,
+                     &controllerInput, [&controllerInput, &nativeStreamRuntime] {
+                         if (!nativeStreamRuntime.running()) return;
+                         nativeStreamRuntime.replaceSdlDeviceClaims(controllerInput.deviceClaims());
+                         nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
+                     });
+    nativeStreamRuntime.replaceGenericHidInventory(controllerInput.genericHidClaims());
 #endif
     InputModeTracker inputModeTracker(&controller);
     application.installEventFilter(&inputModeTracker);
@@ -231,10 +259,16 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
         coreClient.setNativeHdrDisplay(snapshot);
     });
     qmlRegisterType<HdrChromeEffect>("OpenNOW", 1, 0, "HdrChromeEffect");
+    qmlRegisterType<WindowTheme>("OpenNOW", 1, 0, "WindowTheme");
     qmlRegisterType<QTimer>("OpenNOW", 1, 0, "NativeTimer");
     qmlRegisterUncreatableType<MacAwdlController>("OpenNOW", 1, 0, "MacAwdlController",
                                                 u"Use the application-owned MacAwdl instance"_s);
     MacAwdlController macAwdl;
+#ifdef OPENNOW_EMBEDDED_STREAMER
+    QObject::connect(&nativeStreamRuntime, &NativeStreamRuntime::streamingChanged,
+                     &macAwdl, [&] { macAwdl.setStreaming(nativeStreamRuntime.streaming()); });
+    macAwdl.setStreaming(nativeStreamRuntime.streaming());
+#endif
     QQmlApplicationEngine engine;
     engine.setInitialProperties({{u"visible"_s, false}, {u"visibility"_s, QWindow::Hidden}});
     AcceptanceSession acceptance(application, engine, controller, coreClient, arguments);

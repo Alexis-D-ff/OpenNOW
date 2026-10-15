@@ -1,11 +1,13 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvError, Sender, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 use std::time::Instant;
+
+use opennow_streamer_protocol::{RecordingCompletion, RecordingCutReason};
 
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder as OpenH264Decoder, DecoderConfig};
@@ -31,81 +33,225 @@ const AUDIO_QUEUE_CAPACITY: usize = 10;
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const MAX_OPUS_FRAME_SAMPLES_PER_CHANNEL: usize = 5_760;
 const RECORDING_TAP_QUEUE_CAPACITY: usize = 256;
+const RECORDING_RUNNING: u64 = 0;
+const RECORDING_GRACEFUL: u64 = 1;
+const RECORDING_DISCONTINUITY: u64 = 2;
+const RECORDING_OVERFLOW: u64 = 3;
+const RECORDING_INTERRUPTED: u64 = 4;
+const RECORDING_STATE_MASK: u64 = 7;
+
+#[cfg(test)]
+#[path = "media_recording_tests.rs"]
+mod recording_tests;
 
 pub struct EncodedRecordingReceiver {
     receiver: Receiver<EncodedFrame>,
-    overflowed: Arc<AtomicBool>,
+    terminal: Arc<AtomicU64>,
+    wake: Arc<Mutex<Receiver<()>>>,
+    _lifetime: Arc<()>,
+    #[cfg(test)]
+    before_wait: Option<SyncSender<()>>,
+    #[cfg(test)]
+    wait_release: Option<Receiver<()>>,
 }
 
 impl EncodedRecordingReceiver {
-    pub fn recv(&self) -> Result<EncodedFrame, RecvError> {
-        self.receiver.recv()
+    pub fn recv(&self) -> Result<EncodedFrame, RecordingCompletion> {
+        loop {
+            if let Some(completion) = self.cut() {
+                return Err(completion);
+            }
+            match self.receiver.try_recv() {
+                Ok(frame) => return self.cut().map_or(Ok(frame), Err),
+                Err(TryRecvError::Empty) => {
+                    let wake = self
+                        .wake
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    #[cfg(test)]
+                    if let Some(before_wait) = &self.before_wait {
+                        let _ = before_wait.send(());
+                    }
+                    #[cfg(test)]
+                    if let Some(wait_release) = &self.wait_release {
+                        let _ = wait_release.recv();
+                    }
+                    if wake.recv().is_err() {
+                        return self
+                            .receiver
+                            .recv()
+                            .map_err(|_| self.cut().unwrap_or(RecordingCompletion::Complete));
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    return Err(self.cut().unwrap_or(RecordingCompletion::Complete));
+                }
+            }
+        }
+    }
+
+    fn cut(&self) -> Option<RecordingCompletion> {
+        let reason = match self.terminal.load(Ordering::Acquire) & RECORDING_STATE_MASK {
+            RECORDING_RUNNING | RECORDING_GRACEFUL => return None,
+            RECORDING_DISCONTINUITY => RecordingCutReason::Discontinuity,
+            RECORDING_OVERFLOW => RecordingCutReason::QueueOverflow,
+            RECORDING_INTERRUPTED => RecordingCutReason::Interrupted,
+            _ => unreachable!(),
+        };
+        Some(RecordingCompletion::Cut { reason })
     }
 
     pub fn overflowed(&self) -> bool {
-        self.overflowed.load(Ordering::Acquire)
+        self.cut()
+            == Some(RecordingCompletion::Cut {
+                reason: RecordingCutReason::QueueOverflow,
+            })
     }
 
     #[cfg(test)]
     pub(crate) fn from_receiver(receiver: Receiver<EncodedFrame>) -> Self {
+        let (_, wake) = sync_channel(1);
         Self {
             receiver,
-            overflowed: Arc::new(AtomicBool::new(false)),
+            terminal: Arc::new(AtomicU64::new(RECORDING_RUNNING)),
+            _lifetime: Arc::new(()),
+            wake: Arc::new(Mutex::new(wake)),
+            #[cfg(test)]
+            before_wait: None,
+            #[cfg(test)]
+            wait_release: None,
         }
     }
 }
 
 #[derive(Default)]
+struct RecordingSubscription {
+    sender: Option<SyncSender<EncodedFrame>>,
+    receiver: Weak<()>,
+}
+
 struct RecordingTap {
-    sender: Mutex<Option<SyncSender<EncodedFrame>>>,
-    overflowed: Arc<AtomicBool>,
+    subscription: Mutex<RecordingSubscription>,
+    terminal: Arc<AtomicU64>,
+    wake_sender: SyncSender<()>,
+    wake_receiver: Arc<Mutex<Receiver<()>>>,
+}
+
+impl Default for RecordingTap {
+    fn default() -> Self {
+        let (wake_sender, wake_receiver) = sync_channel(1);
+        Self {
+            subscription: Mutex::default(),
+            terminal: Arc::new(AtomicU64::new(RECORDING_RUNNING)),
+            wake_sender,
+            wake_receiver: Arc::new(Mutex::new(wake_receiver)),
+        }
+    }
 }
 
 impl RecordingTap {
     fn subscribe(&self) -> Result<EncodedRecordingReceiver, String> {
         let mut active = self
-            .sender
+            .subscription
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if active.is_some() {
+        if active.sender.is_some() || active.receiver.upgrade().is_some() {
             return Err("a native stream recording is already active".to_owned());
         }
-        self.overflowed.store(false, Ordering::Release);
+        let generation = (self.terminal.load(Ordering::Acquire) & !RECORDING_STATE_MASK)
+            .wrapping_add(RECORDING_STATE_MASK + 1);
+        self.terminal.store(generation, Ordering::Release);
         let (sender, receiver) = sync_channel(RECORDING_TAP_QUEUE_CAPACITY);
-        *active = Some(sender);
+        let lifetime = Arc::new(());
+        active.sender = Some(sender);
+        active.receiver = Arc::downgrade(&lifetime);
         Ok(EncodedRecordingReceiver {
             receiver,
-            overflowed: Arc::clone(&self.overflowed),
+            terminal: Arc::clone(&self.terminal),
+            _lifetime: lifetime,
+            wake: Arc::clone(&self.wake_receiver),
+            #[cfg(test)]
+            before_wait: None,
+            #[cfg(test)]
+            wait_release: None,
         })
     }
 
     fn unsubscribe(&self) {
-        self.sender
+        self.close(RecordingCompletion::Complete);
+    }
+
+    fn close(&self, completion: RecordingCompletion) {
+        let mut active = self
+            .subscription
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.signal(self.terminal.load(Ordering::Acquire), completion);
+        active.sender.take();
+        let _ = self.wake_sender.try_send(());
+    }
+
+    fn signal(&self, status: u64, completion: RecordingCompletion) {
+        if status & RECORDING_STATE_MASK != RECORDING_RUNNING {
+            return;
+        }
+        let code = match completion {
+            RecordingCompletion::Complete => RECORDING_GRACEFUL,
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::Discontinuity,
+            } => RECORDING_DISCONTINUITY,
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::QueueOverflow,
+            } => RECORDING_OVERFLOW,
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::Interrupted,
+            } => RECORDING_INTERRUPTED,
+        };
+        let _ = self.terminal.compare_exchange(
+            status,
+            status | code,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = self.wake_sender.try_send(());
     }
 
     fn publish(&self, frame: &EncodedFrame) {
-        let Ok(mut active) = self.sender.try_lock() else {
-            self.overflowed.store(true, Ordering::Release);
+        let status = self.terminal.load(Ordering::Acquire);
+        let Ok(mut active) = self.subscription.try_lock() else {
+            self.signal(
+                status,
+                RecordingCompletion::Cut {
+                    reason: RecordingCutReason::QueueOverflow,
+                },
+            );
             return;
         };
-        if self.overflowed.load(Ordering::Acquire) {
-            active.take();
+        if self.terminal.load(Ordering::Acquire) != status {
             return;
         }
-        let Some(sender) = active.as_ref() else {
+        if self.terminal.load(Ordering::Acquire) & RECORDING_STATE_MASK != RECORDING_RUNNING {
+            active.sender.take();
+            return;
+        }
+        let Some(sender) = active.sender.as_ref() else {
             return;
         };
         match sender.try_send(frame.clone()) {
-            Ok(()) => {}
+            Ok(()) => {
+                let _ = self.wake_sender.try_send(());
+            }
             Err(TrySendError::Full(_)) => {
-                self.overflowed.store(true, Ordering::Release);
-                active.take();
+                self.signal(
+                    self.terminal.load(Ordering::Acquire),
+                    RecordingCompletion::Cut {
+                        reason: RecordingCutReason::QueueOverflow,
+                    },
+                );
+                active.sender.take();
             }
             Err(TrySendError::Disconnected(_)) => {
-                active.take();
+                active.sender.take();
             }
         }
     }
@@ -1627,6 +1773,7 @@ impl MediaSession {
                 let mut received = 0_u64;
                 let mut skipped_paused = 0_u64;
                 let mut skipped_reference = 0_u64;
+                let mut deferred_keyframe_request = false;
                 let mut last_report = Instant::now();
                 let mut clock = AdaptiveSampleClock::new(stream.fps);
                 while let Some(packet) = video_shared.video.pop_packet() {
@@ -1690,17 +1837,35 @@ impl MediaSession {
                         }
                     };
                     if submission.dropped > 0 {
-                        eprintln!(
-                            "Embedded D3D11 compressed queue overflow: dropped={} recoveryKeyframeRetained={}",
-                            submission.dropped,
-                            (submission.queued && frame.keyframe) || submission.preserved_keyframe,
-                        );
+                        if !(submission.preserved_keyframe && deferred_keyframe_request) {
+                            eprintln!(
+                                "Embedded D3D11 compressed queue overflow: dropped={} recoveryKeyframeRetained={}",
+                                submission.dropped,
+                                (submission.queued && frame.keyframe) || submission.preserved_keyframe,
+                            );
+                        }
                         let _ = video_shared.feedback.send(MediaFeedback::QueueDropped {
                             media: "d3d11-video",
                             count: submission.dropped,
                         });
                     }
                     if !submission.queued {
+                        if submission.preserved_keyframe {
+                            if !deferred_keyframe_request {
+                                deferred_keyframe_request = true;
+                                opennow_streamer_protocol::log::log_async(
+                                    "WARN",
+                                    "video-reference",
+                                    "embedded D3D11 compressed queue retained its keyframe under backpressure; keyframe request deferred until the decoder dequeues it",
+                                );
+                            }
+                            continue;
+                        }
+                        let reason = if std::mem::take(&mut deferred_keyframe_request) {
+                            "embedded D3D11 decoder dequeued its retained keyframe after a dropped delta"
+                        } else {
+                            "embedded D3D11 compressed-video queue overflow"
+                        };
                         // One request per gap. Repeating this for every delta
                         // clears `request_pending` and asks the sender for a
                         // new IDR faster than the decoder can consume the last
@@ -1709,19 +1874,12 @@ impl MediaSession {
                             .keyframe_requested
                             .swap(true, Ordering::AcqRel)
                         {
-                            invalidate_embedded_video(
-                                &video_shared,
-                                &frame.mid,
-                                if submission.preserved_keyframe {
-                                    "embedded D3D11 compressed queue retained its keyframe under backpressure"
-                                } else {
-                                    "embedded D3D11 compressed-video queue overflow"
-                                },
-                            );
+                            invalidate_embedded_video(&video_shared, &frame.mid, reason);
                         }
                         continue;
                     }
                     if frame.keyframe {
+                        deferred_keyframe_request = false;
                         video_shared
                             .keyframe_requested
                             .store(false, Ordering::Release);
@@ -1937,6 +2095,7 @@ struct EmbeddedD3d11State {
 struct EmbeddedD3d11Submission {
     pending: VecDeque<opennow_streamer_platform_windows::EncodedVideoFrame>,
     submitter: Option<crate::D3d11FrameSubmitter>,
+    gap: opennow_streamer_platform_windows::ReferenceGap,
 }
 
 #[cfg(target_os = "windows")]
@@ -1945,8 +2104,8 @@ struct EmbeddedD3d11SubmissionOutcome {
     queued: bool,
     dropped: usize,
     needs_graphics: bool,
-    /// The decoder queue already holds a keyframe, so this delta was dropped
-    /// without erasing that recovery point.
+    /// The decoder queue still holds the keyframe in front of a dropped delta,
+    /// so this delta was dropped and its keyframe request deferred.
     preserved_keyframe: bool,
 }
 
@@ -2166,6 +2325,7 @@ impl EmbeddedD3d11Submission {
                 opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY,
             ),
             submitter: None,
+            gap: opennow_streamer_platform_windows::ReferenceGap::default(),
         }
     }
 
@@ -2176,50 +2336,71 @@ impl EmbeddedD3d11Submission {
         &mut self,
         frame: opennow_streamer_platform_windows::EncodedVideoFrame,
     ) -> Result<EmbeddedD3d11SubmissionOutcome, String> {
-        if let Some(submitter) = self.submitter.as_ref() {
-            let key_frame = frame.key_frame;
-            return submitter
-                .submit_video(frame)
-                .map(|outcome| match outcome {
-                    opennow_streamer_platform_windows::PushOutcome::Queued
-                    | opennow_streamer_platform_windows::PushOutcome::Paused => {
-                        EmbeddedD3d11SubmissionOutcome {
-                            queued: true,
-                            dropped: 0,
-                            needs_graphics: false,
-                            preserved_keyframe: false,
-                        }
-                    }
-                    opennow_streamer_platform_windows::PushOutcome::Backpressured => {
-                        EmbeddedD3d11SubmissionOutcome {
-                            queued: false,
-                            dropped: 1,
-                            needs_graphics: false,
-                            preserved_keyframe: true,
-                        }
-                    }
-                    opennow_streamer_platform_windows::PushOutcome::DroppedOldest => {
-                        EmbeddedD3d11SubmissionOutcome {
-                            queued: key_frame,
-                            dropped:
-                                opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY
-                                    + usize::from(!key_frame),
-                            needs_graphics: false,
-                            preserved_keyframe: false,
-                        }
-                    }
-                })
-                .map_err(|error| error.to_string());
-        }
-        let has_keyframe = self.pending.iter().any(|queued| queued.key_frame);
+        use opennow_streamer_platform_windows::{
+            CompressedAdmit, GapAdmit, PushOutcome, ReferenceGap,
+        };
+
         let key_frame = frame.key_frame;
-        match opennow_streamer_platform_windows::admit_compressed_frame(
+        let needs_graphics = self.submitter.is_none();
+        let (pending, submitter) = (&self.pending, self.submitter.as_ref());
+        let gap_admit = self.gap.admit(key_frame, || {
+            submitter.map_or_else(
+                || pending.iter().any(|queued| queued.key_frame),
+                crate::D3d11FrameSubmitter::holds_keyframe,
+            )
+        });
+        if gap_admit != GapAdmit::Admit {
+            return Ok(EmbeddedD3d11SubmissionOutcome {
+                queued: false,
+                dropped: 1,
+                needs_graphics,
+                preserved_keyframe: self.gap == ReferenceGap::BehindQueuedKeyframe,
+            });
+        }
+        if let Some(submitter) = self.submitter.as_ref() {
+            let outcome = submitter
+                .submit_video(frame)
+                .map_err(|error| error.to_string())?;
+            return Ok(match outcome {
+                PushOutcome::Queued | PushOutcome::Paused => EmbeddedD3d11SubmissionOutcome {
+                    queued: true,
+                    dropped: 0,
+                    needs_graphics,
+                    preserved_keyframe: false,
+                },
+                PushOutcome::Backpressured => {
+                    self.gap.record(CompressedAdmit::PreserveQueuedKeyframe);
+                    EmbeddedD3d11SubmissionOutcome {
+                        queued: false,
+                        dropped: 1,
+                        needs_graphics,
+                        preserved_keyframe: true,
+                    }
+                }
+                PushOutcome::DroppedOldest => {
+                    let dropped = opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY
+                        + usize::from(!key_frame);
+                    if !key_frame {
+                        self.gap.record(CompressedAdmit::DiscardChain { dropped });
+                    }
+                    EmbeddedD3d11SubmissionOutcome {
+                        queued: key_frame,
+                        dropped,
+                        needs_graphics,
+                        preserved_keyframe: false,
+                    }
+                }
+            });
+        }
+        let admitted = opennow_streamer_platform_windows::admit_compressed_frame(
             self.pending.len(),
             opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY,
             key_frame,
-            has_keyframe,
-        ) {
-            opennow_streamer_platform_windows::CompressedAdmit::Append => {
+            self.pending.iter().any(|queued| queued.key_frame),
+        );
+        self.gap.record(admitted);
+        match admitted {
+            CompressedAdmit::Append => {
                 self.pending.push_back(frame);
                 Ok(EmbeddedD3d11SubmissionOutcome {
                     queued: true,
@@ -2228,7 +2409,7 @@ impl EmbeddedD3d11Submission {
                     preserved_keyframe: false,
                 })
             }
-            opennow_streamer_platform_windows::CompressedAdmit::ReplaceWithKeyframe { dropped } => {
+            CompressedAdmit::ReplaceWithKeyframe { dropped } => {
                 self.pending.clear();
                 self.pending.push_back(frame);
                 Ok(EmbeddedD3d11SubmissionOutcome {
@@ -2238,15 +2419,13 @@ impl EmbeddedD3d11Submission {
                     preserved_keyframe: false,
                 })
             }
-            opennow_streamer_platform_windows::CompressedAdmit::PreserveQueuedKeyframe => {
-                Ok(EmbeddedD3d11SubmissionOutcome {
-                    queued: false,
-                    dropped: 1,
-                    needs_graphics: true,
-                    preserved_keyframe: true,
-                })
-            }
-            opennow_streamer_platform_windows::CompressedAdmit::DiscardChain { dropped } => {
+            CompressedAdmit::PreserveQueuedKeyframe => Ok(EmbeddedD3d11SubmissionOutcome {
+                queued: false,
+                dropped: 1,
+                needs_graphics: true,
+                preserved_keyframe: true,
+            }),
+            CompressedAdmit::DiscardChain { dropped } => {
                 self.pending.clear();
                 Ok(EmbeddedD3d11SubmissionOutcome {
                     queued: false,
@@ -2308,14 +2487,14 @@ impl EmbeddedD3d11FrameNotifier {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mid.to_owned();
         self.presentation_time_ns
             .store(presentation_time_ns, Ordering::Release);
-        self.publish();
+        self.publish(false);
     }
 
     fn publish_decoded(&self) {
-        self.publish();
+        self.publish(true);
     }
 
-    fn publish(&self) {
+    fn publish(&self, decoded: bool) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
@@ -2344,7 +2523,11 @@ impl EmbeddedD3d11FrameNotifier {
                 presentation_time_ns: self.presentation_time_ns.load(Ordering::Acquire),
             },
         };
-        let result = self.frames.publish(lease, Arc::new(pending));
+        let result = if decoded {
+            self.frames.publish(lease, Arc::new(pending))
+        } else {
+            self.frames.publish_pending(lease, Arc::new(pending))
+        };
         if sequence == 1 || result.is_err() {
             opennow_streamer_protocol::log::log_throttled(
                 "d3d11-publish-result",
@@ -2456,6 +2639,12 @@ impl MediaControl {
         self.shared.recording_tap.unsubscribe();
     }
 
+    pub fn cut_recording(&self, reason: RecordingCutReason) {
+        self.shared
+            .recording_tap
+            .close(RecordingCompletion::Cut { reason });
+    }
+
     pub fn update_cursor(&self, bytes: Vec<u8>) {
         let _ = self.host_commands.send(HostCommand::Cursor(bytes));
     }
@@ -2466,7 +2655,7 @@ impl MediaControl {
         }
         self.shared.video.close();
         self.shared.audio.close();
-        self.shared.recording_tap.unsubscribe();
+        self.cut_recording(RecordingCutReason::Interrupted);
         self.shared.replay_tap.stop();
         self.shared.output.stop_microphone();
         self.shared.output.clear();
@@ -3578,6 +3767,9 @@ const fn linux_decoder_name(
         opennow_streamer_platform_linux::DecoderBackend::VaApi => "VA-API/Vulkan",
         opennow_streamer_platform_linux::DecoderBackend::V4l2 => "V4L2/Vulkan",
         opennow_streamer_platform_linux::DecoderBackend::Ffmpeg => "FFmpeg software/Vulkan",
+        opennow_streamer_platform_linux::DecoderBackend::MediaCodec => {
+            "Android MediaCodec hardware (CPU NV12 transfer)/Vulkan"
+        }
     }
 }
 
@@ -3586,6 +3778,9 @@ const fn linux_embedded_backend_label(
     preference: opennow_streamer_platform_linux::DecoderPreference,
 ) -> &'static str {
     match preference {
+        opennow_streamer_platform_linux::DecoderPreference::MediaCodecOnly => {
+            linux_decoder_name(opennow_streamer_platform_linux::DecoderBackend::MediaCodec)
+        }
         opennow_streamer_platform_linux::DecoderPreference::SoftwareOnly => {
             linux_decoder_name(opennow_streamer_platform_linux::DecoderBackend::Ffmpeg)
         }
@@ -3642,6 +3837,7 @@ const fn linux_subsystem_name(
         opennow_streamer_platform_linux::Subsystem::V4l2 => "V4L2",
         opennow_streamer_platform_linux::Subsystem::Vulkan => "Vulkan",
         opennow_streamer_platform_linux::Subsystem::Ffmpeg => "FFmpeg",
+        opennow_streamer_platform_linux::Subsystem::MediaCodec => "Android MediaCodec bridge",
         opennow_streamer_platform_linux::Subsystem::Opus => "Opus",
         opennow_streamer_platform_linux::Subsystem::PipeWire => "PipeWire",
         opennow_streamer_platform_linux::Subsystem::Alsa => "ALSA",
@@ -4815,6 +5011,60 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn embedded_d3d11_defers_recovery_until_the_retained_keyframe_is_dequeued() {
+        let mut state = EmbeddedD3d11Submission::new();
+        let capacity = opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY;
+        let deferred = EmbeddedD3d11SubmissionOutcome {
+            queued: false,
+            dropped: 1,
+            needs_graphics: true,
+            preserved_keyframe: true,
+        };
+        let discarded = EmbeddedD3d11SubmissionOutcome {
+            preserved_keyframe: false,
+            ..deferred
+        };
+        for index in 0..capacity {
+            assert!(
+                state
+                    .push(embedded_h264_frame(index as i64, index == 0))
+                    .is_ok_and(|outcome| outcome.queued)
+            );
+        }
+        for index in capacity..capacity + 300 {
+            assert_eq!(
+                state.push(embedded_h264_frame(index as i64, false)),
+                Ok(deferred)
+            );
+        }
+        assert_eq!(state.pending.len(), capacity);
+
+        assert!(
+            state
+                .pending
+                .pop_front()
+                .is_some_and(|frame| frame.key_frame)
+        );
+        assert_eq!(state.push(embedded_h264_frame(1_000, false)), Ok(discarded));
+        assert_eq!(state.push(embedded_h264_frame(1_001, false)), Ok(discarded));
+        assert_eq!(state.pending.len(), capacity - 1);
+
+        state.pending.clear();
+        assert!(
+            state
+                .push(embedded_h264_frame(1_002, true))
+                .is_ok_and(|outcome| outcome.queued)
+        );
+        assert!(
+            state
+                .push(embedded_h264_frame(1_003, false))
+                .is_ok_and(|outcome| outcome.queued)
+        );
+        assert_eq!(state.pending.len(), 2);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn embedded_d3d11_overflow_retains_the_incoming_recovery_keyframe() {
         let mut state = EmbeddedD3d11Submission::new();
         let capacity = opennow_streamer_platform_windows::ADAPTIVE_VIDEO_QUEUE_CAPACITY;
@@ -4977,11 +5227,14 @@ mod tests {
             tap.publish(&frame);
         }
         assert!(receiver.overflowed());
-        for _ in 0..RECORDING_TAP_QUEUE_CAPACITY {
-            receiver.recv().expect("queued recording frame");
-        }
-        assert!(receiver.recv().is_err());
+        assert_eq!(
+            receiver.recv().unwrap_err(),
+            RecordingCompletion::Cut {
+                reason: RecordingCutReason::QueueOverflow,
+            }
+        );
     }
+
     use openh264::encoder::Encoder;
     use openh264::formats::{RgbSliceU8, YUVBuffer};
     use opus::{Application, Encoder as OpusEncoder};

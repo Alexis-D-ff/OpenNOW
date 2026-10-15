@@ -56,7 +56,7 @@ class WindowsSetupTests(unittest.TestCase):
         self.assertIn("build-setup.ps1", build)
         self.assertIn("build-setup.ps1", candidate)
         self.assertIn("OpenNOW-Qt-%s-Windows-%s-setup.exe", candidate)
-        self.assertIn('[[ "$assets" -eq 14 ]]', candidate)
+        self.assertIn('[[ "$assets" -eq 16 ]]', candidate)
         self.assertIn('pkexec', (APPLY / "managed.rs").read_text())
         self.assertIn("extract_dmg", (APPLY / "bundle.rs").read_text())
 

@@ -6,8 +6,12 @@ QtObject {
     property QtObject network: QtObject {
         property int state: MacAwdlController.Unsupported
         property bool busy: false
+        property bool enabled: false
+        property bool leased: false
         property string error: ""
         function refresh() {}
+        function install() { throw new Error("Unsupported AWDL helper installation") }
+        function uninstall() { throw new Error("Unsupported AWDL helper uninstallation") }
     }
     property QtObject client: QtObject {
         property var requests: []
@@ -56,18 +60,26 @@ QtObject {
         AppController.navigate("home")
         const screen = find(parent, "desktopOnboardingScreen")
         check(screen && screen.visible, "first-run wizard did not replace the shell")
-        check(screen.stepCount === 6 && screen.stepIndex === 0, "wrong first step")
-        for (let step = 1; step < 6; ++step) {
+        check(screen.stepCount === 4 && screen.stepIndex === 0 && screen.step === "mode", "wrong first step")
+        check(String(screen.steps) === "mode,picture,boost,ready",
+            "the network check appeared without a supported AWDL controller")
+        for (let step = 1; step < 4; ++step) {
             screen.next()
             check(screen.stepIndex === step, "next did not reach step " + step)
         }
-        screen.goToStep(1)
+        screen.goToStep(screen.steps.indexOf("mode"))
+        check(find(screen, "onboardingReportBug") && find(screen, "onboardingReportBug").visible,
+            "the beta report-a-bug action is missing from Mode")
         ShellStore.setOnboardingSetting("launchInConsoleMode", true)
         check(ShellStore.onboardingSettings.launchInConsoleMode === true,
             "console choice was not staged")
         check(ShellStore.settings.launchInConsoleMode === false,
             "console choice switched the shell before saving")
-        screen.goToStep(2)
+        screen.goToStep(screen.steps.indexOf("picture"))
+        check(!find(screen, "onboardingBitrate"), "Fine-tune controls were not folded by default")
+        const fineTune = find(screen, "onboardingFineTune")
+        check(fineTune, "Fine-tune disclosure missing")
+        fineTune.expansionRequested()
         const bitrate = find(screen, "onboardingBitrate")
         check(bitrate, "bitrate control missing")
         bitrate.moved(85)
@@ -84,7 +96,7 @@ QtObject {
         const fasterIndex = frameRate.options.findIndex(option => frameRate.optionValue(option) === 120)
         frameRate.selected(fasterIndex, frameRate.options[fasterIndex])
         check(ShellStore.onboardingSettings.fps === 120, "frame rate did not stage its real key")
-        screen.goToStep(3)
+        screen.goToStep(screen.steps.indexOf("boost"))
         const generation = find(screen, "onboardingFrameGeneration")
         check(generation && generation.selectedIndex === 0, "frame generation did not default off")
         generation.selected(1, generation.options[1])
@@ -101,7 +113,22 @@ QtObject {
         check(clarity && clarity.enabled, "upscaling clarity control is missing or disabled")
         clarity.moved(8)
         check(ShellStore.onboardingSettings.upscalingSharpness === 8, "clarity selection was not staged")
-        screen.goToStep(5)
+        find(screen, "onboardingSkipBoost").clicked()
+        check(screen.step === "ready", "Skip for now did not continue to Ready")
+        check(ShellStore.onboardingSettings.frameGeneration === "off"
+            && ShellStore.onboardingSettings.upscaling === "off"
+            && ShellStore.onboardingSettings.upscalingSharpness === ShellStore.settings.upscalingSharpness,
+            "Skip for now kept the staged boost choices")
+        check(ShellStore.onboardingSettings.fps === 120 && ShellStore.onboardingSettings.launchInConsoleMode === true,
+            "Skip for now discarded choices from other steps")
+        screen.goToStep(screen.steps.indexOf("boost"))
+        const generationAgain = find(screen, "onboardingFrameGeneration")
+        generationAgain.selected(1, generationAgain.options[1])
+        find(screen, "onboardingUpscaling").selected(1, find(screen, "onboardingUpscaling").options[1])
+        find(screen, "onboarding-upscalingSharpness").moved(8)
+        screen.goToStep(screen.steps.indexOf("ready"))
+        check(find(screen, "onboardingSupport") && find(screen, "onboardingSupport").visible,
+            "the optional support card is missing from Ready")
         screen.next()
         check(ShellStore.onboardingSaving, "finish did not begin persistence")
         check(client.requests[0].params.key === "launchInConsoleMode", "first choice was not saved first")
@@ -136,8 +163,9 @@ QtObject {
             const light = args.indexOf("--smoke-light-theme") >= 0
             const scaleIndex = args.indexOf("--onboarding-ui-scale")
             ShellStore.settings = Object.assign({}, ShellStore.settings, {
-                onboardingCompleted: false, launchInConsoleMode: false,
-                frameGeneration: "off", themePack: light ? "cobalt" : "nocturne",
+                onboardingCompleted: false, launchInConsoleMode: false, switchToConsoleOnPad: false,
+                resolution: "1920x1080", fps: 60, codec: "auto", enableHdr: false, maxBitrateMbps: 75,
+                frameGeneration: "off", upscaling: "off", upscalingSharpness: 10, upscalingDenoise: 0, themePack: light ? "cobalt" : "nocturne",
                 appTheme: light ? "light" : "dark",
                 desktopUiScale: scaleIndex >= 0 ? Number(args[scaleIndex + 1]) : 1
             })
@@ -171,16 +199,16 @@ QtObject {
         check(next.contentItem.truncated === false, "primary action label was clipped")
         check(skip.contentItem.truncated === false, "skip label was clipped")
         check(next.y + next.height <= next.parent.height, "primary action is outside its footer")
-        if (screen.stepIndex === 0 || screen.stepIndex === 4) {
+        if (screen.step === "mode") {
             const page = find(screen, "onboardingStepLoader").item
             const panels = page.children.filter(child => child.visible && child.height > 0)
-            check(panels.length === 2, "expected two introductory panels")
-            check(panels.every(panel => panel.width >= 200), "introductory panel collapsed")
+            check(panels.length === 2, "expected the mode cards and the gamepad panel")
+            check(panels.every(panel => panel.width >= 200), "mode panel collapsed")
             const a = panels[0]
             const b = panels[1]
             check(a.x + a.width <= b.x + 1 || b.x + b.width <= a.x + 1
                 || a.y + a.height <= b.y + 1 || b.y + b.height <= a.y + 1,
-                "introductory panels overlap")
+                "mode panels overlap")
         }
         return true
     }

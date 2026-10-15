@@ -25,6 +25,15 @@ QtObject {
     property var ownershipConfirmation: null
     property var remoteFavorites: []
     property string remoteFavoritesError: ""
+    property var focusIndexes: ({})
+    property var storeGames: []
+    property string storeState: "ready"
+    property string storeError: ""
+    property string storeWarning: ""
+    property int storeTotalCount: 0
+    property bool storeLoading: false
+    property bool storeHasMore: false
+    signal storeSessionReset()
     function selectedGameActionLabel() { return "Play" }
     function activateSelectedGame() { launchSelectedGame() }
     function isCloudFavorite(game) { return false }
@@ -35,8 +44,12 @@ QtObject {
     function refreshSelectedMetadata() {}
     function refreshCloudFavorites() {}
 
-    function focusIndex(route) { return 0 }
-    function rememberFocus(route, index) {}
+    function focusIndex(route) { return focusIndexes[route] || 0 }
+    function rememberFocus(route, index) { focusIndexes = Object.assign({}, focusIndexes, {[route]: index}) }
+    function ensureStore() {}
+    function requestStorePage() {}
+    function retryStore() {}
+    function readinessNotice() { return "" }
     function artworkUrl(source) { return source }
     function retainArtwork(source) {}
     function releaseArtwork(source) {}
@@ -50,6 +63,17 @@ QtObject {
         if (index >= 0) ids.splice(index, 1)
         else ids.push(game.id)
         settings = Object.assign({}, settings, {favoriteGameIds: ids})
+    }
+    function gameIdentity(game) { return game ? String(game.id || "") : "" }
+    function homeTileSize(game) { return (settings.homeTileSizes || {})[gameIdentity(game)] === "wide" ? "wide" : "square" }
+    function setHomeTileSize(game, size) {
+        const sizes = Object.assign({}, settings.homeTileSizes || {})
+        sizes[gameIdentity(game)] = size === "wide" ? "wide" : "square"
+        settings = Object.assign({}, settings, {homeTileSizes: sizes})
+    }
+    function setHomeOrder(ids) { settings = Object.assign({}, settings, {favoriteGameIds: ids}) }
+    function removeFromHome(game) {
+        settings = Object.assign({}, settings, {favoriteGameIds: settings.favoriteGameIds.filter(id => id !== gameIdentity(game))})
     }
     function openGame(game) { selectedGame = game; detailsCount++ }
     function launchSelectedGame() { launchCount++ }

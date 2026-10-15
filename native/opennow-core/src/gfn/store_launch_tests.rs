@@ -704,12 +704,33 @@ fn store_launch_preserves_the_active_seat_guard() {
             "storeLaunch":true,
             "scope":scoped_result(json!({}), &auth_fixture("fixture-account"), 0)["scope"]}),
         &json!({}),
+        |settings| Ok(settings.clone()),
     );
     assert_eq!(result.unwrap_err().code, "session_update_busy");
     assert_eq!(
         service.cloudmatch.active()["session"]["sessionId"],
         "owned-seat"
     );
+    worker.join().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn subscription_reports_missing_remaining_playtime_as_unknown() {
+    let (_, mut missing) = subscription(false);
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("remainingTimeInMinutes");
+    let (url, worker) = mock_requests(vec![vpc(), subscription(false), (200, missing)], |_, _| {});
+    let (service, path) = service(&url);
+    let known = service.subscription(&json!({})).unwrap();
+    assert_eq!(known["subscription"]["remainingHours"], json!(500.0 / 60.0));
+    assert_eq!(known["subscription"]["usedHours"], json!(100.0 / 60.0));
+    let unknown = service.subscription(&json!({})).unwrap();
+    assert_eq!(unknown["subscription"]["remainingHours"], Value::Null);
+    assert_eq!(unknown["subscription"]["usedHours"], Value::Null);
+    assert_eq!(unknown["subscription"]["totalHours"], json!(10.0));
     worker.join().unwrap();
     std::fs::remove_dir_all(path).unwrap();
 }

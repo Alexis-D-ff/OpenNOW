@@ -1,5 +1,17 @@
 include(CTest)
 if(BUILD_TESTING)
+    qt_add_executable(opennow-windowtheme-tests tests/tst_windowtheme.cpp
+        src/app/platform/WindowTheme.cpp src/app/platform/WindowTheme.h)
+    target_include_directories(opennow-windowtheme-tests PRIVATE src)
+    target_compile_definitions(opennow-windowtheme-tests PRIVATE
+        OPENNOW_QML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml")
+    target_link_libraries(opennow-windowtheme-tests PRIVATE Qt6::Test Qt6::Quick)
+    if(WIN32)
+        target_link_libraries(opennow-windowtheme-tests PRIVATE dwmapi)
+    endif()
+    add_test(NAME opennow-windowtheme-tests COMMAND opennow-windowtheme-tests -o -,txt)
+    set_tests_properties(opennow-windowtheme-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     qt_add_executable(opennow-applicationicons-tests tests/tst_applicationicons.cpp)
     target_link_libraries(opennow-applicationicons-tests PRIVATE Qt6::Test Qt6::Gui)
     opennow_add_application_icons(opennow-applicationicons-tests)
@@ -19,7 +31,7 @@ if(BUILD_TESTING)
     qt_add_executable(opennow-macawdl-tests tests/tst_macawdlcontroller.cpp
         src/app/platform/MacAwdlController.cpp src/app/platform/MacAwdlController.h)
     target_include_directories(opennow-macawdl-tests PRIVATE src)
-    target_link_libraries(opennow-macawdl-tests PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(opennow-macawdl-tests PRIVATE Qt6::Core Qt6::Network Qt6::Test)
     add_test(NAME opennow-macawdl-tests COMMAND opennow-macawdl-tests -o -,txt)
     set_tests_properties(opennow-macawdl-tests PROPERTIES TIMEOUT 20)
     qt_add_executable(opennow-waylandhdroutput-tests tests/tst_waylandhdroutput.cpp)
@@ -116,12 +128,82 @@ if(BUILD_TESTING)
     qt_add_resources(opennow-consolelayout-tests "console-layout-test-assets"
         PREFIX "/qt/qml/OpenNOW" FILES ${OPENNOW_CONTROLLER_ICON_FILES}
         res/fonts/Nunito-Variable.ttf
+        res/fonts/IBMPlexMono-Regular.ttf res/fonts/IBMPlexMono-Medium.ttf res/fonts/IBMPlexMono-Bold.ttf
         res/icons/nav-home.svg res/icons/nav-library.svg res/icons/nav-friends.svg
-        res/icons/nav-settings.svg res/icons/nav-computer.svg)
+        res/icons/nav-settings.svg res/icons/nav-computer.svg
+        res/icons/desktop-nav-home.svg res/icons/desktop-nav-home-on-light.svg
+        res/icons/desktop-nav-library.svg res/icons/desktop-nav-library-on-light.svg
+        res/icons/desktop-nav-store.svg res/icons/desktop-nav-store-on-light.svg
+        res/icons/desktop-nav-friends.svg res/icons/desktop-nav-friends-on-light.svg
+        res/icons/desktop-nav-settings.svg res/icons/desktop-nav-settings-on-light.svg)
     add_test(NAME opennow-consolelayout-tests COMMAND opennow-consolelayout-tests
         -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/consolelayout")
     set_tests_properties(opennow-consolelayout-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic" TIMEOUT 30)
+    qt_add_executable(opennow-consolecontrols-tests tests/tst_consolecontrols.cpp)
+    target_link_libraries(opennow-consolecontrols-tests PRIVATE Qt6::QuickTest Qt6::Quick)
+    target_compile_definitions(opennow-consolecontrols-tests PRIVATE
+        OPENNOW_QML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml")
+    qt_add_resources(opennow-consolecontrols-tests "console-controls-test-assets"
+        PREFIX "/qt/qml/OpenNOW" FILES ${OPENNOW_CONTROLLER_ICON_FILES})
+    add_test(NAME opennow-consolecontrols-tests COMMAND opennow-consolecontrols-tests
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/consolecontrols")
+    set_tests_properties(opennow-consolecontrols-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic" TIMEOUT 45)
+    qt_add_executable(opennow-consolelaunch-tests tests/tst_consolelaunch.cpp)
+    target_link_libraries(opennow-consolelaunch-tests PRIVATE Qt6::QuickTest Qt6::Quick Qt6::Multimedia)
+    target_compile_definitions(opennow-consolelaunch-tests PRIVATE
+        OPENNOW_QML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml")
+    qt_add_resources(opennow-consolelaunch-tests "console-launch-test-assets"
+        PREFIX "/qt/qml/OpenNOW" FILES res/sounds/launch-air.wav res/sounds/launch-open.wav)
+    add_test(NAME opennow-consolelaunch-tests COMMAND opennow-consolelaunch-tests
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/consolelaunch")
+    set_tests_properties(opennow-consolelaunch-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic" TIMEOUT 45)
+    qt_add_executable(opennow-consolelaunchinput-tests tests/tst_consolelaunchinput.cpp
+        src/app/AppController.cpp src/app/AppController.h
+        src/input/InputModeTracker.cpp src/input/InputModeTracker.h
+        src/input/ControllerInput.cpp src/input/ControllerInput.h)
+    target_include_directories(opennow-consolelaunchinput-tests PRIVATE src)
+    target_link_libraries(opennow-consolelaunchinput-tests PRIVATE Qt6::Test Qt6::Gui SDL3::SDL3)
+    add_test(NAME opennow-consolelaunchinput-tests COMMAND opennow-consolelaunchinput-tests -o -,txt)
+    set_tests_properties(opennow-consolelaunchinput-tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    qt_add_resources(opennow-qt "console-launch-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/ConsoleLaunchAcceptance.qml)
+    qt_add_resources(opennow-qt "console-spacing-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/ConsoleSpacingAcceptance.qml)
+    foreach(spacing_route home library settings-account settings-streaming settings-video
+            settings-input settings-network settings-themes settings-advanced settings-recording)
+        set(spacing_start_route "${spacing_route}")
+        set(spacing_args)
+        if(spacing_route STREQUAL "settings-recording")
+            set(spacing_start_route settings)
+            list(APPEND spacing_args --smoke-spacing-recording)
+        endif()
+        foreach(size "1920x1080" "2560x1440" "1280x800" "960x540")
+            string(REPLACE "x" ";" dimensions "${size}")
+            list(GET dimensions 0 spacing_width)
+            list(GET dimensions 1 spacing_height)
+            add_test(NAME qml-console-spacing-${spacing_route}-${size} COMMAND opennow-qt
+                --smoke-test --allow-multiple-instances --console --smoke-console-design
+                --route ${spacing_start_route} --smoke-console-spacing --reduced-motion ${spacing_args}
+                --smoke-width ${spacing_width} --smoke-height ${spacing_height})
+            set_tests_properties(qml-console-spacing-${spacing_route}-${size} PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+        endforeach()
+    endforeach()
+    foreach(motion normal reduced)
+        set(console_launch_args)
+        if(motion STREQUAL "reduced")
+            list(APPEND console_launch_args --reduced-motion)
+        endif()
+        add_test(NAME qml-console-launch-${motion} COMMAND opennow-qt
+            --smoke-test --allow-multiple-instances --console --route home
+            --smoke-console-launch ${console_launch_args})
+        set_tests_properties(qml-console-launch-${motion} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    endforeach()
     qt_add_executable(opennow-onboarding-tests tests/tst_onboarding.cpp)
     target_link_libraries(opennow-onboarding-tests PRIVATE Qt6::QuickTest Qt6::Quick)
     target_compile_definitions(opennow-onboarding-tests PRIVATE
@@ -140,7 +222,7 @@ if(BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     foreach(width 960 1440)
-        foreach(step 0 2 5)
+        foreach(step 0 1 3)
             add_test(NAME "qml-onboarding-layout-${width}-${step}" COMMAND opennow-qt
                 --smoke-test --allow-multiple-instances --desktop --route home
                 --smoke-onboarding --onboarding-ui-check --onboarding-step ${step}
@@ -150,7 +232,7 @@ if(BUILD_TESTING)
         endforeach()
         add_test(NAME "qml-onboarding-resolution-${width}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
-            --smoke-onboarding --onboarding-ui-check --onboarding-step 2 --onboarding-resolution-expanded
+            --smoke-onboarding --onboarding-ui-check --onboarding-step 1 --onboarding-resolution-expanded
             --smoke-width ${width} --smoke-height 540 --onboarding-ui-scale 1.25 --reduced-motion)
         set_tests_properties("qml-onboarding-resolution-${width}" PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
@@ -165,7 +247,7 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME "qml-onboarding-awdl-${width}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
-            --smoke-onboarding --onboarding-awdl-check --onboarding-step 3
+            --smoke-onboarding --onboarding-awdl-check --onboarding-step 2
             --smoke-width ${width} --smoke-height ${awdl_height}
             --onboarding-ui-scale ${awdl_scale} --reduced-motion)
         set_tests_properties("qml-onboarding-awdl-${width}" PROPERTIES
@@ -173,7 +255,7 @@ if(BUILD_TESTING)
     endforeach()
     add_test(NAME qml-onboarding-awdl-fullscreen COMMAND opennow-qt
         --smoke-test --allow-multiple-instances --desktop --route home
-        --smoke-onboarding --onboarding-awdl-check --onboarding-step 3
+        --smoke-onboarding --onboarding-awdl-check --onboarding-step 2
         --onboarding-awdl-fullscreen --reduced-motion)
     set_tests_properties(qml-onboarding-awdl-fullscreen PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
@@ -183,7 +265,7 @@ if(BUILD_TESTING)
         --smoke-width 960 --smoke-height 540 --reduced-motion)
     set_tests_properties(qml-onboarding-login-scroll PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
-    foreach(step RANGE 0 5)
+    foreach(step RANGE 0 3)
         add_test(NAME "qml-onboarding-scroll-${step}" COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route home
             --smoke-onboarding --onboarding-scroll-check --onboarding-step ${step}
@@ -197,7 +279,7 @@ if(BUILD_TESTING)
             --smoke-onboarding --smoke-width ${width} --reduced-motion)
         set_tests_properties("qml-onboarding-${width}" PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
-        foreach(step RANGE 0 5)
+        foreach(step RANGE 0 3)
             add_test(NAME "qml-onboarding-render-${width}-${step}" COMMAND opennow-qt
                 --smoke-test --allow-multiple-instances --desktop --route home
                 --smoke-onboarding --onboarding-step ${step} --smoke-width ${width} --reduced-motion)
@@ -240,7 +322,7 @@ if(BUILD_TESTING)
     add_test(NAME opennow-consoleactions-tests COMMAND opennow-consoleactions-tests
         -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/consoleactions")
     set_tests_properties(opennow-consoleactions-tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software" TIMEOUT 30)
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic" TIMEOUT 30)
     qt_add_executable(opennow-theme-tests tests/tst_theme.cpp)
     target_link_libraries(opennow-theme-tests PRIVATE Qt6::QuickTest Qt6::Quick)
     target_compile_definitions(opennow-theme-tests PRIVATE
@@ -362,7 +444,8 @@ if(BUILD_TESTING)
     endif()
     set_tests_properties(opennow-streamcolor-tests PROPERTIES TIMEOUT 60)
     qt_add_resources(opennow-qt "region-ping-acceptance"
-        PREFIX "/acceptance" BASE tests FILES tests/CatalogSyncAcceptance.qml tests/OwnershipAcceptance.qml tests/CommandSearchAcceptance.qml tests/GameDetailsLayoutAcceptance.qml tests/PushInvalidationAcceptance.qml)
+        PREFIX "/acceptance" BASE tests FILES tests/CatalogSyncAcceptance.qml tests/LibraryErrorAcceptance.qml tests/OwnershipAcceptance.qml tests/CommandSearchAcceptance.qml tests/GameDetailsLayoutAcceptance.qml tests/PushInvalidationAcceptance.qml
+        tests/GameLabelsAcceptance.qml tests/GameDlssAcceptance.qml)
     foreach(details_size normal short)
         if(details_size STREQUAL "normal")
             set(details_width 1440)
@@ -381,6 +464,33 @@ if(BUILD_TESTING)
                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
             endforeach()
         endforeach()
+    endforeach()
+    add_test(NAME qml-game-details-dlss-1600 COMMAND opennow-qt
+        --smoke-test --allow-multiple-instances --desktop --route home --reduced-motion
+        --smoke-game-dlss --smoke-width 1600 --smoke-height 900)
+    set_tests_properties(qml-game-details-dlss-1600 PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    foreach(report_motion normal reduced)
+        set(report_motion_args)
+        if(report_motion STREQUAL "reduced")
+            list(APPEND report_motion_args --reduced-motion)
+        endif()
+        add_test(NAME qml-desktop-session-report-focus-${report_motion} COMMAND opennow-qt
+            --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-game-details-layout --details-owned --details-session-report
+            --smoke-width 1280 --smoke-height 800 ${report_motion_args})
+        set_tests_properties(qml-desktop-session-report-focus-${report_motion} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    endforeach()
+    foreach(labels_width 960 1600)
+        if(labels_width EQUAL 960)
+            set(labels_height 600)
+        else()
+            set(labels_height 900)
+        endif()
+        add_test(NAME qml-game-labels-${labels_width} COMMAND opennow-qt
+            --smoke-test --allow-multiple-instances --desktop --route library --smoke-game-labels
+            --smoke-width ${labels_width} --smoke-height ${labels_height} --reduced-motion)
+        set_tests_properties(qml-game-labels-${labels_width} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     foreach(search_case compact normal scaled-light)
         if(search_case STREQUAL "normal")
@@ -410,6 +520,20 @@ if(BUILD_TESTING)
             endforeach()
         endforeach()
     endforeach()
+    foreach(width 960 1600)
+        if(width EQUAL 960)
+            set(library_error_height 540)
+        else()
+            set(library_error_height 900)
+        endif()
+        foreach(scale 1 1.5)
+            add_test(NAME qml-library-error-${width}-${scale} COMMAND opennow-qt
+                --smoke-test --allow-multiple-instances --console --route library
+                --smoke-library-error --smoke-width ${width} --smoke-height ${library_error_height} --reduced-motion)
+            set_tests_properties(qml-library-error-${width}-${scale} PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${scale}" TIMEOUT 15)
+        endforeach()
+    endforeach()
     foreach(width 960 1440)
         add_test(NAME qml-catalog-sync-${width} COMMAND opennow-qt
             --smoke-test --allow-multiple-instances --desktop --route library
@@ -427,7 +551,62 @@ if(BUILD_TESTING)
         set_tests_properties(qml-push-invalidation-${width} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endforeach()
     qt_add_resources(opennow-qt "store-paging-acceptance"
-        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml)
+        PREFIX "/acceptance" BASE tests FILES tests/RegionPingAcceptance.qml tests/RegionChoicesAcceptance.qml tests/RegionDisplayAcceptance.qml tests/StorePagingAcceptance.qml tests/BackendAvailabilityAcceptance.qml tests/StreamRecoveryAcceptance.qml tests/IdleModeAcceptance.qml tests/FrameGenerationAcceptance.qml tests/AudioOutputAcceptance.qml tests/CollectionsAcceptance.qml tests/SteamBigPictureAcceptance.qml tests/PersistentInGameSettingsAcceptance.qml tests/NetworkTestAcceptance.qml tests/SaveBandwidthAcceptance.qml tests/StoreLaunchAcceptance.qml tests/ControllerMetadataAcceptance.qml tests/MicrophoneAcceptance.qml tests/DesktopAntiAfkAcceptance.qml tests/DesktopStreamControllersAcceptance.qml tests/RecordingAcceptance.qml tests/ShortcutsAcceptance.qml tests/ConsoleSettingsAcceptance.qml)
+    add_test(NAME qml-account-shortcuts
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-paper-design --smoke-accounts 4 --smoke-account-shortcuts --reduced-motion)
+    set_tests_properties(qml-account-shortcuts PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+    foreach(account_state IN ITEMS launch expired switching pin manage remove many console)
+        if(account_state STREQUAL "many")
+            set(account_args --desktop --smoke-accounts 8)
+        elseif(account_state STREQUAL "console")
+            set(account_args --console --smoke-accounts 4)
+        else()
+            set(account_args --desktop --smoke-accounts 4 --smoke-account-state ${account_state})
+        endif()
+        add_test(NAME qml-account-picker-${account_state}
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --route accounts
+                --smoke-paper-design ${account_args} --reduced-motion
+                --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-${account_state}.png)
+        set_tests_properties(qml-account-picker-${account_state} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+    endforeach()
+    add_test(NAME qml-account-switch-confirm-light
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 2 --smoke-account-state switch-confirm --smoke-light-theme
+            --smoke-account-chrome-check --smoke-width 1440 --smoke-height 900 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switch-confirm-light.png)
+    add_test(NAME qml-account-picker-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route accounts
+            --smoke-accounts 8 --smoke-settings-scale 1.25 --smoke-account-chrome-check
+            --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-fit-960.png)
+    add_test(NAME qml-account-switcher-fit-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route home
+            --smoke-accounts 8 --smoke-account-state switcher --smoke-settings-scale 1.25
+            --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-switcher-fit-960.png)
+    add_test(NAME qml-account-picker-error-960
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route accounts
+            --smoke-accounts 8 --smoke-account-state switch-error --smoke-settings-scale 1.25
+            --smoke-account-chrome-check --smoke-width 960 --smoke-height 540 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/account-picker-error-960.png)
+    add_test(NAME qml-settings-rail-fit-1440
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route settings
+            --smoke-paper-design --smoke-settings-scale 1.25 --smoke-settings-rail-check
+            --smoke-width 1440 --smoke-height 900 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/settings-rail-fit-1440.png)
+    add_test(NAME qml-settings-rail-fit-1920
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop --route settings
+            --smoke-paper-design --smoke-settings-scale 1.25 --smoke-settings-rail-check
+            --smoke-width 1920 --smoke-height 1080 --reduced-motion
+            --screenshot ${CMAKE_CURRENT_BINARY_DIR}/settings-rail-fit-1920.png)
+    set_tests_properties(qml-account-switch-confirm-light qml-account-picker-fit-960 qml-account-switcher-fit-960
+        qml-account-picker-error-960 qml-settings-rail-fit-1440 qml-settings-rail-fit-1920
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+    add_test(NAME qml-console-settings
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --console
+            --route settings-video --smoke-console-settings --reduced-motion)
+    set_tests_properties(qml-console-settings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
     add_test(NAME qml-recording
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route settings --smoke-recording --reduced-motion)
@@ -440,6 +619,33 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route settings-audio --smoke-microphone --reduced-motion)
     set_tests_properties(qml-microphone PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    add_test(NAME qml-desktop-anti-afk
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-desktop-anti-afk --reduced-motion)
+    set_tests_properties(qml-desktop-anti-afk PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    qt_add_resources(opennow-qt flight_controls_acceptance
+        PREFIX "/acceptance" BASE tests FILES tests/FlightControlsAcceptance.qml)
+    foreach(flight_state connected light-ready empty supported-expanded forwarding-off badges drawer-home drawer-controllers stats-expanded stream-clear)
+        set(flight_route settings-input)
+        if(flight_state MATCHES "^(drawer-|stats-expanded|stream-clear|badges)")
+            set(flight_route stream)
+        endif()
+        foreach(flight_mode windowed fullscreen)
+            set(flight_args --smoke-test --allow-multiple-instances --desktop
+                --route ${flight_route} --smoke-flight-controls --flight-state ${flight_state} --reduced-motion)
+            if(flight_mode STREQUAL "fullscreen")
+                list(APPEND flight_args --flight-fullscreen)
+            endif()
+            add_test(NAME "qml-flight-controls-${flight_state}-${flight_mode}"
+                COMMAND opennow-qt ${flight_args})
+            set_tests_properties("qml-flight-controls-${flight_state}-${flight_mode}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+        endforeach()
+    endforeach()
+    add_test(NAME qml-desktop-stream-controllers
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-stream-controllers --reduced-motion)
+    set_tests_properties(qml-desktop-stream-controllers PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     foreach(surface desktop console)
         set(microphone_settings_route settings-audio)
         set(microphone_overlay desktop-stream-menu)
@@ -605,6 +811,26 @@ if(BUILD_TESTING)
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route settings-streaming --smoke-stream-recovery --reduced-motion)
     set_tests_properties(qml-stream-recovery PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    add_test(NAME qml-stream-recovery-fullscreen
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route settings-streaming --smoke-stream-recovery --smoke-stream-recovery-fullscreen --reduced-motion)
+    set_tests_properties(qml-stream-recovery-fullscreen PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    qt_add_resources(opennow-qt "bug-report-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/BugReportAcceptance.qml)
+    add_test(NAME qml-bug-reports
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route home --smoke-bug-reports --reduced-motion)
+    set_tests_properties(qml-bug-reports PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+    foreach(width 960 1600)
+        foreach(scale 1 1.25)
+            add_test(NAME "qml-bug-report-notice-${width}-${scale}"
+                COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                    --route home --smoke-bug-reports --bug-report-notice-check
+                    --bug-report-scale ${scale} --smoke-width ${width} --smoke-height 540 --reduced-motion)
+            set_tests_properties("qml-bug-report-notice-${width}-${scale}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+        endforeach()
+    endforeach()
     qt_add_resources(opennow-qt "queue-drop-acceptance"
         PREFIX "/acceptance" BASE tests FILES tests/QueueDropsAcceptance.qml)
     qt_add_resources(opennow-qt "color-format-acceptance"
@@ -641,6 +867,19 @@ if(BUILD_TESTING)
                 --route stream --smoke-color-format --smoke-color-format-overlay
                 --reduced-motion ${color_format_args})
         set_tests_properties("qml-color-format-menu-${mode}" PROPERTIES
+            ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
+    endforeach()
+    qt_add_resources(opennow-qt "hdr-downgrade-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/HdrDowngradeAcceptance.qml)
+    foreach(mode windowed fullscreen)
+        set(hdr_downgrade_args)
+        if(mode STREQUAL "fullscreen")
+            list(APPEND hdr_downgrade_args --smoke-hdr-downgrade-fullscreen)
+        endif()
+        add_test(NAME "qml-hdr-downgrade-${mode}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route stream --smoke-hdr-downgrade --reduced-motion ${hdr_downgrade_args})
+        set_tests_properties("qml-hdr-downgrade-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
     foreach(width 960 1440)
@@ -918,6 +1157,15 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 8
     )
+    qt_add_executable(opennow-generichidinput-tests tests/tst_generichidinput.cpp)
+    target_link_libraries(opennow-generichidinput-tests PRIVATE
+        Qt6::Test Qt6::Gui opennow-generic-hid)
+    target_sources(opennow-generichidinput-tests PRIVATE
+        src/input/ControllerInput.cpp src/input/ControllerInput.h)
+    add_test(NAME opennow-generichidinput-tests COMMAND opennow-generichidinput-tests -o -,txt)
+    set_tests_properties(opennow-generichidinput-tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(opennow-controllerinput-tests
         tests/tst_controllerinput.cpp
         src/input/ControllerInput.cpp
@@ -931,7 +1179,7 @@ if(BUILD_TESTING)
              COMMAND opennow-controllerinput-tests -o -,txt)
     set_tests_properties(opennow-controllerinput-tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 8
+        TIMEOUT 30
     )
     qt_add_executable(opennow-controllernavigation-tests
         tests/tst_controllernavigation.cpp
@@ -993,13 +1241,26 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 30
     )
+    foreach(target opennow-consolelaunchinput-tests opennow-sonychain-tests
+            opennow-controllerinput-tests opennow-controllernavigation-tests
+            opennow-controllertuning-tests opennow-controllersources-tests
+            opennow-controllermetadata-tests)
+        if(TARGET ${target})
+            target_link_libraries(${target} PRIVATE opennow-generic-hid)
+        endif()
+    endforeach()
     set(OPENNOW_CI_UNIT_TEST_TARGETS
+        opennow-generichidinput-tests
+        opennow-windowtheme-tests
         opennow-updatefailure-tests
         opennow-queueselector-tests
         opennow-applicationicons-tests
         opennow-tenbitwarning-tests
         opennow-graphicsdevices-tests
         opennow-consolelayout-tests
+        opennow-consolecontrols-tests
+        opennow-consolelaunch-tests
+        opennow-consolelaunchinput-tests
         opennow-consoleactions-tests
         opennow-macawdl-tests
         opennow-controllericons-tests
@@ -1042,11 +1303,15 @@ if(BUILD_TESTING)
         # Qt's executable helper defaults to the GUI subsystem on Windows. Keep
         # test runners as console programs so CTest captures QtTest failures.
         set_target_properties(
+            opennow-windowtheme-tests
             opennow-applicationicons-tests
             opennow-tenbitwarning-tests
             opennow-queueselector-tests
             opennow-graphicsdevices-tests
             opennow-consolelayout-tests
+            opennow-consolecontrols-tests
+            opennow-consolelaunch-tests
+            opennow-consolelaunchinput-tests
             opennow-consoleactions-tests
             opennow-macawdl-tests
             opennow-controllericons-tests
@@ -1065,6 +1330,7 @@ if(BUILD_TESTING)
             opennow-singleinstance-tests
             opennow-thumbnail-tests
             opennow-controllerinput-tests
+            opennow-generichidinput-tests
             opennow-controllernavigation-tests
             opennow-controllersources-tests
             opennow-controllermetadata-tests
@@ -1101,10 +1367,14 @@ if(BUILD_TESTING)
             add_dependencies(opennow-qt-test-runtime opennow-msvc-runtime)
         endif()
         foreach(test_target IN ITEMS
+                opennow-windowtheme-tests
                 opennow-applicationicons-tests
                 opennow-tenbitwarning-tests
                 opennow-graphicsdevices-tests
                 opennow-consolelayout-tests
+                opennow-consolecontrols-tests
+                opennow-consolelaunch-tests
+                opennow-consolelaunchinput-tests
                 opennow-consoleactions-tests
                 opennow-controllericons-tests
                 opennow-streamtoasts-tests
@@ -1122,6 +1392,7 @@ if(BUILD_TESTING)
                 opennow-singleinstance-tests
                 opennow-thumbnail-tests
                 opennow-controllerinput-tests
+                opennow-generichidinput-tests
                 opennow-controllernavigation-tests
                 opennow-controllersources-tests
                 opennow-controllermetadata-tests)
@@ -1281,7 +1552,7 @@ if(BUILD_TESTING)
             --route settings-themes --smoke-paper-design --smoke-settings-panel interface --smoke-choice-open --reduced-motion)
     set_tests_properties(qml-renew-network-picker qml-renew-language-picker PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
-    foreach(route settings-network settings-advanced settings-themes settings-input)
+    foreach(route settings-network settings-advanced settings-updates settings-themes settings-input)
         add_test(NAME "qml-renew-actions-${route}"
             COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
                 --route "${route}" --smoke-paper-design --smoke-renew-settings-actions --reduced-motion)
@@ -1303,6 +1574,29 @@ if(BUILD_TESTING)
         )
     endforeach()
     foreach(surface desktop console)
+        foreach(window_mode windowed fullscreen)
+            foreach(chrome clear stats)
+                set(idle_args --smoke-test --allow-multiple-instances --${surface}
+                    --route stream --smoke-stream-idle-warning --reduced-motion)
+                if(window_mode STREQUAL "fullscreen")
+                    list(APPEND idle_args --smoke-idle-fullscreen)
+                endif()
+                if(chrome STREQUAL "stats")
+                    list(APPEND idle_args --smoke-idle-stats)
+                endif()
+                add_test(NAME "qml-stream-idle-${surface}-${window_mode}-${chrome}"
+                    COMMAND opennow-qt ${idle_args})
+                set_tests_properties("qml-stream-idle-${surface}-${window_mode}-${chrome}" PROPERTIES
+                    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+                set(text_input_args ${idle_args})
+                list(REMOVE_ITEM text_input_args --smoke-stream-idle-warning)
+                list(APPEND text_input_args --smoke-stream-text-input-error)
+                add_test(NAME "qml-stream-text-input-${surface}-${window_mode}-${chrome}"
+                    COMMAND opennow-qt ${text_input_args})
+                set_tests_properties("qml-stream-text-input-${surface}-${window_mode}-${chrome}" PROPERTIES
+                    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+            endforeach()
+        endforeach()
         set(input_notice_mode --console)
         if(surface STREQUAL "desktop")
             set(input_notice_mode --desktop)
@@ -1323,6 +1617,12 @@ if(BUILD_TESTING)
                 set_tests_properties("qml-window-close-${surface}-${mode}-${route}" PROPERTIES
                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
                 if(mode STREQUAL "windowed")
+                    add_test(NAME "qml-window-close-idle-opt-out-${surface}-${route}"
+                        COMMAND opennow-qt --smoke-test --allow-multiple-instances
+                            --${surface} --route ${route} --smoke-stream-exit
+                            --smoke-exit-window-close --smoke-exit-idle-opt-out --reduced-motion)
+                    set_tests_properties("qml-window-close-idle-opt-out-${surface}-${route}" PROPERTIES
+                        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
                     add_test(NAME "qml-authorized-quit-${surface}-${route}"
                         COMMAND opennow-qt --smoke-test --allow-multiple-instances
                             --${surface} --route ${route} --smoke-stream-exit
@@ -1341,6 +1641,24 @@ if(BUILD_TESTING)
             endforeach()
         endforeach()
     endforeach()
+    foreach(mode windowed fullscreen)
+        foreach(motion full reduced)
+            set(console_motion_args)
+            if(motion STREQUAL "reduced")
+                list(APPEND console_motion_args --reduced-motion)
+            endif()
+            add_test(NAME "qml-console-session-${mode}-${motion}"
+                COMMAND opennow-qt --smoke-test --allow-multiple-instances --console
+                    --route home --smoke-console-session --smoke-exit-${mode} ${console_motion_args})
+            set_tests_properties("qml-console-session-${mode}-${motion}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+        endforeach()
+    endforeach()
+    add_test(NAME qml-console-initial-warning
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --console --route home
+            --overlay application-quit-confirm --smoke-initial-console-warning --reduced-motion)
+    set_tests_properties(qml-console-initial-warning PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
     foreach(surface desktop console)
         foreach(mode windowed maximized fullscreen)
             add_test(NAME "qml-session-fullscreen-${surface}-${mode}"
@@ -1377,12 +1695,42 @@ if(BUILD_TESTING)
         TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT}
     )
     foreach(notes_route updates settings-advanced)
+        # Release notes moved from About & support to Settings › Updates; the
+        # test identifiers stay stable.
+        set(notes_target "${notes_route}")
+        if(notes_route STREQUAL "settings-advanced")
+            set(notes_target settings-updates)
+        endif()
         foreach(notes_width 960 1600)
             add_test(NAME "qml-release-notes-${notes_route}-${notes_width}"
                 COMMAND opennow-qt --smoke-test --allow-multiple-instances
-                    --desktop --route ${notes_route} --smoke-release-notes
+                    --desktop --route ${notes_target} --smoke-release-notes
                     --smoke-width ${notes_width} --reduced-motion)
             set_tests_properties("qml-release-notes-${notes_route}-${notes_width}" PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+        endforeach()
+    endforeach()
+    # Settings › Updates and the status-bar chip/panel for every updater state.
+    foreach(update_surface uptodate available staged progress ready error confirm other)
+        add_test(NAME "qml-desktop-updates-${update_surface}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route settings-updates --smoke-update-surface ${update_surface} --reduced-motion
+                --screenshot ${CMAKE_CURRENT_BINARY_DIR}/desktop-updates-${update_surface}.png)
+        set_tests_properties("qml-desktop-updates-${update_surface}" PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
+    endforeach()
+    foreach(update_surface available progress ready error)
+        foreach(update_window windowed fullscreen)
+            set(update_window_args)
+            if(update_window STREQUAL "fullscreen")
+                list(APPEND update_window_args --smoke-update-fullscreen)
+            endif()
+            add_test(NAME "qml-desktop-update-panel-${update_surface}-${update_window}"
+                COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                    --route home --smoke-update-surface ${update_surface} --smoke-update-panel --reduced-motion
+                    ${update_window_args}
+                    --screenshot ${CMAKE_CURRENT_BINARY_DIR}/desktop-update-panel-${update_surface}-${update_window}.png)
+            set_tests_properties("qml-desktop-update-panel-${update_surface}-${update_window}" PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT ${OPENNOW_QT_SMOKE_TIMEOUT})
         endforeach()
     endforeach()

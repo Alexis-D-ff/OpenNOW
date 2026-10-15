@@ -71,17 +71,19 @@ the update-signing seed, and does not require a manually registered runner.
   embedded streamer enable `linux-vaapi` and `linux-ffmpeg-bundled`. Native VAAPI supports H.264
   only; HEVC/AV1 remain available through other backends, including bundled FFmpeg software decode.
   Builds require libva/libva-drm development headers and libclang for generated bindings. Release
-  DEBs reuse the deployed AppImage runtime, including Qt, SDL3, libva, and libva-drm, under
-  `/opt/opennow`; usable GPU hardware and a host VAAPI driver are still required for hardware decode.
+  DEBs reuse the deployed AppImage runtime, including Qt and SDL3, under `/opt/opennow` and depend
+  on the host libva and libva-drm. AppImages load the host libva when the loader cache has it and
+  fall back to their bundled copy otherwise; usable GPU hardware and a host VAAPI driver are still
+  required for hardware decode.
   Clean Ubuntu 24.04 container checks install the DEB without distribution Qt/SDL3, verify
   offscreen/X11 startup and capabilities, and exercise reinstall/removal without a GPU.
 - Every installable artifact receives a sibling Ed25519 update manifest, including unsigned Windows
   packages. This signature authenticates updater downloads; it does not establish a Windows publisher.
 - AppImages embed stable-channel update information and include versioned `.zsync` sidecars
   for external delta-update tools. Both sidecars receive manifests and release checksums.
-- The inventory job fails unless it finds both Windows MSI/ZIP pairs, both Linux AppImage/DEB pairs,
-  both AppImage sidecars, the macOS ARM64 DMG/ZIP pair, and exactly one manifest per asset
-  (ten packages plus two sidecars). It records the immutable commit and
+- The inventory job fails unless it finds both Windows MSI/ZIP/setup.exe triples, both Linux AppImage/DEB pairs,
+  both Linux Flatpak bundles, both AppImage sidecars, the macOS ARM64 DMG/ZIP pair, and exactly one manifest per asset
+  (fourteen packages plus two sidecars). It records the immutable commit and
   SHA-256 of every candidate file, plus `windowsSigningMode=unsigned` or
   `windowsSigningMode=authenticode`. Windows artifact bundles use the same mode as their suffix;
   package filenames stay unchanged for updater compatibility.

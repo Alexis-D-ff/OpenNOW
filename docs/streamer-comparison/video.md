@@ -4,7 +4,7 @@
 
 Both clients decode HEVC or H.264 on Windows with D3D11 and present with a tearing-allowed flip swapchain. Official GFN on this machine ran 10-bit HEVC at 2560×1440@120 for about 76 minutes. OpenNOW's native CloudMatch path requests the saved color depth/chroma and validates it against local decode before the seat is created.
 
-Recovery is the other split. Official GFN NACKs, then flushes a stalled decode queue, then sends IDR, then invalidates references and can freeze the display on a bad ref. OpenNOW NACKs, then sends RTCP PLI plus control `0x302`. It has no reference-invalidation command.
+Recovery uses bounded NACK retries, reference-picture invalidation, and IDR requests in both clients. OpenNOW sends `0x301` for lost sender frame ranges and withholds dependent pictures until a recovery frame arrives. Its 250 ms IDR backstop is a local policy, not a verified GFN timeout.
 
 If you stream on OpenNOW today, you get the official two-socket video path with a narrower color SKU and a simpler recovery ladder.
 
@@ -34,7 +34,7 @@ support, and the dynamic quality policy are omitted from the feature bag: the
 official client resolves the codec locally and carries bitrate/policy purely in
 the RTSP ANNOUNCE (`x-nv-vqos` and `MediaStreamConfig`).
 
-Desktop AUTO FPS writes `0`. Core resolves the request through `frame_rate::request_frame_rate`: a missing `fps` defaults to 60 and any present value clamps to the 30–360 request range, so the stored AUTO `0` clamps to 30. Resolution then caps that at 360 for 1920x1080 and 1920x1200 and 240 elsewhere, and rates above 240 additionally need an entitlement at least that high plus a confirmed hardware decoder for the selected codec, otherwise they fall back to the entitlement capped at 240, or to 240 when no entitlement is reported.
+Desktop AUTO FPS writes `0`. Core resolves the request through `frame_rate::request_frame_rate`: a missing `fps` defaults to 60 and any present value clamps to the 30–360 request range, so the stored AUTO `0` clamps to 30. Resolution then caps that at 360 for 1920x1080 and 1920x1200 and 240 elsewhere, and rates above 240 additionally need an entitlement at least that high plus a confirmed hardware decoder for the selected codec, otherwise they fall back to the entitlement capped at 240, or to 240 when no entitlement is reported. Rates snap to the supported 30/60/90/120/144/165/240/360 modes. Embedded preflight additionally caps H.264 and unconfirmed high-FPS AV1 at 120 FPS and applies H.264's pixel budget and reported decoder dimension limits before allocation.
 
 `OPENNOW_NATIVE_VIDEO_BACKEND` comes from `nativeVideoBackend` and `decoderPreference`. Auto prefers D3D12 for H.264 and H.265 when the probe succeeds. AV1 auto stays on D3D11 because D3D11-on-12 would flush every frame.
 
@@ -62,7 +62,7 @@ Official also has named profiles, AI prefilter, HUD sharpness, and upscaling. Op
 
 1. Prefer NVST. Reserve Mjolnir then bundle+1. The child owns RTSPS.
 2. ANNOUNCE viewport, fps, bitrate, NACK, FEC 20–35%, packet size 1280 (OpenNOW reduces it for the video route's interface MTU only when that route uses a detected VPN).
-3. `NvstVideoReceiver` unprotects SRTP, reorders up to 1024 packets, waits up to 150 ms for a gap, NACKs, assembles access units from the GS header.
+3. `NvstVideoReceiver` unprotects SRTP, reorders up to 1024 packets, waits up to 52 ms for a gap, NACKs, and assembles access units from the GS header. Socket timer polls drain expired reorder/FEC gaps even when no further packet arrives.
 4. Keyframe rules. H.264 NAL type 5. H.265 IRAP 16–21. AV1 SOF header byte `[3]==2`.
 5. `MediaSink` encoded video queue capacity 2. Overflow marks desync and requests a keyframe. Windows MF overflow uses `push_or_clear_on_overflow`, which dumps the whole reference chain.
 6. Media Foundation decode. Hardware MFTs first, then the Microsoft D3D11-aware MFT. NVIDIA and AMD often only expose that Microsoft DXVA2 MFT. `MF_LOW_LATENCY=1`. Output NV12 or P010.
@@ -104,15 +104,16 @@ Intra-refresh is advertised supported and then `enableIntraRefresh: 0`. Recovery
 
 | Trigger | What happens |
 |---|---|
-| RTP gap inside the NACK window | RTCP generic NACK on SCTP `rtcp1`, every 10 ms poll. Max 64 packets, 3 attempts, 20 ms retry, 150 ms track. |
-| Unrecoverable gap or bad GS header | Assembler reset. `contiguous=false`. RTCP PLI and NVST control `0x302` IDR. 250 ms cooldown. Inter-frames dropped until a keyframe. That keyframe rebuilds the MFT. |
+| RTP gap inside the NACK window | Mjolnir sends private NACK v2 `0x317`; other video sends RTCP generic NACK on SCTP `rtcp1`. Feedback polls every 4 ms. Each of at most 2048 pending packets retains its original 52 ms deadline and attempt count. Reports contain at most 64 packets; retries are limited to three, with Mjolnir RTT plus 4 ms backoff. Tracker overflow requests IDR. |
+| Unrecoverable packet gap or sender frame-number gap | Typed streams send `0x301` for the lost sender frame range and withhold dependent pictures. Pending invalidations retry after 100 ms, without moving the original 250 ms IDR-backstop deadline. Recovery clears on I, intra-refresh, or RefPic-I. A slow episode does not disable future RFI. Headerless streams keep immediate IDR recovery. Pending `0x302` retries every 100 ms until an assembled keyframe. |
 | Encoded overflow | Clear the reference chain. Request keyframe. |
+| Embedded D3D11 queue full while it still holds a keyframe | Drop the delta and every later delta. Defer the keyframe request until the decoder dequeues that keyframe, so a replacement IDR cannot evict it before it is decoded. |
 | Decoder submit or poll error | Rebuild MFT on the same device. If that fails, recreate Graphics plus Decoder for up to 5 s. |
 | Device recreate timeout | Fatal. Hardware then falls back, class-preserving for HEVC and AV1. |
 | Packet-gap keyframe | Does not spend `NVST_RECOVERY_ATTEMPT_LIMIT`. |
 | Other NVST recovery | One `recover()`, then terminal. |
 
-NVST does not send FIR. OpenNOW has no invalidation command and no display-freeze-on-bad-ref.
+NVST does not send FIR. Dedicated and unified-socket Mjolnir use the same produced-frame watchdog and typed stall/recovery events. See [transport recovery](transport-recovery.md) for evidence and remaining unknowns.
 
 `reset_decoder` after loss is required. `MFSampleExtension_CleanPoint` alone does not forget damaged H.264 references. See the comment in `platform-windows/src/format.rs`.
 

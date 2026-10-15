@@ -1,18 +1,65 @@
 name: Qt Flatpak build
 
 on:
+  workflow_call:
+    inputs:
+      arch:
+        description: Flatpak architecture (x86_64 or aarch64)
+        required: true
+        type: string
+      version:
+        description: Immutable release version
+        required: true
+        type: string
+      update_public_key:
+        description: Optional base64 Ed25519 public key pinned into the application core
+        type: string
+        default: ""
   workflow_dispatch:
+    inputs:
+      arch:
+        description: Flatpak architecture
+        type: choice
+        default: x86_64
+        options:
+          - x86_64
+          - aarch64
 
 permissions:
   contents: read
 
 jobs:
   flatpak:
-    name: Flatpak x86_64
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    name: Flatpak ${{ inputs.arch }}
+    runs-on: ${{ inputs.arch == 'aarch64' && 'blacksmith-8vcpu-ubuntu-2404-arm' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify native build architecture
+        id: identity
+        env:
+          FLATPAK_ARCH: ${{ inputs.arch }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          test "$(uname -m)" = "$FLATPAK_ARCH"
+          case "$FLATPAK_ARCH" in
+            x86_64) package_arch=x64 ;;
+            aarch64) package_arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          version=$RELEASE_VERSION
+          if [[ -z "$version" ]]; then
+            version=$(python3 opennow-qt/packaging/nightly_release.py version \
+              --run "$GITHUB_RUN_NUMBER" --attempt "$GITHUB_RUN_ATTEMPT" --channel stable)
+          fi
+          {
+            echo "version=$version"
+            echo "package_arch=$package_arch"
+            echo "bundle=build/flatpak/OpenNOW-Qt-$version-Linux-$package_arch.flatpak"
+          } >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Flatpak tools and SDK
         run: |
@@ -24,25 +71,35 @@ jobs:
             org.freedesktop.Sdk.Extension.rust-stable//25.08 \
             org.freedesktop.Sdk.Extension.llvm20//25.08
       - name: Test packaging contracts and vendor locked Rust dependencies
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          OPENNOW_UPDATE_PUBLIC_KEY: ${{ inputs.update_public_key }}
         run: |
           python3 -m unittest discover -s opennow-qt/tests -p test_flatpak.py
-          python3 opennow-qt/packaging/flatpak/prepare_sources.py
+          python3 opennow-qt/packaging/flatpak/prepare_sources.py \
+            --version "$RELEASE_VERSION" --update-public-key "$OPENNOW_UPDATE_PUBLIC_KEY"
       - name: Build without network access and export bundle
+        env:
+          FLATPAK_BUNDLE: ${{ steps.identity.outputs.bundle }}
         run: |
-          flatpak-builder --user --force-clean --jobs=4 \
+          flatpak-builder --user --force-clean --jobs="$(nproc)" \
             --state-dir=build/flatpak/state --repo=build/flatpak/repo \
-            build/flatpak/app opennow-qt/packaging/flatpak/io.github.opencloudgaming.OpenNOW.json
-          flatpak build-bundle build/flatpak/repo build/flatpak/OpenNOW-x86_64.flatpak \
+            build/flatpak/app opennow-qt/packaging/flatpak/io.github.opencloudgaming.OpenNOW.generated.json
+          flatpak build-bundle build/flatpak/repo "$FLATPAK_BUNDLE" \
             io.github.opencloudgaming.OpenNOW master \
             --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
       - name: Install and verify the exported bundle
+        env:
+          FLATPAK_ARCH: ${{ inputs.arch }}
+          FLATPAK_BUNDLE: ${{ steps.identity.outputs.bundle }}
         run: |
-          flatpak install --user --noninteractive -y build/flatpak/OpenNOW-x86_64.flatpak
+          flatpak install --user --noninteractive -y "$FLATPAK_BUNDLE"
+          test "$(flatpak info --user --show-ref io.github.opencloudgaming.OpenNOW)" = "app/io.github.opencloudgaming.OpenNOW/$FLATPAK_ARCH/master"
           python3 opennow-qt/packaging/verify_flatpak.py
       - uses: actions/upload-artifact@v4
         with:
-          name: opennow-qt-flatpak-x86_64
-          path: build/flatpak/OpenNOW-x86_64.flatpak
+          name: opennow-qt-${{ steps.identity.outputs.version }}-linux-${{ steps.identity.outputs.package_arch }}-flatpak-unsigned
+          path: ${{ steps.identity.outputs.bundle }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

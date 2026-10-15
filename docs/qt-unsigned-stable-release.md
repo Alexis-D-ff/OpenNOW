@@ -15,10 +15,10 @@ approval through `qt-production-release`, validates the candidate run's reposito
 workflow path, event, completed-success status and exact source SHA, then downloads
 only that run's named complete-candidate artifact.
 
-The release contains ten packages: Windows x64/ARM64 MSI and portable ZIP,
-Linux x64/ARM64 AppImage and DEB, and macOS Apple Silicon DMG and ZIP. It also includes two
-AppImage `.zsync` sidecars, twelve exact sibling Ed25519 manifests, `RELEASE-INFO.json`,
-and `SHA256SUMS` (26 files). The candidate's isolated signer signs the complete inventory.
+The release contains fourteen packages: Windows x64/ARM64 MSI, portable ZIP, and setup.exe,
+Linux x64/ARM64 AppImage, DEB, and Flatpak, and macOS Apple Silicon DMG and ZIP. It also includes two
+AppImage `.zsync` sidecars, sixteen exact sibling Ed25519 manifests, `RELEASE-INFO.json`,
+and `SHA256SUMS` (34 files). The candidate's isolated signer signs the complete inventory.
 The publisher independently verifies every signature, candidate checksum, filename,
 version and source identity, then creates flattened checksums and metadata without
 changing any package or manifest bytes. It uploads a draft

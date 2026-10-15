@@ -15,6 +15,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -145,6 +146,255 @@ class NativeStreamRuntimeTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void actualStreamingLifetimeIsIndependentOfRuntimeAndResumableStatuses()
+    {
+        static OpenNowStreamerConfig callbacks;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbacks = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.running());
+        QVERIFY(!runtime.streaming());
+        const auto deliver = [&](const QByteArray &bytes) {
+            callbacks.event_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                static_cast<std::size_t>(bytes.size()), callbacks.user_data);
+            QCoreApplication::processEvents();
+        };
+        const auto start = [&](const QString &id) {
+            QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                  {QStringLiteral("id"), id}}));
+            QTRY_VERIFY(runtime.inputAllowed());
+            QVERIFY(!runtime.streaming());
+        };
+        deliver(R"({"type":"status","status":"streaming"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("first"));
+        deliver(R"({"type":"status","status":"streaming","startId":"old"})");
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"first"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"status","status":"paused","startId":"first"})");
+        deliver(R"({"type":"status","status":"connecting","startId":"first"})");
+        deliver(R"({"type":"status","status":"ready","startId":"first"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"status","status":"stopped","startId":"old"})");
+        deliver(R"({"type":"error","startId":"old","message":"stale error"})");
+        QVERIFY(runtime.streaming());
+        sendStatus = OPENNOW_STREAMER_CLOSED;
+        const auto restoreSend = qScopeGuard([] { sendStatus = OPENNOW_STREAMER_OK; });
+        QVERIFY(!runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QVERIFY(runtime.streaming());
+        sendStatus = OPENNOW_STREAMER_OK;
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"first"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("second"));
+        deliver(R"({"type":"status","status":"streaming"})");
+        QVERIFY(runtime.streaming());
+        start(QStringLiteral("third"));
+        deliver(R"({"type":"status","status":"streaming","startId":"third"})");
+        QVERIFY(runtime.streaming());
+        deliver(R"({"type":"error","startId":"third","message":"session failed"})");
+        QVERIFY(!runtime.streaming());
+        deliver(R"({"type":"status","status":"streaming","startId":"third"})");
+        QVERIFY(!runtime.streaming());
+        start(QStringLiteral("fourth"));
+        deliver(R"({"type":"status","status":"streaming","startId":"fourth"})");
+        QVERIFY(runtime.streaming());
+        QVERIFY(runtime.shutdown());
+        QVERIFY(!runtime.streaming());
+        QVERIFY(!runtime.running());
+    }
+
+    void textInputErrorsAreNonterminalAndScopedToSessionGeneration()
+    {
+        static OpenNowStreamerConfig callbackConfig;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbackConfig = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy events(&runtime, &NativeStreamRuntime::eventReceived);
+        QVERIFY(runtime.start());
+        QJsonObject event{{QStringLiteral("type"), QString::fromLatin1(OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR)},
+            {QStringLiteral("startId"), QStringLiteral("first")},
+            {QStringLiteral("reason"), QStringLiteral("paste-queue-full")}};
+        const auto deliver = [&] {
+            const auto bytes = QJsonDocument(event).toJson(QJsonDocument::Compact);
+            callbackConfig.event_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                static_cast<std::size_t>(bytes.size()), callbackConfig.user_data);
+        };
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 0);
+        const auto start = [&](const QString &id) {
+            return runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                 {QStringLiteral("id"), id}});
+        };
+        QVERIFY(start(QStringLiteral("first")));
+        QTRY_VERIFY(runtime.inputAllowed());
+        const auto generation = runtime.presentationGeneration();
+        QSignalSpy inputReset(&runtime, &NativeStreamRuntime::inputCaptureReset);
+        QSignalSpy inputChanged(&runtime, &NativeStreamRuntime::inputAllowedChanged);
+        deliver();
+        QTRY_COMPARE(events.size(), 1);
+        QCOMPARE(events[0][0].toJsonObject(), event);
+        QVERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.presentationAllowed());
+        QCOMPARE(runtime.presentationGeneration(), generation);
+        QCOMPARE(inputReset.size(), 0);
+        QCOMPARE(inputChanged.size(), 0);
+        deliver();
+        QVERIFY(start(QStringLiteral("replacement")));
+        QTRY_VERIFY(runtime.inputAllowed());
+        QCOMPARE(events.size(), 1);
+        deliver();
+        event.remove(QStringLiteral("startId"));
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 1);
+        event[QStringLiteral("startId")] = QStringLiteral("replacement");
+        deliver();
+        QTRY_COMPARE(events.size(), 2);
+        QVERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.presentationAllowed());
+        deliver();
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 2);
+        QVERIFY(runtime.shutdown());
+        QVERIFY(runtime.start());
+        deliver();
+        QCoreApplication::processEvents();
+        QCOMPARE(events.size(), 2);
+        QVERIFY(runtime.shutdown());
+    }
+
+    void sessionTimersAreTypedValidatedAndScopedToLifecycle()
+    {
+        static OpenNowStreamerConfig callbackConfig;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbackConfig = *config;
+            return fakeCreate(config, output);
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy timers(&runtime, &NativeStreamRuntime::sessionTimerReceived);
+        QSignalSpy generic(&runtime, &NativeStreamRuntime::eventReceived);
+        bool guiThread = false;
+        connect(&runtime, &NativeStreamRuntime::sessionTimerReceived, &runtime,
+                [&] { guiThread = QThread::currentThread() == runtime.thread(); });
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("first")}}));
+        QTRY_VERIFY(runtime.inputAllowed());
+        const auto deliver = [](const QJsonObject &event) {
+            const auto bytes = QJsonDocument(event).toJson(QJsonDocument::Compact);
+            std::thread callback([bytes] {
+                callbackConfig.event_callback(
+                    reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                    static_cast<std::size_t>(bytes.size()), callbackConfig.user_data);
+            });
+            callback.join();
+        };
+        QJsonObject event{{QStringLiteral("type"), QString::fromLatin1(OPENNOW_STREAMER_EVENT_SESSION_TIMER)},
+                          {QStringLiteral("startId"), QStringLiteral("first")},
+                          {QStringLiteral("timerType"), int(OPENNOW_STREAMER_TIMER_IDLE_WARNING)},
+                          {QStringLiteral("secondsLeft"), 60}, {QStringLiteral("active"), true}};
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 1);
+        QVERIFY(guiThread);
+        QCOMPARE(timers[0][0].value<quint8>(), quint8(4));
+        QCOMPARE(timers[0][1].value<quint32>(), quint32(60));
+        QVERIFY(timers[0][2].toBool());
+        event[QStringLiteral("active")] = false;
+        deliver(event);
+        event[QStringLiteral("timerType")] = int(OPENNOW_STREAMER_TIMER_IDLE_EXPIRY);
+        event[QStringLiteral("secondsLeft")] = 0;
+        deliver(event);
+        event[QStringLiteral("secondsLeft")] = double(std::numeric_limits<quint32>::max());
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 4);
+        QVERIFY(!timers[1][2].toBool());
+        QCOMPARE(timers[2][0].value<quint8>(), quint8(5));
+        QCOMPARE(timers[2][1].value<quint32>(), quint32(0));
+        QCOMPARE(timers[3][1].value<quint32>(), std::numeric_limits<quint32>::max());
+        for (const auto &invalid : {QJsonValue(-1), QJsonValue(4294967296.0), QJsonValue(0.5),
+                                    QJsonValue(QStringLiteral("60")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("secondsLeft")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(3), QJsonValue(4.5), QJsonValue(QStringLiteral("4")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("timerType")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(1), QJsonValue(QStringLiteral("true")), QJsonValue()}) {
+            auto malformed = event;
+            malformed[QStringLiteral("active")] = invalid;
+            deliver(malformed);
+        }
+        for (const auto &invalid : {QJsonValue(QStringLiteral("old")), QJsonValue()}) {
+            auto stale = event;
+            stale[QStringLiteral("startId")] = invalid;
+            deliver(stale);
+        }
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 4);
+        QCOMPARE(generic.size(), 0);
+        deliver(event);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("replacement")}}));
+        QTRY_VERIFY(runtime.inputAllowed());
+        QCOMPARE(timers.size(), 4);
+        deliver(event);
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 4);
+        event[QStringLiteral("startId")] = QStringLiteral("replacement");
+        deliver(event);
+        QTRY_COMPARE(timers.size(), 5);
+        QJsonObject termination{{QStringLiteral("source"), QString::fromLatin1(OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER)},
+            {QStringLiteral("code"), QStringLiteral("server-terminated")},
+            {QStringLiteral("startId"), QStringLiteral("old")},
+            {QStringLiteral("wireCode"), 2147680291.0}, {QStringLiteral("reason"), 56},
+            {QStringLiteral("extendedCode"), 2147680263.0}, {QStringLiteral("resumable"), false}};
+        QJsonObject terminal{{QStringLiteral("type"), QStringLiteral("error")},
+            {QStringLiteral("termination"), termination}};
+        deliver(terminal);
+        QCoreApplication::processEvents();
+        QCOMPARE(generic.size(), 0);
+        QVERIFY(runtime.presentationAllowed());
+        termination[QStringLiteral("startId")] = QStringLiteral("replacement");
+        terminal[QStringLiteral("termination")] = termination;
+        deliver(terminal);
+        QTRY_COMPARE(generic.size(), 1);
+        QCOMPARE(generic[0][0].toJsonObject().value(QStringLiteral("termination")).toObject(), termination);
+        QVERIFY(!runtime.presentationAllowed());
+        terminal[QStringLiteral("type")] = QStringLiteral("status");
+        terminal[QStringLiteral("status")] = QStringLiteral("stopped");
+        deliver(terminal);
+        QTRY_COMPARE(generic.size(), 2);
+        deliver(event);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 5);
+        deliver(event);
+        QVERIFY(runtime.shutdown());
+        QVERIFY(runtime.start());
+        deliver(terminal);
+        QCoreApplication::processEvents();
+        QCOMPARE(timers.size(), 5);
+        QCOMPARE(generic.size(), 2);
+        QVERIFY(runtime.shutdown());
+    }
+
     void rumbleCallbacksValidateFieldsAndRejectReplacedSessions()
     {
         static OpenNowStreamerConfig callbackConfig;
@@ -255,6 +505,9 @@ private slots:
         };
         NativeStreamRuntime runtime(api);
         QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("metal-size")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
         OpenNowStreamerRecordCommand command{};
         command.version = OPENNOW_STREAMER_RENDER_COMMAND_VERSION;
         command.struct_size = sizeof(command);
@@ -271,6 +524,129 @@ private slots:
         QCOMPARE(info.presentation_time_ns, recorded.presentation_time_ns);
         QCOMPARE(recorded.width, 2560U);
         QCOMPARE(recorded.height, 1440U);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), QSize(1920, 1080));
+    }
+
+    void decodedDisplaySizeCoalescesAndRejectsReplacedGenerations()
+    {
+        static QSize decodedSize;
+        static OpenNowStreamerStatus recordStatus;
+        decodedSize = QSize(1920, 1080);
+        recordStatus = OPENNOW_STREAMER_OK;
+        auto api = fakeApi();
+        api.acquireLatestFrame = &fakeAcquireLatestFrame;
+        api.releaseFrame = &fakeReleaseFrame;
+        api.recordFrame = [](const OpenNowStreamer *, const OpenNowStreamerFrame *,
+                               const OpenNowStreamerRecordCommand *,
+                               OpenNowStreamerRecordedFrame *recorded) {
+            *recorded = {1, 0, OPENNOW_STREAMER_GRAPHICS_API_D3D11,
+                         OPENNOW_STREAMER_TEXTURE_FORMAT_RGBA8, OPENNOW_STREAMER_COLOR_SPACE_SDR709,
+                         std::uint32_t(decodedSize.width()), std::uint32_t(decodedSize.height()),
+                         0, 1, 0};
+            return recordStatus;
+        };
+        NativeStreamRuntime runtime(api);
+        QSignalSpy sizes(&runtime, &NativeStreamRuntime::decodedDisplaySizeChanged);
+        QVERIFY(runtime.start());
+        const auto start = [&](const QString &id) {
+            return runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                 {QStringLiteral("id"), id}});
+        };
+        QVERIFY(start(QStringLiteral("size-a")));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        const auto generation = runtime.presentationGeneration();
+        const auto record = [&] {
+            OpenNowStreamerRecordCommand command{};
+            OpenNowStreamerFrameInfo info{};
+            OpenNowStreamerRecordedFrame recorded{};
+            OpenNowStreamerFrame *frame = nullptr;
+            const auto status = runtime.recordLatestFrame(command, &info, &recorded, &frame);
+            if (frame) runtime.releaseFrame(frame);
+            return status;
+        };
+        std::thread render([&] {
+            for (const QSize size : {QSize(1920, 1080), QSize(2560, 1080), QSize(1600, 1200)}) {
+                decodedSize = size;
+                QCOMPARE(record(), OPENNOW_STREAMER_OK);
+            }
+        });
+        render.join();
+        QCOMPARE(sizes.size(), 0);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), QSize(1600, 1200));
+        QCOMPARE(sizes.size(), 1);
+        QCOMPARE(sizes.last().at(1).toULongLong(), generation);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(sizes.size(), 1);
+
+        decodedSize = QSize(1280, 720);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QVERIFY(start(QStringLiteral("size-b")));
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QTRY_VERIFY(runtime.presentationAllowed());
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 2);
+        QCOMPARE(sizes.last().at(1).toULongLong(), runtime.presentationGeneration());
+
+        decodedSize = QSize(0, 720);
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        decodedSize = QSize(3440, 1440);
+        recordStatus = OPENNOW_STREAMER_STALE_FRAME;
+        QCOMPARE(record(), OPENNOW_STREAMER_STALE_FRAME);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        recordStatus = OPENNOW_STREAMER_OK;
+        QCOMPARE(record(), OPENNOW_STREAMER_OK);
+        QTRY_COMPARE(runtime.decodedDisplaySize(), decodedSize);
+        QCOMPARE(sizes.size(), 3);
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("stop")}}));
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 4);
+    }
+
+    void inFlightDecodedSizeCannotEnterAReplacedSession()
+    {
+        NativeStreamRuntime runtime(blockingGraphicsApi());
+        QVERIFY(runtime.start());
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("inflight-a")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        QSignalSpy sizes(&runtime, &NativeStreamRuntime::decodedDisplaySizeChanged);
+        OpenNowStreamerRecordCommand command{};
+        OpenNowStreamerFrameInfo info{};
+        OpenNowStreamerRecordedFrame recorded{};
+        OpenNowStreamerFrame *frame = nullptr;
+        OpenNowStreamerStatus status = OPENNOW_STREAMER_CLOSED;
+        std::thread render([&] { status = runtime.recordLatestFrame(command, &info, &recorded, &frame); });
+        const auto finish = qScopeGuard([&] {
+            {
+                const std::lock_guard lock(graphicsCallMutex);
+                allowRecordCallToFinish = true;
+            }
+            graphicsCallChanged.notify_all();
+            if (render.joinable()) render.join();
+        });
+        {
+            std::unique_lock lock(graphicsCallMutex);
+            QVERIFY(graphicsCallChanged.wait_for(lock, std::chrono::seconds(1), [] { return recordCallEntered; }));
+        }
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("inflight-b")}}));
+        QTRY_VERIFY(runtime.presentationAllowed());
+        {
+            const std::lock_guard lock(graphicsCallMutex);
+            allowRecordCallToFinish = true;
+        }
+        graphicsCallChanged.notify_all();
+        render.join();
+        QCOMPARE(status, OPENNOW_STREAMER_OK);
+        QCOMPARE(runtime.releaseFrame(frame), OPENNOW_STREAMER_OK);
+        QCoreApplication::processEvents();
+        QCOMPARE(runtime.decodedDisplaySize(), QSize());
+        QCOMPARE(sizes.size(), 0);
     }
 
     void recordedFrameMetadataReplacesProvisionalNotificationMetadata()
@@ -896,6 +1272,73 @@ private slots:
         QCOMPARE(composition.size(), 4);
         QTRY_VERIFY(!dropped.isEmpty());
         QVERIFY(runtime.shutdown());
+    }
+
+    void relativeMouseDefaultUsesOnlyTheAcceptedSessionTransport()
+    {
+        static OpenNowStreamerConfig callbacks;
+        auto api = fakeApi();
+        api.create = [](const OpenNowStreamerConfig *config, OpenNowStreamer **output) {
+            callbacks = *config;
+            return fakeCreate(config, output);
+        };
+        api.send = [](const OpenNowStreamer *, const std::uint8_t *, std::size_t) {
+            return sendStatus;
+        };
+        NativeStreamRuntime runtime(api);
+        QVERIFY(runtime.start());
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QSignalSpy resets(&runtime, &NativeStreamRuntime::cursorStateReset);
+        QList<bool> authorizedDefaults;
+        connect(&runtime, &NativeStreamRuntime::inputAllowedChanged, &runtime, [&] {
+            if (runtime.inputAllowed()) authorizedDefaults.append(runtime.defaultRelativeMouse());
+        });
+        const auto deliver = [](const QByteArray &bytes) {
+            callbacks.response_callback(reinterpret_cast<const std::uint8_t *>(bytes.constData()),
+                                        bytes.size(), callbacks.user_data);
+        };
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("first")}}));
+        deliver(R"({"id":"first","type":"ok","transport":"webrtc"})");
+        QTRY_VERIFY(runtime.inputAllowed());
+        QVERIFY(runtime.defaultRelativeMouse());
+        QCOMPARE(authorizedDefaults, QList<bool>{true});
+        QCOMPARE(resets.count(), 2);
+        sendStatus = OPENNOW_STREAMER_QUEUE_FULL;
+        const auto restore = qScopeGuard([] { sendStatus = OPENNOW_STREAMER_OK; });
+        QVERIFY(!runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                               {QStringLiteral("id"), QStringLiteral("rejected")}}));
+        QVERIFY(runtime.defaultRelativeMouse());
+        QVERIFY(runtime.inputAllowed());
+        sendStatus = OPENNOW_STREAMER_OK;
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("replacement")}}));
+        QVERIFY(!runtime.defaultRelativeMouse());
+        deliver(R"({"id":"first","type":"ok","transport":"webrtc"})");
+        QCoreApplication::processEvents();
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QVERIFY(!runtime.inputAllowed());
+        deliver(R"({"id":"replacement","type":"error","transport":"webrtc"})");
+        QCoreApplication::processEvents();
+        QVERIFY(!runtime.defaultRelativeMouse());
+        QVERIFY(!runtime.inputAllowed());
+        for (const auto &transport : {QStringLiteral("nvst"), QStringLiteral(""),
+                                     QStringLiteral("unknown")}) {
+            QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                                  {QStringLiteral("id"), transport + QStringLiteral("-session")}}));
+            deliver(QJsonDocument(QJsonObject{
+                {QStringLiteral("id"), transport + QStringLiteral("-session")},
+                {QStringLiteral("type"), QStringLiteral("ok")},
+                {QStringLiteral("transport"), transport}}).toJson(QJsonDocument::Compact));
+            QTRY_VERIFY(runtime.inputAllowed());
+            QVERIFY(!runtime.defaultRelativeMouse());
+        }
+        QVERIFY(runtime.send({{QStringLiteral("type"), QStringLiteral("start")},
+                              {QStringLiteral("id"), QStringLiteral("shutdown-session")}}));
+        deliver(R"({"id":"shutdown-session","type":"ok","transport":"webrtc"})");
+        QTRY_VERIFY(runtime.defaultRelativeMouse());
+        QVERIFY(runtime.shutdown());
+        QVERIFY(!runtime.defaultRelativeMouse());
     }
 
     void lateRenderFailureKeepsItsOriginalSessionGeneration()

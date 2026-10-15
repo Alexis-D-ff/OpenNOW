@@ -7,9 +7,10 @@ QtObject {
         property bool running: true
         property string lastError: ""
         property var commands: []
-        signal presentationError(string message)
+        signal presentationError(string message, string errorCode)
         signal responseReceived(var response)
         signal eventReceived(var event)
+        signal sessionTimerReceived(int timerType, double secondsLeft, bool active)
         signal callbacksDropped(int count)
         function start() { return true }
         function send(command) { commands = commands.concat([command]); return true }
@@ -49,10 +50,22 @@ QtObject {
         ShellStore.sessionMicrophoneMode = "disabled"
         ShellStore.streamer = {status: "streaming", capabilities: {supportsMicrophone: true}}
         const before = runtime.commands.length
+        check(ShellStore.microphoneState === "muted" && !ShellStore.microphoneEnabled,
+            "disabled startup must remain muted without opening capture")
+        check(!ShellStore.prepareMicrophoneStart("muted-session", "disabled"),
+            "new disabled sessions must not open capture")
         ShellStore.toggleMicrophone()
-        check(runtime.commands.length === before, "disabled sessions must not open capture")
-        check(ShellStore.streamShortcutBindings()["toggle-microphone"].length === 0,
-            "disabled sessions must not advertise a shortcut")
+        check(runtime.commands.length === before + 1
+            && runtime.commands[before].enabled === true,
+            "muted sessions must allow explicit unmute without a restart")
+        check(ShellStore.streamShortcutBindings()["toggle-microphone"].length > 0,
+            "supported muted sessions must advertise a shortcut")
+        ShellStore.acceptNativeEvent({type: "microphone-state", state: "ready", enabled: true})
+        ShellStore.acceptNativeResponse({id: runtime.commands[before].id, type: "ok"})
+        check(ShellStore.prepareMicrophoneStart("muted-session", "disabled"),
+            "explicit unmute must survive reconnect even when startup was disabled")
+        check(ShellStore.prepareMicrophoneStart("microphone-fixture", "voice-activity"),
+            "a new opted-in session must start enabled")
         ShellStore.sessionMicrophoneMode = "voice-activity"
         ShellStore.streamer = {status: "streaming", capabilities: {}}
         check(!ShellStore.microphoneCanToggle, "build support must not substitute for negotiation")

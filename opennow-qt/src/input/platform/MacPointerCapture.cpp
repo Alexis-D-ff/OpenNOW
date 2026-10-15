@@ -34,6 +34,7 @@ struct MacPointerCapture::Private
     bool locked = false;
     bool disassociated = false;
     bool hidden = false;
+    bool applicationActive = false;
     quint64 generation = 0;
 };
 
@@ -53,8 +54,11 @@ MacPointerCapture::MacPointerCapture(std::unique_ptr<NativeOperations> operation
 {
     Q_ASSERT(qApp && QThread::currentThread() == qApp->thread());
     d->operations = std::move(operations);
+    d->applicationActive = QGuiApplication::applicationState() == Qt::ApplicationActive;
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
-        if (state != Qt::ApplicationActive) release();
+        d->applicationActive = state == Qt::ApplicationActive;
+        if (!d->applicationActive) release();
+        else emit stateChanged();
     });
     connect(qApp, &QCoreApplication::aboutToQuit, this, &MacPointerCapture::release);
 }
@@ -105,7 +109,7 @@ void MacPointerCapture::fail(const QString &error)
 void MacPointerCapture::setCapture(QWindow *window, bool enabled, const QRect &windowRegion)
 {
     Q_ASSERT(QThread::currentThread() == qApp->thread());
-    if (!enabled || !window || !window->isVisible() || !window->isActive()
+    if (!enabled || !d->applicationActive || !window || !window->isVisible() || !window->isActive()
         || windowRegion.intersected(QRect(QPoint(), window->size())).isEmpty()) {
         release();
         return;

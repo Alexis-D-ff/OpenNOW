@@ -5,6 +5,23 @@ smoke test is not release acceptance. The legacy Electron source has been remove
 acceptance still requires every row to be executed on the named hardware, the artifacts to be
 reviewed, and the staged rollout to complete.
 
+## Windows update scheduling
+
+Windows startup defaults `QT_D3D_NO_VBLANK_THREAD` to `1` before creating the Qt
+application. An explicitly supplied value is preserved. This disables Qt's DXGI
+vblank notification thread, not D3D11 presentation vsync or the threaded render loop.
+
+On the tested RTX 3080 with Qt 6.11.2, the notification path stopped delivering window
+update requests after the first frame. The window remained active and exposed, but
+FrameAnimation stayed at frame zero and Game Mode entry could not finish. Disabling
+that notification path restored normal animation on the unchanged executable while
+retaining the threaded renderer and its vsync animation driver. Switching to the
+basic render loop also avoided the failure, but is not the production workaround.
+
+When checking this path, use a native Windows window. The offscreen platform can fail
+the explicit adapter-selection precondition before any layout workload starts. Set
+`QT_FORCE_STDERR_LOGGING=1` to capture Qt diagnostics from the GUI executable.
+
 ## FSR 1 upscaling on Windows and Linux
 
 Stream settings and onboarding offer Off or FSR 1 on Windows and Linux. macOS retains
@@ -144,6 +161,50 @@ with the affected provider before claiming its compatibility issue is fixed. Rep
 with an NVIDIA account to check the unchanged first SETUP request. Passing synthetic
 fallback and parser tests is not a substitute for this live check.
 
+## Test WebRTC compatibility
+
+The experimental **WebRTC compatibility mode** switch is under desktop
+**Settings → Network → Advanced → Transport**. It selects WebRTC before a new
+session is allocated for either NVIDIA or alliance accounts. It does not convert
+or end a running NVST game. NVST remains the default and the recommended option
+for performance. The switch warns users to expect lower performance with WebRTC.
+
+With the default codec of auto, this mode requests H.264, 8-bit 4:2:0 SDR,
+at most 1920×1080, and at most 60 FPS, while an H.265 or HEVC codec setting
+keeps the selected resolution, allows 10-bit 4:2:0, and allows up to 360 FPS.
+It requires a direct UDP path. TURN gathering, microphone upload, clipboard text,
+and native HID passthrough are not supported by this mode. The native decoder and
+Qt video item remain the same as the NVST path.
+
+After building, run the automated checks:
+
+```sh
+cargo test --manifest-path native/opennow-core/Cargo.toml
+cargo test --manifest-path native/opennow-streamer/Cargo.toml --workspace
+ctest --test-dir build/opennow-qt --output-on-failure -R 'embedded-orchestration|network-test|stream-recovery|streamvideo'
+```
+
+Repeat the live check with NVIDIA and alliance accounts:
+
+1. End any existing game through the confirmation flow before changing protocols.
+2. Read the performance warning, enable **WebRTC compatibility mode**, and launch a new game.
+3. Confirm moving gameplay, audible sound, and working keyboard, mouse, and controller input.
+4. Open F3 statistics and confirm that the transport is WebRTC. A connected socket or
+   audible audio does not establish video health.
+5. Open and close Ctrl+G, statistics, and the exit confirmation in windowed and fullscreen
+   modes. Confirm that the same video surface continues and remote controls do not remain pressed.
+6. Disconnect and reconnect the network. Confirm bounded recovery of the same seat, or an
+   actionable terminal error that leaves the remote game available to resume.
+7. Restart OpenNOW and resume the same seat. Confirm that its transport remains WebRTC.
+8. End the game, disable compatibility, and launch another game. Confirm that NVST is restored.
+
+Record the build commit, provider, region, negotiated profile, first-frame result,
+input result, and recovery result. Do not publish authentication tokens, ICE passwords,
+session IDs, or complete signaling messages. Local peer tests do not establish provider
+interoperability, congestion feedback, or hardware presentation on a real provider seat.
+The existing production live-acceptance verifier still requires NVST and must not be
+used to claim that this experimental path passed release acceptance.
+
 ## Required live matrix
 
 | Platform | Architecture | Window system | Required package |
@@ -243,12 +304,10 @@ ten minutes. Exercise the following without restarting the app:
 5. Test window resize, fullscreen, display migration, the display's highest supported refresh
    rate, and VRR/HDR only where the machine advertises them.
 6. Load a profile that previously selected WebRTC or another legacy transport and confirm settings,
-   session creation, streamer status and exported evidence all resolve it to NVST. If a persisted
-   microphone mode is armed, confirm settings migration disables it without changing transport;
-   microphone capture is not part of the native runtime.
+   session creation, streamer status and exported evidence all resolve it to NVST.
 7. Capture a screenshot, start and stop a source-stream Matroska recording, play the resulting
    media, verify the generated thumbnail, and reveal both files through the Media screen.
-8. Rebind and exercise all seven active stream shortcuts. Confirm stats and fullscreen reach Qt
+8. Rebind and exercise the configured stream shortcuts. Confirm stats and fullscreen reach Qt
    exactly once, pointer lock remains native, screenshot, recording and stop reach the shell exactly
    once, and anti-AFK produces an F13 pulse after four minutes without leaking the key into the game.
 9. Enable the anti-AFK indicator/reminder and session clock, then confirm the post-session report
@@ -281,6 +340,15 @@ ten minutes. Exercise the following without restarting the app:
    `observedPass: true`; it includes hashed screenshot/recording/thumbnail metadata and bounded
    NVST transport, first-frame, input ownership, guide, recovery and error checks without
    exposing a local path, account, token, session identifier or endpoint.
+
+For microphone acceptance, select **Open microphone** in **Audio settings** before starting a session.
+Capture defaults to disabled and uses the system default input. Uplink requires both runtime build
+support and the server's negotiated native-bundle microphone support. Confirm that the remote game
+receives voice while game audio and video continue. Exercise live mute and unmute, input-device loss,
+session end and restart, and denied OS permission on each supported target. A local `ready` state does
+not prove that the remote game receives audio. Follow the
+[native microphone checks](../native/opennow-streamer/README.md#microphone-upstream) for the capture
+and negotiation limits. Local microphone audio is not added to source recordings.
 
 Retain the two performance JSON files, redacted diagnostic export, screenshot, recording, package
 hash, and a short capture showing guide/controller ownership. Hash artifacts before upload and
@@ -408,6 +476,69 @@ between settings sections and desktop pages.
   and `opennow://` associations, and confirm the package uses its bundled core and streamer.
 - Verify the published SHA-256 hashes and production Ed25519 update manifest before exposing a
   release to any update channel. Keep the signing key outside CI build workers.
+
+### macOS AWDL helper
+
+Run the packaging contract checks on any host:
+
+```sh
+	python3 -m unittest discover -s opennow-qt/packaging -p test_macos_awdl.py
+	python3 -m unittest discover -s opennow-qt/tests -p 'test_macos_*.py'
+	cargo test --manifest-path native/opennow-streamer/Cargo.toml -p opennow-awdl-helper
+```
+
+The static checks inspect generated ARM64 and Intel CMake rules, Debug and Release
+profile selection, the LaunchDaemon plist, and both signing paths. They do not run
+launchd, privilege prompts, or network-interface changes. Use a real Mac for these checks:
+
+1. Copy the packaged app from both the DMG and ZIP to a new location. Verify the
+   outer app with `codesign --verify --deep --strict`. Verify the executable at
+   `Contents/Helpers/opennow-awdl-helper` with `codesign --verify --strict`, and
+   check its architecture with `lipo <helper> -verify_arch arm64`. Use `x86_64` for
+   an Intel development build. Check `otool -L <helper>` for dependencies outside
+   `/usr/lib` and `/System/Library`; there must be none. Lint
+   `Contents/Resources/opennow-awdl.plist` with `plutil -lint`.
+2. Check the helper's signing identifier is
+   `io.github.opencloudgaming.OpenNOW.awdl-helper`. For an ad-hoc nightly, confirm
+   `Signature=adhoc` and no TeamIdentifier. For a Developer ID release, verify the
+   helper's TeamIdentifier matches the app, no app entitlements are attached, and
+   the app and DMG pass Gatekeeper and stapler checks.
+3. With no helper installed, complete onboarding and start a session with suppression
+   off. Decline an install prompt. Neither case may block onboarding or streaming,
+   change `awdl0`, or save administrator credentials. Change the snapshot after the
+   client captures its SHA-256, and confirm installation rejects the changed bytes.
+   Symlinked or writable system destinations must fail without altering the service.
+4. Install from a trusted user-owned app with administrator approval, using the
+   [installation contract](macos-awdl-helper.md#installation-contract).
+   Inspect `root:wheel` ownership and modes
+   `0755` for the installed executable and `0644` for the installed plist.
+   `launchctl print system/io.github.opencloudgaming.OpenNOW.awdl` must show the
+   service. Installing while idle must not change `awdl0`.
+5. Record whether `awdl0` is initially up. Enable suppression and start a real session.
+   Confirm the interface goes down only after streaming becomes active. Re-enable
+   `awdl0` as administrator while streaming and confirm the helper suppresses it again.
+   Toggle local overlays, focus, fullscreen, and pointer lock. They must not release
+   the lease, restart media, or restore the interface.
+6. End the session, turn the preference off, and terminate OpenNOW unexpectedly in
+   separate runs. Confirm the interface returns to up only when the helper found it
+   up before acquisition. Repeat with the interface initially down and confirm it
+   remains down. Check that the journal clears after successful restoration.
+7. Acquire two authorized leases. End one and confirm suppression remains until
+   the other ends. Switch console users and confirm the old user's leases cannot
+   keep suppression active. Try the socket as another user and as root; both must
+   be rejected. Malformed requests must not change another interface or run a command.
+8. Kill the helper while a lease is active, then reboot in a separate run. Confirm
+   launchd restarts it and processes the durable journal before accepting new leases.
+   Simulate a restoration failure and confirm the journal remains, retries occur,
+   and uninstall retains the executable and plist. Resolve the failure and confirm
+   restoration completes before uninstall removes the service.
+9. Replace the application with an updated bundle. Confirm the existing daemon is
+   not silently replaced. End streaming, reinstall with approval, and repeat the
+   lease cycle. Uninstall, then confirm the daemon and socket are gone and no pending
+   journal was discarded. Check that no subsequent session changes `awdl0`.
+
+Record actual results, macOS version, architecture, package signing mode, and initial
+interface state. Linux tests or Darwin cross-compilation do not establish these results.
 
 ## Staged rollout after Electron removal
 

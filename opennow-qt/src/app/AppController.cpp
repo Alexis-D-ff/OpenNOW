@@ -31,6 +31,20 @@ AppController::AppController(QObject *parent)
 {
 }
 
+void AppController::setConsoleLaunchInputBlocked(bool blocked)
+{
+    if (m_consoleLaunchInputBlocked == blocked) return;
+    m_consoleLaunchInputBlocked = blocked;
+    emit consoleLaunchInputBlockedChanged();
+}
+
+void AppController::setConsoleLaunchInputDraining(bool draining)
+{
+    if (m_consoleLaunchInputDraining == draining) return;
+    m_consoleLaunchInputDraining = draining;
+    emit consoleLaunchInputDrainingChanged();
+}
+
 QString AppController::shortcutFromKey(int key, int modifiers) const
 {
     const bool supported = (key >= Qt::Key_A && key <= Qt::Key_Z)
@@ -411,6 +425,50 @@ void AppController::requestWindowAttention(QWindow *window) const
         window->alert(5000);
 }
 
+void AppController::restoreWindowGeometry(QWindow *window, const QRect &saved,
+                                          bool hasPosition) const
+{
+    if (!window || saved.isEmpty()) return;
+    QList<QRect> screens;
+    for (const auto *screen : QGuiApplication::screens())
+        screens.append(screen->availableGeometry());
+    const auto *current = window->screen() ? window->screen() : QGuiApplication::primaryScreen();
+    if (window->windowStates() == Qt::WindowMaximized) window->showNormal();
+    window->setGeometry(restorableWindowGeometry(
+        saved, hasPosition, window->frameMargins(),
+        current ? current->availableGeometry() : QRect{}, screens));
+}
+
+QRect AppController::restorableWindowGeometry(const QRect &saved, bool hasPosition,
+                                              const QMargins &frame,
+                                              const QRect &fallbackScreen,
+                                              const QList<QRect> &screens)
+{
+    constexpr int minimumGrabWidth = 96;
+    constexpr int minimumGrabHeight = 16;
+    if (hasPosition) {
+        const auto outer = saved.marginsAdded(frame);
+        const QRect titleBar(outer.left(), outer.top(), outer.width(),
+                             std::max(frame.top(), minimumGrabHeight));
+        for (const auto &screen : screens) {
+            const auto visible = titleBar.intersected(screen);
+            if (visible.width() >= minimumGrabWidth && visible.height() >= minimumGrabHeight)
+                return saved;
+        }
+    }
+    if (fallbackScreen.isEmpty()) return saved;
+    const auto size = saved.size().boundedTo(QSize(
+        fallbackScreen.width() - frame.left() - frame.right(),
+        fallbackScreen.height() - frame.top() - frame.bottom()));
+    const auto outerWidth = size.width() + frame.left() + frame.right();
+    const auto outerHeight = size.height() + frame.top() + frame.bottom();
+    return QRect(QPoint(fallbackScreen.left() + std::max(0, (fallbackScreen.width() - outerWidth) / 2)
+                            + frame.left(),
+                        fallbackScreen.top() + std::max(0, (fallbackScreen.height() - outerHeight) / 2)
+                            + frame.top()),
+                 size);
+}
+
 void AppController::activateWindow()
 {
     emit activationRequested();
@@ -533,6 +591,7 @@ const QStringList &AppController::routes()
         u"settings-themes"_s,
         u"settings-advanced"_s,
         u"settings-advanced-dropdown"_s,
+        u"settings-updates"_s,
         u"game-detail"_s,
         u"game-detail-platform-dropdown"_s,
         u"sign-in"_s,
@@ -567,10 +626,13 @@ const QStringList &AppController::overlays()
 {
     static const QStringList value{
         u"application-quit-confirm"_s,
+        u"account-switch-confirm"_s,
+        u"desktop-icon-guide"_s,
         u"friends"_s,
         u"friend-actions"_s,
         u"quick-settings"_s,
         u"session-conflict"_s,
+        u"session-report"_s,
         u"queue-ad"_s,
         u"desktop-stream-menu"_s,
         u"desktop-stream-exit-confirm"_s,

@@ -23,6 +23,56 @@ pub enum StoreFeature {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GameFeature {
+    Rtx,
+    Hdr,
+    Reflex,
+}
+
+impl GameFeature {
+    pub fn from_variant_features(features: &Value) -> Vec<GameFeature> {
+        let entries: Vec<&Value> = match features {
+            Value::Array(items) => items.iter().collect(),
+            Value::Object(_) => vec![features],
+            _ => Vec::new(),
+        };
+        let enabled = |key: &str| {
+            entries.iter().any(|feature| {
+                feature["key"].as_str() == Some(key)
+                    && (feature["value"].as_bool() == Some(true)
+                        || feature["value"]
+                            .as_str()
+                            .is_some_and(|value| value.eq_ignore_ascii_case("true")))
+            })
+        };
+        let hdr_version = entries.iter().any(|feature| {
+            feature["key"].as_str() == Some("SUPPORTED_HDR_VERSION")
+                && [&feature["value"], &feature["values"]]
+                    .into_iter()
+                    .any(|value| match value {
+                        Value::String(text) => !text.is_empty(),
+                        Value::Array(items) => items
+                            .iter()
+                            .any(|item| item.as_str().is_some_and(|text| !text.is_empty())),
+                        _ => false,
+                    })
+        });
+        let mut result = Vec::new();
+        if enabled("RTX_ENABLED") {
+            result.push(GameFeature::Rtx);
+        }
+        if enabled("HDR_ENABLED") || hdr_version {
+            result.push(GameFeature::Hdr);
+        }
+        if enabled("REFLEX_ENABLED") {
+            result.push(GameFeature::Reflex);
+        }
+        result
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkingMetadata {
@@ -49,7 +99,7 @@ impl StoreDefinition {
         let provider = normalize_store(&self.store);
         let known = matches!(
             provider.as_str(),
-            "UPLAY" | "BATTLENET" | "EPIC" | "GAIJIN" | "STEAM" | "XBOX"
+            "UPLAY" | "BATTLENET" | "EPIC" | "GAIJIN" | "GOG" | "STEAM" | "XBOX"
         );
         json!({
             "provider":provider,"store":self.store,"label":self.label,"sortOrder":self.sort_order,
@@ -212,6 +262,54 @@ pub fn filter_expression(value: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_features_follow_catalog_keys_and_ignore_unbacked_ones() {
+        let features = json!([
+            {"__typename":"GfnSubscriptionFeatureValue","key":"RTX_ENABLED","value":"true"},
+            {"__typename":"GfnSubscriptionFeatureValue","key":"SUPPORTED_HDR_VERSION","value":null},
+            {"__typename":"GfnSubscriptionFeatureValueList","key":"SUPPORTED_HDR_VERSION","values":["HDR"]},
+            {"__typename":"GfnSubscriptionFeatureValue","key":"REFLEX_ENABLED","value":"true"},
+            {"__typename":"GfnSubscriptionFeatureValue","key":"DLSS_ENABLED","value":"true"},
+            {"__typename":"GfnSubscriptionFeatureValue","key":"IN_GAME_SETTINGS_PERSISTENCE_ENABLED","value":"true"}
+        ]);
+        assert_eq!(
+            GameFeature::from_variant_features(&features),
+            vec![GameFeature::Rtx, GameFeature::Hdr, GameFeature::Reflex]
+        );
+        assert_eq!(
+            serde_json::to_value(GameFeature::from_variant_features(&features)).unwrap(),
+            json!(["rtx", "hdr", "reflex"])
+        );
+        let disabled = json!([
+            {"key":"RTX_ENABLED","value":"false"},
+            {"key":"SUPPORTED_HDR_VERSION","value":null},
+            {"key":"HDR_ENABLED","value":null}
+        ]);
+        assert!(GameFeature::from_variant_features(&disabled).is_empty());
+        assert_eq!(
+            GameFeature::from_variant_features(&json!({"key":"HDR_ENABLED","value":true})),
+            vec![GameFeature::Hdr]
+        );
+        assert!(GameFeature::from_variant_features(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn gog_connection_capabilities_follow_server_features() {
+        for supported in [false, true] {
+            let store: StoreDefinition = serde_json::from_value(json!({
+                "store":"GOG","label":"GOG","features":[
+                    {"__typename":"AccountLinkingSso","supported":supported},
+                    {"__typename":"AccountGamesSyncing","supported":supported}
+                ]
+            }))
+            .unwrap();
+            let connection = store.connection_definition();
+            assert_eq!(connection["provider"], "GOG");
+            assert_eq!(connection["supportsLinking"], supported);
+            assert_eq!(connection["supportsSync"], supported);
+        }
+    }
 
     #[test]
     fn store_definitions_preserve_nullable_variant_scope_and_link_requirements() {

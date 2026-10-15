@@ -20,8 +20,9 @@ class BundledDebTest(unittest.TestCase):
         files = (
             "AppRun", "AppRun.wrapped", "apprun-hooks/linuxdeploy-plugin-qt-hook.sh",
             "usr/bin/opennow-core", "usr/bin/opennow-update-helper", "usr/bin/opennow-streamer",
-            "usr/bin/opennow-acceptance-verify", "usr/bin/libopennow_streamer_ffi.so", "usr/bin/qt.conf",
-            "usr/lib/libSDL3.so.0", "usr/lib/libva.so.2", "usr/lib/libva-drm.so.2",
+            "usr/bin/opennow-acceptance-verify", "usr/lib/libopennow_streamer_ffi.so", "usr/bin/qt.conf",
+            "usr/lib/libSDL3.so.0", "usr/lib/libva-fallback/libva.so.2",
+            "usr/lib/libva-fallback/libva-drm.so.2",
             "usr/plugins/imageformats/libqsvg.so", "usr/plugins/platforms/libqxcb.so",
             "usr/plugins/platforms/libqoffscreen.so", "usr/plugins/platforms/libqwayland-egl.so",
             "usr/plugins/platforms/libqwayland-generic.so",

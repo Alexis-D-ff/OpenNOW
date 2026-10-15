@@ -550,8 +550,6 @@ dependencies = [
 [[package]]
 name = "cros-codecs-extended"
 version = "0.0.5-extended.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5130a93260541c9418be3a57af40916c662e16d02f25727d8f7ad0738ebde1f"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -1645,6 +1643,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "opennow-awdl-helper"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "opennow-streamer"
 version = "0.2.0"
 dependencies = [
@@ -1661,6 +1666,7 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "getrandom 0.3.4",
+ "openh264",
  "opennow-streamer-hid",
  "opennow-streamer-platform",
  "opennow-streamer-protocol",
@@ -1668,6 +1674,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "str0m",
  "tungstenite",
 ]
 
@@ -1717,6 +1724,7 @@ dependencies = [
 name = "opennow-streamer-platform-linux"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "ash",
  "ash-window",
  "cros-codecs-extended",
@@ -1783,6 +1791,7 @@ dependencies = [
  "mtu",
  "opennow-streamer-hid",
  "opennow-streamer-protocol",
+ "serde",
  "serde_json",
  "sha1",
  "socket2",
@@ -2482,8 +2491,6 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "str0m"
 version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840d11fdd44459d71bc7b3dd6796f55e9ac86c8e3fa8678098a8642f5701c5ff"
 dependencies = [
  "arrayvec",
  "base64ct",

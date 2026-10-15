@@ -2,6 +2,9 @@ use std::num::{NonZeroIsize, NonZeroU32};
 
 use crate::BackendError;
 
+pub const MAX_DECODE_WIDTH: u32 = 4096;
+pub const MAX_DECODE_HEIGHT: u32 = 2304;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
@@ -100,7 +103,9 @@ pub struct VideoFormat {
 impl VideoFormat {
     pub fn validate(self) -> Result<(), BackendError> {
         self.validate_color()?;
-        if !(48..=4096).contains(&self.width) || !(48..=2304).contains(&self.height) {
+        if !(48..=MAX_DECODE_WIDTH).contains(&self.width)
+            || !(48..=MAX_DECODE_HEIGHT).contains(&self.height)
+        {
             return Err(BackendError::InvalidConfig(format!(
                 "{} dimensions must be at least 48x48 and no larger than 4096x2304",
                 self.codec.label()

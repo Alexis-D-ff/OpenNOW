@@ -57,7 +57,9 @@ pub use opennow_streamer_platform_windows::{
     AdoptedD3d11Context, D3d11Frame, D3d11FrameProducer, D3d11FrameSubmitter, D3d11RecordedFrame,
     D3d11TextureFormat, d3d11_adapter_luid,
 };
-pub use recording::{RecordingSummary, record_matroska, record_replay_matroska};
+pub use recording::{
+    ManualRecordingSummary, RecordingSummary, record_matroska, record_replay_matroska,
+};
 pub use replay::ReplaySnapshot;
 pub use runtime::{
     EmbeddedRuntimeConfig, MainThreadHost, MediaRuntime, MediaRuntimeControl,
@@ -70,6 +72,14 @@ pub use runtime::{TestMediaRuntimeHost, create_test_runtime};
 use opennow_streamer_protocol::{
     CodecCapability, GraphicsAdapterCapability, VideoBackendCapability,
 };
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_decode_dimensions() -> Option<opennow_streamer_protocol::DecodeDimensions> {
+    Some(opennow_streamer_protocol::DecodeDimensions {
+        width: opennow_streamer_platform_windows::MAX_DECODE_WIDTH,
+        height: opennow_streamer_platform_windows::MAX_DECODE_HEIGHT,
+    })
+}
 
 pub(crate) fn graphics_adapter_capabilities(
     active_luid: Option<u64>,
@@ -125,7 +135,9 @@ pub(crate) fn embedded_video_backends_with_config(
     _windows_adapter_luid: Option<WindowsAdapterLuid>,
 ) -> Vec<VideoBackendCapability> {
     #[cfg(target_os = "linux")]
-    let mut backends = linux_backend::video_backends();
+    let mut backends = linux_backend::mediacodec_capability()
+        .map(|backend| vec![backend])
+        .unwrap_or_else(linux_backend::video_backends);
     #[cfg(target_os = "linux")]
     for backend in &mut backends {
         if backend.backend == "vulkan" {
@@ -155,6 +167,14 @@ pub(crate) fn embedded_video_backends_with_config(
                 })
                 .collect::<Vec<_>>();
                 codec.available = !colors.is_empty();
+                codec.max_decode_dimensions = _device
+                    .and_then(|device| device.max_decode_dimensions(profile))
+                    .map(
+                        |[width, height]| opennow_streamer_protocol::DecodeDimensions {
+                            width,
+                            height,
+                        },
+                    );
                 codec.color_qualities = Some(colors);
                 codec.reason = (!codec.available)
                     .then_some("the attached Vulkan device does not support this decode profile");
@@ -420,6 +440,7 @@ fn windows_hardware_capability(
         platform: "windows",
         codecs: vec![
             CodecCapability {
+                max_decode_dimensions: windows_decode_dimensions(),
                 hdr_supported: Some(false),
                 hdr_color_qualities: Some(hdr_color_qualities(VideoCodec::H264)),
                 color_qualities: Some(color_qualities(VideoCodec::H264)),
@@ -430,6 +451,7 @@ fn windows_hardware_capability(
                 ),
             },
             CodecCapability {
+                max_decode_dimensions: windows_decode_dimensions(),
                 hdr_supported: Some(media_output_available && probe.h265_hdr),
                 hdr_color_qualities: Some(hdr_color_qualities(VideoCodec::H265)),
                 color_qualities: Some(color_qualities(VideoCodec::H265)),
@@ -440,6 +462,7 @@ fn windows_hardware_capability(
                 ),
             },
             CodecCapability {
+                max_decode_dimensions: windows_decode_dimensions(),
                 hdr_supported: Some(media_output_available && probe.av1_hdr),
                 hdr_color_qualities: Some(hdr_color_qualities(VideoCodec::Av1)),
                 color_qualities: Some(color_qualities(VideoCodec::Av1)),
@@ -477,6 +500,7 @@ fn hardware_backend() -> VideoBackendCapability {
         platform: "macos",
         codecs: vec![
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: Some(false),
                 hdr_color_qualities: None,
                 color_qualities: Some(vec!["8bit_420"]),
@@ -486,6 +510,7 @@ fn hardware_backend() -> VideoBackendCapability {
                     .then_some("H.264 VideoToolbox hardware decode or Metal is unavailable"),
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: Some(false),
                 hdr_color_qualities: None,
                 color_qualities: Some(vec!["8bit_420", "10bit_420"]),
@@ -495,6 +520,7 @@ fn hardware_backend() -> VideoBackendCapability {
                     .then_some("H.265 VideoToolbox hardware decode or Metal is unavailable"),
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: Some(false),
                 hdr_color_qualities: None,
                 color_qualities: Some(vec!["8bit_420", "10bit_420"]),
@@ -533,6 +559,7 @@ fn software_backend() -> VideoBackendCapability {
             platform: "windows",
             codecs: vec![
                 CodecCapability {
+                    max_decode_dimensions: windows_decode_dimensions(),
                     hdr_supported: None,
                     hdr_color_qualities: None,
                     color_qualities: None,
@@ -541,6 +568,7 @@ fn software_backend() -> VideoBackendCapability {
                     reason: None,
                 },
                 CodecCapability {
+                    max_decode_dimensions: windows_decode_dimensions(),
                     hdr_supported: None,
                     hdr_color_qualities: None,
                     color_qualities: None,
@@ -551,6 +579,7 @@ fn software_backend() -> VideoBackendCapability {
                     ),
                 },
                 CodecCapability {
+                    max_decode_dimensions: windows_decode_dimensions(),
                     hdr_supported: None,
                     hdr_color_qualities: None,
                     color_qualities: None,
@@ -572,6 +601,7 @@ fn software_backend() -> VideoBackendCapability {
         platform: "cross-platform",
         codecs: vec![
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -580,6 +610,7 @@ fn software_backend() -> VideoBackendCapability {
                 reason: None,
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -588,6 +619,7 @@ fn software_backend() -> VideoBackendCapability {
                 reason: Some("H.265 decoder is not built into this binary"),
             },
             CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -614,6 +646,7 @@ fn unavailable_backend(
         codecs: ["h264", "h265", "av1"]
             .into_iter()
             .map(|codec| CodecCapability {
+                max_decode_dimensions: None,
                 hdr_supported: None,
                 hdr_color_qualities: None,
                 color_qualities: None,
@@ -652,6 +685,7 @@ mod tests {
             backend: "vulkan",
             platform: "linux",
             codecs: vec![CodecCapability {
+                max_decode_dimensions: None,
                 codec: "h265",
                 available: true,
                 hdr_supported: Some(true),
@@ -705,6 +739,10 @@ mod tests {
         assert!(embedded.codecs[0].available);
         assert_eq!(embedded.codecs[0].reason, None);
         assert_eq!(embedded.codecs[0].color_qualities, Some(vec!["8bit_420"]));
+        for codec in &embedded.codecs {
+            let limit = codec.max_decode_dimensions.as_ref().unwrap();
+            assert_eq!((limit.width, limit.height), (4096, 2304));
+        }
         assert!(embedded.codecs[1..].iter().all(|codec| !codec.available));
 
         let standalone = capability(&probe, WindowsOutputMode::Standalone);

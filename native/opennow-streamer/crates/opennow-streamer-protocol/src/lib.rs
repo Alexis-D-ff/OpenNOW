@@ -6,6 +6,21 @@ pub mod text_input;
 
 pub const PROTOCOL_VERSION: u64 = 7;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingCutReason {
+    Discontinuity,
+    QueueOverflow,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RecordingCompletion {
+    Complete,
+    Cut { reason: RecordingCutReason },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayBufferConfig {
     pub enabled: bool,
@@ -242,6 +257,12 @@ pub struct VideoBackendCapability {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DecodeDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CodecCapability {
     pub codec: &'static str,
     pub available: bool,
@@ -251,6 +272,11 @@ pub struct CodecCapability {
     pub hdr_color_qualities: Option<Vec<&'static str>>,
     #[serde(rename = "hdrSupported", skip_serializing_if = "Option::is_none")]
     pub hdr_supported: Option<bool>,
+    #[serde(
+        rename = "maxDecodeDimensions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_decode_dimensions: Option<DecodeDimensions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
 }
@@ -291,11 +317,12 @@ mod graphics_adapter_tests {
 
 #[cfg(test)]
 mod hdr_profile_tests {
-    use super::CodecCapability;
+    use super::{CodecCapability, DecodeDimensions};
 
     #[test]
     fn exact_hdr_profiles_serialize_independently_of_sdr_formats() {
         let mut codec = CodecCapability {
+            max_decode_dimensions: None,
             codec: "h265",
             available: true,
             color_qualities: Some(vec!["10bit_420", "10bit_444"]),
@@ -320,6 +347,20 @@ mod hdr_profile_tests {
                 .unwrap()
                 .get("hdrColorQualities")
                 .is_none()
+        );
+        assert!(
+            serde_json::to_value(&codec)
+                .unwrap()
+                .get("maxDecodeDimensions")
+                .is_none()
+        );
+        codec.max_decode_dimensions = Some(DecodeDimensions {
+            width: 4096,
+            height: 2304,
+        });
+        assert_eq!(
+            serde_json::to_value(&codec).unwrap()["maxDecodeDimensions"],
+            serde_json::json!({"width":4096,"height":2304})
         );
     }
 }
@@ -450,6 +491,7 @@ mod tests {
     #[test]
     fn hdr_capabilities_distinguish_unknown_supported_and_unsupported() {
         let mut codec = CodecCapability {
+            max_decode_dimensions: None,
             codec: "h265",
             available: true,
             hdr_color_qualities: None,
@@ -474,6 +516,7 @@ mod tests {
     #[test]
     fn codec_color_profiles_are_additive_and_preserve_explicit_empty_support() {
         let mut codec = CodecCapability {
+            max_decode_dimensions: None,
             hdr_supported: None,
             codec: "h265",
             available: true,

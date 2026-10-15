@@ -15,6 +15,17 @@ class AppControllerTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void sessionReportOverlayPreservesTheRoute()
+    {
+        AppController controller;
+        QVERIFY(controller.showOverlay(QStringLiteral("session-report")));
+        QCOMPARE(controller.overlay(), QStringLiteral("session-report"));
+        QCOMPARE(controller.route(), QStringLiteral("home"));
+        QVERIFY(controller.goBack());
+        QVERIFY(controller.overlay().isEmpty());
+        QCOMPARE(controller.route(), QStringLiteral("home"));
+    }
+
     void authorizedRestartAnnouncesExitBeforeDelegation()
     {
         AppController controller;
@@ -38,6 +49,37 @@ private slots:
         QVERIFY(!window.isActive());
         QCOMPARE(activation.count(), 0);
         QCOMPARE(controller.route(), QStringLiteral("home"));
+    }
+
+    void windowGeometryRestoresOnlyReachablePositions()
+    {
+        const QMargins frame(8, 31, 8, 8);
+        const QRect primary(0, 0, 1536, 824);
+        const QRect secondary(-1920, -200, 1920, 1040);
+        const QList<QRect> screens{primary, secondary};
+
+        const QRect onSecondary(-1700, 120, 1400, 900);
+        QCOMPARE(AppController::restorableWindowGeometry(onSecondary, true, frame, primary, screens),
+                 onSecondary);
+        const QRect spanning(-400, 100, 1400, 700);
+        QCOMPARE(AppController::restorableWindowGeometry(spanning, true, frame, primary, screens),
+                 spanning);
+
+        const auto disconnected = AppController::restorableWindowGeometry(
+            onSecondary, true, frame, primary, {primary});
+        QCOMPARE(disconnected.size(), QSize(1400, 785));
+        QCOMPARE(disconnected.topLeft(), QPoint(60 + frame.left(), frame.top()));
+        QVERIFY(primary.contains(disconnected.marginsAdded(frame)));
+
+        const QRect titleBarAboveScreen(200, -20, 1200, 700);
+        const auto lifted = AppController::restorableWindowGeometry(
+            titleBarAboveScreen, true, frame, primary, screens);
+        QVERIFY(primary.contains(lifted.marginsAdded(frame)));
+        QCOMPARE(lifted.size(), titleBarAboveScreen.size());
+
+        const auto unsaved = AppController::restorableWindowGeometry(
+            QRect(0, 0, 1400, 700), false, frame, primary, screens);
+        QCOMPARE(unsaved, QRect(QPoint(60 + frame.left(), 42 + frame.top()), QSize(1400, 700)));
     }
 
     void restartIsDelegatedToApplicationLifetimeOwner()

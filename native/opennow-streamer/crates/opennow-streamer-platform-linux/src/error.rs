@@ -2,6 +2,7 @@ use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subsystem {
+    MediaCodec,
     VaApi,
     V4l2,
     Vulkan,
@@ -31,6 +32,8 @@ pub enum Error {
         subsystem: Subsystem,
         reason: String,
     },
+    #[error("decoded frame import is unsupported by the render device: {0}")]
+    ImportUnsupported(String),
     #[error("invalid media format: {0}")]
     InvalidFormat(String),
     #[error("queue is closed")]

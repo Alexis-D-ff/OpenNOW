@@ -13,13 +13,19 @@ QtObject {
     required property var refreshAccountServices
     required property var refreshStreamerDetection
     required property var syncDiscordPresence
-    required property var syncTelemetry
     required property string lastError
     signal consoleSurfaceRequested(bool enabled)
     signal accessibilityAnnounced(string message)
     signal errorReported(string message)
     property var settings: ({})
     property var confirmedSettings: ({})
+    readonly property bool forwardFlightControls: confirmedSettings.forwardFlightControls !== false
+    property var awdlController: MacAwdl
+    property Binding awdlPreferenceBinding: Binding {
+        target: root.awdlController
+        property: "enabled"
+        value: root.confirmedSettings.suppressAwdlWhileStreaming === true
+    }
     property string providerIdpId: ""
     property string providerCode: ""
     readonly property string selectedRegion: {
@@ -68,7 +74,8 @@ QtObject {
         providerIdpId, settings.sessionProxyEnabled, settings.sessionProxyUrl])
     readonly property string colorContext: JSON.stringify([ready, nativeRuntimeReady,
         nativeRuntimeCapabilities, nativeHdrOutputSupported, settings.codec, settings.colorQuality, settings.nativeVideoBackend,
-        settings.decoderPreference, settings.enableHdr, settings.resolution])
+        settings.decoderPreference, settings.enableHdr, settings.resolution,
+        settings.webrtcCompatibilityMode, providerIdpId, providerCode])
     readonly property string gameLanguageDescription: qsTr("Requested when the game supports it; some games require an in-game change. Applies to the next session.")
     readonly property string keyboardLayoutDescription: qsTr("Physical key mapping requested from GeForce NOW. Applies to the next session.")
     readonly property string interfaceLanguageDescription: qsTr("OpenNOW interface only. Community translated through Crowdin.")
@@ -236,19 +243,21 @@ QtObject {
 
     function ownsConfirmedSetting(key) {
         return ["appLanguage", "gameLanguage", "keyboardLayout", "colorQuality", "codec",
-            "nativeVideoBackend", "decoderPreference", "enableHdr"].includes(key)
+            "nativeVideoBackend", "decoderPreference", "enableHdr", "webrtcCompatibilityMode",
+            "forwardFlightControls"].includes(key)
     }
 
-    function beginSettingWrite(key, value, previousWrite) {
+    function beginSettingWrite(key, value, previousWrite, source) {
         const writes = Object.assign({}, settingWrites)
         if (writes[key]) {
-            writes[key] = Object.assign({}, writes[key], {next:value, queued:true,
+            writes[key] = Object.assign({}, writes[key], {next:value, nextSource:source, queued:true,
                 nextProviderIdpId:providerIdpId, nextScopeGeneration:scopeGeneration,
                 sequence:++settingWriteSequence})
             settingWrites = writes
             return writes[key].id
         }
-        const id = coreClient.request("settings.set", {key:key, value:value, providerIdpId:providerIdpId}, 15000)
+        const id = coreClient.request("settings.set", Object.assign({key:key, value:value, providerIdpId:providerIdpId},
+            source ? {source:source} : {}), 15000)
         if (id === "") { errorReported(qsTr("The setting could not be saved.")); return "" }
         const coupledKeys = previousWrite ? previousWrite.coupledKeys
             : Object.keys(settingValues(key, value)).filter(changedKey => changedKey !== key)
@@ -288,7 +297,7 @@ QtObject {
             applyCoupledSettings(result.changes)
             applySetting(key, result.value)
         } else if (!result && confirmed && !dispatchNext) errorReported(message)
-        const nextId = dispatchNext ? beginSettingWrite(key, write.next, write) : ""
+        const nextId = dispatchNext ? beginSettingWrite(key, write.next, write, write.nextSource) : ""
         if (!nextId) {
             if (!confirmed && key !== "gameCollections")
                 reconcileSetting(key, write.coupledKeys)
@@ -435,6 +444,16 @@ QtObject {
 
     function codecsDisabledByProfile() {
         return ["av1", "h264", "h265"].filter(codec => codecDisabledByProfile(codec))
+    }
+
+    function hdrNoticeShown(gameId) {
+        return (settings.hdrNoticeShownGameIds || []).indexOf(gameId) >= 0
+    }
+
+    function rememberHdrNotice(gameId) {
+        if (!gameId || hdrNoticeShown(gameId))
+            return
+        setSetting("hdrNoticeShownGameIds", (settings.hdrNoticeShownGameIds || []).concat([gameId]).slice(-200))
     }
 
     function hdrDecoderAvailable() {
@@ -689,7 +708,7 @@ QtObject {
         accessibilityAnnounced(lastError)
     }
 
-    function setSetting(key, value) {
+    function setSetting(key, value, source) {
         if (key === "launchInConsoleMode")
             return requestConsoleSurface(Boolean(value))
         if (!ready) {
@@ -698,7 +717,7 @@ QtObject {
             errorReported(qsTr("The OpenNOW core is not ready"))
             return ""
         }
-        const id = beginSettingWrite(key, value)
+        const id = beginSettingWrite(key, value, null, source)
         if (id !== "" && !ownsConfirmedSetting(key) && key !== "gameCollections")
             applySetting(key, value)
         else if (id === "" && !ownsConfirmedSetting(key)
@@ -756,8 +775,6 @@ QtObject {
             i18n.setLocale(String(value || "system"))
         if (key === "discordRichPresence")
             syncDiscordPresence()
-        if (key === "errorReportingConsent")
-            syncTelemetry()
     }
 
     function acceptSettings(result) {

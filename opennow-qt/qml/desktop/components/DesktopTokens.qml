@@ -44,6 +44,10 @@ QtObject {
     readonly property color amber: "#FFD166"
     readonly property color ledAmber: "#F5A623"
     readonly property color danger: "#FF8A80"
+    readonly property color flightReady: Theme.lightMode ? "#126B4E" : green
+    readonly property color flightMint: "#6EE7B7"
+    readonly property color flightWarning: Theme.lightMode ? "#806017" : amber
+    readonly property color flightDeclined: Theme.lightMode ? "#A9362C" : danger
     readonly property string displayFont: Theme.displayFont
     readonly property string bodyFont: Theme.bodyFont
     readonly property string monoFont: Theme.monoFont
@@ -118,6 +122,31 @@ QtObject {
         const labels = {steam:"Steam", epic:"Epic Games", ubisoft:"Ubisoft Connect", battlenet:"Battle.net",
             xbox:"Xbox", gog:"GOG", gaijin:"Gaijin", ea:"EA app", nvidia:"NVIDIA"}
         return labels[storeKey(value)] || (String(value).toUpperCase() === "NONE" ? qsTr("Direct launch") : String(value))
+    }
+    readonly property var gameFeatureKeys: ["rtx", "hdr", "reflex", "dlss"]
+    function gameFeatures(game) {
+        const found = {}
+        const variants = game && game.variants || []
+        for (let i = 0; i < variants.length; ++i) {
+            const features = variants[i] && variants[i].features || []
+            for (let j = 0; j < features.length; ++j)
+                found[features[j]] = true
+        }
+        found.dlss = Boolean(game && game.dlss)
+        return gameFeatureKeys.filter(key => found[key] === true)
+    }
+    function featureIconUrl(key) {
+        return gameFeatureKeys.indexOf(key) >= 0 ? "qrc:/qt/qml/OpenNOW/res/icons/desktop-" + key + ".svg" : ""
+    }
+    function featureLabel(key) {
+        if (key === "rtx") return qsTr("RTX ray tracing")
+        if (key === "hdr") return qsTr("HDR")
+        if (key === "reflex") return qsTr("Reflex low latency")
+        if (key === "dlss") return qsTr("DLSS")
+        return ""
+    }
+    function featureTip(key) {
+        return key === "dlss" ? qsTr("DLSS — per NVIDIA's DLSS games list") : featureLabel(key)
     }
     function genreLabel(value) {
         return String(value).toLowerCase().replace(/_/g, " ").replace(/\b\w/g, letter => letter.toUpperCase())

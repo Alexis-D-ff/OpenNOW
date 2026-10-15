@@ -24,7 +24,8 @@ Item {
     z: selected || visual.scale !== 1 ? 20 : 0
     Accessible.role: Accessible.Button
     Accessible.name: String(game && game.title || qsTr("Game"))
-    ToolTip.visible: pointer.containsMouse
+    Accessible.description: labels.summary
+    ToolTip.visible: pointer.containsMouse && !labels.hasContent
     ToolTip.delay: 700
     ToolTip.text: root.Accessible.name
 
@@ -59,6 +60,15 @@ Item {
         Behavior on border.color {
             ColorAnimation { duration: Theme.focusDuration }
         }
+    }
+
+    DesktopGameLabels {
+        id: labels
+        x: 8
+        y: 8
+        width: root.tileWidth - 16
+        height: root.artHeight - 16
+        game: root.game
     }
 
     Text {
@@ -133,6 +143,13 @@ Item {
     }
 
     } // visual; the pointer target does not move during zoom
+
+    DesktopGameLabelTip {
+        width: root.tileWidth
+        height: root.artHeight
+        game: root.game
+        requested: pointer.containsMouse || (root.selected && AppController.inputMode !== "pointer")
+    }
 
     MouseArea {
         id: pointer

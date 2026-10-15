@@ -172,6 +172,10 @@ impl D3d11FrameSubmitter {
         }
         Ok(outcome)
     }
+
+    pub fn holds_keyframe(&self) -> bool {
+        self.encoded.any(|queued| queued.key_frame)
+    }
 }
 
 struct EmbeddedMediaRuntime {
@@ -606,10 +610,11 @@ impl AdoptedResources {
                 &processor,
                 output_color_space(self.format.transfer_function),
             );
-            if self.format.transfer_function != VideoTransferFunction::Sdr {
-                self.video_context_1
-                    .VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-            }
+            // Driver auto-processing modes apply vendor-specific picture
+            // enhancements (e.g. dynamic contrast and brightness boosts on Intel/AMD)
+            // that distort SDR gamma and blow out highlights. Disable them unconditionally.
+            self.video_context_1
+                .VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
         }
         // QRhi owns slot reuse. Allocate only the slots it actually visits;
         // reserving the ABI maximum would waste seven 4K textures on D3D11.

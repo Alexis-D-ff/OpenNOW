@@ -15,6 +15,12 @@ FocusScope {
     Rectangle { anchors.fill: parent; color: "black"; z: -1 }
 
     readonly property var session: ShellStore.activeSession || ({})
+    readonly property string sessionId: String(session.sessionId || "")
+    property string clipboardPasteMessage: ""
+    onSessionIdChanged: {
+        clipboardPasteMessage = ""
+        if (clipboardPasteNotice) clipboardPasteNotice.stop()
+    }
     readonly property var profile: session.negotiatedStreamProfile || session.streamProfile || ({})
     readonly property var streamer: ShellStore.streamer || ({})
     readonly property string status: {
@@ -26,6 +32,7 @@ FocusScope {
         return String(root.streamer.status || ShellStore.streamState || "starting")
     }
     readonly property bool streaming: root.status === "streaming"
+    readonly property bool videoSurfaceActive: root.streaming || (root.streamer.status === "connecting" && root.status !== "error")
     readonly property bool videoReady: streaming
         && root.streamer.firstFrameLatencyMs !== undefined
         && root.streamer.firstFrameLatencyMs !== null
@@ -36,8 +43,31 @@ FocusScope {
         ? Math.max(0, Math.floor((clockNowMs - ShellStore.streamStartedAtMs) / 1000)) : 0
     Timer {
         interval: 1000; repeat: true
-        running: root.visible && root.streaming && ShellStore.settings.sessionCounterEnabled === true
+        running: root.visible && root.streaming
+            && (ShellStore.settings.sessionCounterEnabled === true || ShellStore.antiAfkEnabled)
         onTriggered: root.clockNowMs = Date.now()
+    }
+    MotionProgress {
+        id: antiAfkReveal
+        shown: root.videoReady && ShellStore.antiAfkIndicatorShown(root.clockSeconds)
+            && AppController.overlay.indexOf("stats") < 0
+    }
+    Rectangle {
+        objectName: "desktopAntiAfkIndicator"
+        anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 24
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        width: antiAfkLabel.implicitWidth + 28; height: 36; radius: 18; z: 4
+        color: Qt.rgba(Theme.shell.r,Theme.shell.g,Theme.shell.b,0.85)
+        visible: antiAfkReveal.present
+        opacity: antiAfkReveal.progress
+        Accessible.role: Accessible.StaticText
+        Accessible.name: qsTr("Anti-AFK is enabled")
+        Row {
+            id: antiAfkLabel; anchors.centerIn: parent; spacing: 8
+            Rectangle { width: 8; height: 8; radius: 4; color: DesktopTokens.green; anchors.verticalCenter: parent.verticalCenter }
+            Text { text: qsTr("ANTI-AFK ON"); color: Theme.label; font.family: Theme.monoFont; font.pixelSize: 12 }
+        }
     }
     Rectangle {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 24
@@ -57,9 +87,10 @@ FocusScope {
         const window = root.Window.window
         if (!window)
             return
-        const point = root.mapToItem(null, 0, 0)
+        const rect = root.mapToItem(null, 0, 0, root.width, root.height)
         ShellStore.streamCaptureRect = Qt.rect(
-            window.x + point.x, window.y + point.y, root.width, root.height)
+            Math.round(window.x + rect.x), Math.round(window.y + rect.y),
+            Math.round(rect.width), Math.round(rect.height))
     }
     function resynchronizeStreamInput() {
         root.publishCaptureRect()
@@ -90,10 +121,10 @@ FocusScope {
         id: streamVideo
         objectName: "streamSurfaceHost"
         anchors.fill: parent
-        visible: root.visible && root.streaming
+        visible: root.visible && root.videoSurfaceActive
         enabled: !root.launchCovered
-        focus: visible && !root.launchCovered
-        inputEnabled: visible
+        focus: root.streaming && visible && !root.launchCovered
+        inputEnabled: root.streaming && visible
             && !ShellStore.streamOverlayBlocksGameplayInput(AppController.overlay)
         shortcutBindings: ShellStore.streamShortcutBindings()
         clipboardPaste: ShellStore.settings.clipboardPaste === true
@@ -106,16 +137,31 @@ FocusScope {
         upscalingDenoise: Number(ShellStore.settings.upscalingDenoise ?? 0)
         z: 0
         onLocalShortcutRequested: action => ShellStore.applyStreamShortcutAction(action)
-        onClipboardPasteFailed: clipboardPasteNotice.restart()
+        onClipboardPasteFailed: {
+            root.clipboardPasteMessage = ""
+            clipboardPasteNotice.restart()
+        }
     }
 
-    Timer { id: clipboardPasteNotice; interval: 5000 }
+    Timer {
+        id: clipboardPasteNotice
+        objectName: "streamClipboardPasteNoticeTimer"
+        interval: 5000
+        onTriggered: root.clipboardPasteMessage = ""
+    }
+
+    StreamIdleWarning {
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        z: 5
+    }
 
     StreamInputNotice {
         layer.enabled: HdrOutput.chromeRequired
         layer.effect: HdrChromeEffect {}
+        title: clipboardPasteNotice.running ? qsTr("Text input unavailable") : qsTr("Relative mouse input unavailable")
         message: !root.streaming ? "" : clipboardPasteNotice.running
-            ? qsTr("Clipboard paste failed. Use plain text up to 64 KiB and try again.")
+            ? root.clipboardPasteMessage || qsTr("Clipboard paste failed. Use plain text up to 64 KiB and try again.")
             : streamVideo.relativeMouse ? streamVideo.inputCaptureError : ""
         z: 3
     }
@@ -130,6 +176,10 @@ FocusScope {
         target: ShellStore
         function onPointerLockToggleRequested() {
             streamVideo.togglePointerLock()
+        }
+        function onTextInputErrorAnnounced(message) {
+            root.clipboardPasteMessage = message
+            clipboardPasteNotice.restart()
         }
     }
 

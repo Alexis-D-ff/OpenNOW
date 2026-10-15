@@ -10,49 +10,24 @@ Column {
     required property var settingsScreen
 
     property bool confirmReset: false
-    property bool releaseNotesOpen: false
 
     width: page.availableWidth; spacing: DesktopTokens.px(12)
     DesktopSettingsPanel {
         width: parent.width; paperStyle: true
         DesktopSettingsSection { text: qsTr("OPENNOW") }
         DesktopSettingsRow {
-            width: parent.width; paperStyle: true
+            width: parent.width; paperStyle: true; showDivider: false
             leadingIcon: "qrc:/qt/qml/OpenNOW/res/brand/opennow-mark.png"
             leadingIconWidth: DesktopTokens.px(30)
             title: "OpenNOW " + String(ShellStore.updaterState.currentVersion || qsTr("unknown"))
             description: String(ShellStore.updaterState.message || ShellStore.updaterState.status || qsTr("idle"))
-            DesktopSettingsButton { text: qsTr("Updates"); onClicked: AppController.navigate("updates") }
-            DesktopSettingsButton { text: ShellStore.updaterState.status === "checking" ? qsTr("Checking…") : qsTr("Check for updates"); primary: true; enabled: !ShellStore.updaterBusy && ShellStore.updaterState.canCheck === true; onClicked: ShellStore.checkForUpdates() }
-        }
-        DesktopSettingsRow {
-            width: parent.width; paperStyle: true; glyph: "clock"; title: qsTr("Automatically check for updates")
-            description: qsTr("Check every six hours while no streaming session is active.")
-            DesktopSettingsToggle {
-                objectName: "autoCheckUpdatesToggle"
-                Accessible.name: qsTr("Automatically check for updates")
-                checked: page.settingsScreen.boolSetting("autoCheckForUpdates", false)
-                onValueChangedByUser: value => page.settingsScreen.setSetting("autoCheckForUpdates", value)
-            }
-        }
-        DesktopSettingsRow {
-            width: parent.width; paperStyle: true; glyph: "check"; title: qsTr("Automatically download updates")
-            description: qsTr("Download verified updates while idle. Installation always requires your confirmation.")
-            DesktopSettingsToggle {
-                objectName: "autoDownloadUpdatesToggle"
-                Accessible.name: qsTr("Automatically download updates")
-                checked: page.settingsScreen.boolSetting("autoDownloadUpdates", false)
-                onValueChangedByUser: value => page.settingsScreen.setSetting("autoDownloadUpdates", value)
-            }
-        }
-        DesktopSettingsRow {
-            width: parent.width; paperStyle: true; glyph: "arrows"; title: qsTr("Update channel")
-            description: qsTr("Choose which releases OpenNOW checks"); showDivider: false
-            DesktopSettingsSegmented {
-                options: [{label:qsTr("Stable"),value:"stable"},{label:qsTr("Nightly"),value:"nightly"}]
-                objectName: "renewUpdateChannel"
-                optionWidth: 96; selectedIndex: options.findIndex(item => item.value === page.settingsScreen.valueSetting("updateChannel","stable"))
-                onSelected: (index,item) => page.settingsScreen.setChoice("updateChannel",item.value)
+            DesktopSettingsButton {
+                objectName: "aboutOpenUpdates"
+                text: qsTr("Open Updates")
+                onClicked: {
+                    AppController.navigate("settings-updates")
+                    page.settingsScreen.selectedSection = page.settingsScreen.updatesSection
+                }
             }
         }
     }
@@ -69,24 +44,6 @@ Column {
                 description: modelData.id === "diagnostics" ? qsTr("Generate a diagnostic report") : ""
                 showDivider: index < 2
                 DesktopSettingsButton { text: modelData.id === "diagnostics" ? qsTr("Export") : qsTr("Open"); onClicked: page.settingsScreen.runProjectLink(modelData) }
-            }
-        }
-    }
-    DesktopSettingsPanel {
-        width: parent.width; paperStyle: true
-        DesktopSettingsRow {
-            objectName: "releaseNotesDisclosure"
-            width: parent.width; paperStyle: true; glyph: "info"; title: qsTr("Release notes")
-            description: ShellStore.releaseHighlights.title || ""
-            showDivider: false; expandable: true; expanded: page.releaseNotesOpen
-            onExpansionRequested: page.releaseNotesOpen = !page.releaseNotesOpen
-        }
-        DesktopSettingsDisclosure {
-            width: parent.width; expanded: page.releaseNotesOpen
-            sourceComponent: ReleaseNotes {
-                width: page.availableWidth; leftPadding: DesktopTokens.settingsInset; rightPadding: DesktopTokens.settingsInset; bottomPadding: DesktopTokens.settingsInset
-                text: ShellStore.releaseHighlights.bodyMarkdown || qsTr("Check for updates to load verified release information from GitHub.")
-                font.pixelSize: DesktopTokens.px(13)
             }
         }
     }

@@ -9,6 +9,51 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ENTRY_LIMIT: usize = 1_200;
 const LOG_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
 
+pub fn stream_endpoint_evidence(session: &Value) -> Value {
+    let number = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+            .filter(|number| *number <= u64::from(u16::MAX))
+    };
+    let connections = session["connectionInfo"].as_array();
+    let descriptors = connections
+        .into_iter()
+        .flatten()
+        .take(16)
+        .map(|connection| {
+            let resource = connection["resourcePath"].as_str().unwrap_or_default();
+            let kind = if resource.is_empty() {
+                "missing"
+            } else if resource.starts_with('/') {
+                "relative"
+            } else {
+                match url::Url::parse(resource)
+                    .ok()
+                    .as_ref()
+                    .map(|url| url.scheme())
+                {
+                    Some("wss") => "wss",
+                    Some("https") => "https",
+                    Some("rtsps") => "rtsps",
+                    Some("rtsp") => "rtsp",
+                    _ => "other",
+                }
+            };
+            json!({"usage":number(&connection["usage"]),
+            "appLevelProtocol":number(&connection["appLevelProtocol"]),
+            "protocol":number(&connection["protocol"]),
+            "port":number(&connection["port"]), "resourceKind":kind,
+            "hasAddress":connection["ip"].as_str().is_some_and(|value| !value.is_empty())})
+        })
+        .collect::<Vec<_>>();
+    json!({"transportMode":session["transportMode"].as_str().filter(|mode| matches!(*mode, "nvst" | "webrtc")),
+        "connectionCount":connections.map_or(0, Vec::len), "connections":descriptors,
+        "hasSignalingUrl":session["signalingUrl"].as_str().is_some_and(|value| !value.is_empty()),
+        "signalingPort":session["signalingUrl"].as_str().and_then(|raw| url::Url::parse(raw).ok()).and_then(|url| url.port_or_known_default()),
+        "reportedNativeTransport":session["reportedNativeTransport"].as_bool()})
+}
+
 pub fn stream_profile_evidence(session: &Value) -> Value {
     let profile = &session["negotiatedStreamProfile"];
     let mut evidence = json!({
@@ -349,14 +394,14 @@ impl DiagnosticsService {
         let mut output = String::from(
             "OpenNOW Qt/Rust diagnostics\nSecrets, URLs, tokens, e-mail addresses and local user paths are redacted.\n\n",
         );
-        if let Ok(previous) = fs::read_to_string(&self.previous_path) {
+        if let Ok(previous) = log_tail(&self.previous_path, 500_000) {
             output.push_str("Previous run\n------------\n");
-            output.push_str(&redact_lines(&previous, 500_000));
+            output.push_str(&redact_log_tail(&previous, 500_000));
             output.push_str("\n\n");
         }
         output.push_str("Current run\n-----------\n");
-        if let Ok(current) = fs::read_to_string(&self.current_path) {
-            output.push_str(&redact_lines(&current, 900_000));
+        if let Ok(current) = log_tail(&self.current_path, 900_000) {
+            output.push_str(&redact_log_tail(&current, 900_000));
         } else {
             let entries = self.entries.lock().expect("diagnostics poisoned");
             for entry in entries.iter() {
@@ -512,19 +557,41 @@ fn acceptance_value_is_safe(value: &Value) -> bool {
 }
 
 fn native_log_tail(path: &Path) -> io::Result<String> {
+    log_tail(path, 262_144)
+}
+
+fn log_tail(path: &Path, limit: u64) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
-    let start = file.metadata()?.len().saturating_sub(262_144);
-    file.seek(SeekFrom::Start(start))?;
+    let start = file.metadata()?.len().saturating_sub(limit);
+    file.seek(SeekFrom::Start(start.saturating_sub(1)))?;
     let mut bytes = Vec::new();
-    file.take(262_144).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(if start > 0 {
-        text.split_once('\n')
-            .map_or("", |(_, tail)| tail)
-            .to_owned()
+    file.take(limit + u64::from(start > 0))
+        .read_to_end(&mut bytes)?;
+    let tail = if start > 0 {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(&[][..], |newline| &bytes[newline + 1..])
     } else {
-        text.into_owned()
-    })
+        &bytes
+    };
+    Ok(String::from_utf8_lossy(tail).into_owned())
+}
+
+fn redact_log_tail(value: &str, limit: usize) -> String {
+    let complete = value.rsplit_once('\n').map_or("", |(lines, _)| lines);
+    let mut lines = Vec::new();
+    let mut remaining = limit;
+    for line in complete.lines().rev() {
+        let mut rendered = redact(line, usize::MAX);
+        rendered.push('\n');
+        if rendered.len() > remaining {
+            break;
+        }
+        remaining -= rendered.len();
+        lines.push(rendered);
+    }
+    lines.into_iter().rev().collect()
 }
 
 fn redact_lines(value: &str, limit: usize) -> String {
@@ -545,6 +612,181 @@ fn redact_lines(value: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use std::env;
+
+    fn exported_rpc_sections(service: &DiagnosticsService) -> (String, String) {
+        let exported = service.export().unwrap();
+        let text = fs::read_to_string(exported["path"].as_str().unwrap()).unwrap();
+        assert_eq!(exported["sizeBytes"].as_u64().unwrap(), text.len() as u64);
+        let (_, logs) = text.split_once("Previous run\n------------\n").unwrap();
+        let (previous, current) = logs.split_once("\n\nCurrent run\n-----------\n").unwrap();
+        (previous.to_owned(), current.to_owned())
+    }
+
+    #[test]
+    fn diagnostics_export_preserves_newest_entries_in_both_oversized_rpc_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        let history = "1 [rpc] old: historical entry\n".repeat(80_000);
+        fs::write(&service.current_path, &history).unwrap();
+        fs::write(
+            &service.previous_path,
+            format!("{history}2 [streamer] prepare: previous incident\n"),
+        )
+        .unwrap();
+        service.record("streamer", "prepare", "latest incident");
+        let newest = fs::read_to_string(&service.current_path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned();
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        assert!(
+            current.ends_with(&format!("{newest}\n")),
+            "newest current entry missing"
+        );
+        assert!(previous.ends_with("2 [streamer] prepare: previous incident\n"));
+        assert!(current.len() <= 900_000);
+        assert!(previous.len() <= 500_000);
+    }
+
+    #[test]
+    fn diagnostics_export_preserves_newest_rpc_entries_when_redaction_expands() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        let newest = "9 [streamer] prepare: incident-é token=x https://example.com user@example.com /home/alice/file\n";
+        for (path, limit) in [
+            (&service.current_path, 900_000),
+            (&service.previous_path, 500_000),
+        ] {
+            fs::write(path, format!("{}{newest}", "@\n".repeat(limit / 2))).unwrap();
+        }
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        for (section, limit) in [(current, 900_000), (previous, 500_000)] {
+            assert!(section.ends_with(
+                "9 [streamer] prepare: incident-é [redacted] [redacted] [redacted] [redacted]\n"
+            ));
+            assert!(section.len() <= limit);
+            assert!(section.starts_with("[redacted]\n"));
+            assert!(!section.contains('…'));
+            for sensitive in ["token=x", "example.com", "alice", "@"] {
+                assert!(!section.contains(sensitive));
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_export_keeps_small_rpc_logs_redacted_and_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        let log =
+            "1 [rpc] first: café\n2 [rpc] last: token=x user@example.com C:\\Users\\Alice\\file\n";
+        fs::write(&service.current_path, log).unwrap();
+        fs::write(&service.previous_path, log).unwrap();
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        let expected = "1 [rpc] first: café\n2 [rpc] last: [redacted] [redacted] [redacted]\n";
+        assert_eq!(current, expected);
+        assert_eq!(previous, expected);
+    }
+
+    #[test]
+    fn diagnostics_export_drops_rpc_tail_fragments_without_corrupting_utf8() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        for (path, limit) in [
+            (&service.current_path, 900_000),
+            (&service.previous_path, 500_000),
+        ] {
+            let log = format!(
+                "discarded-fragment {}\n7 [rpc] complete: café 🎮\n8 [rpc] partial: unfinished",
+                "é".repeat(limit / 2)
+            );
+            let start = log.len() - limit;
+            assert!(!log.is_char_boundary(start));
+            fs::write(path, log).unwrap();
+        }
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        assert_eq!(current, "7 [rpc] complete: café 🎮\n");
+        assert_eq!(previous, current);
+    }
+
+    #[test]
+    fn diagnostics_export_keeps_rpc_lines_at_the_exact_tail_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        let first = "2 [rpc] boundary: first retained\n";
+        let last = "3 [rpc] incident: newest\n";
+        for (path, limit) in [
+            (&service.current_path, 900_000),
+            (&service.previous_path, 500_000),
+        ] {
+            let tail = format!(
+                "{first}{}\n{last}",
+                "x".repeat(limit - first.len() - last.len() - 1)
+            );
+            assert_eq!(tail.len(), limit);
+            fs::write(path, format!("1 [rpc] discarded: old\n{tail}")).unwrap();
+        }
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        for (section, limit) in [(current, 900_000), (previous, 500_000)] {
+            assert!(section.starts_with(first));
+            assert!(section.ends_with(last));
+            assert_eq!(section.len(), limit);
+            assert_eq!(section.lines().count(), 3);
+        }
+    }
+
+    #[test]
+    fn diagnostics_export_does_not_truncate_an_oversized_rpc_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        for (path, limit) in [
+            (&service.current_path, 900_000),
+            (&service.previous_path, 500_000),
+        ] {
+            fs::write(path, format!("{}\n", "é".repeat(limit))).unwrap();
+        }
+
+        let (previous, current) = exported_rpc_sections(&service);
+
+        assert!(current.is_empty());
+        assert!(previous.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_export_keeps_structured_runtime_prefix_budgeting() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DiagnosticsService::new(directory.path()).unwrap();
+        let entries = [
+            vec!["early-runtime-entry"; 20_000],
+            vec!["late-runtime-entry"],
+        ]
+        .concat();
+        let runtime = json!({"entries": entries});
+        let rendered = serde_json::to_string_pretty(&runtime).unwrap();
+        assert!(rendered.len() > 200_000);
+
+        let exported = service.export_with_runtime(Some(&runtime)).unwrap();
+        let text = fs::read_to_string(exported["path"].as_str().unwrap()).unwrap();
+        let (_, section) = text
+            .split_once("Structured runtime snapshot\n---------------------------\n")
+            .unwrap();
+
+        assert_eq!(section, format!("{}\n", redact_lines(&rendered, 200_000)));
+        assert!(section.contains("early-runtime-entry"));
+        assert!(!section.contains("late-runtime-entry"));
+        assert!(section.len() <= 200_001);
+    }
 
     #[test]
     fn diagnostics_rotate_during_a_session_and_replace_the_previous_log() {
@@ -803,6 +1045,27 @@ mod tests {
         assert!(!rendered.contains("private-luid"));
         assert!(!rendered.contains("alice"));
         assert!(!rendered.contains("private-codec"));
+    }
+
+    #[test]
+    fn stream_endpoint_evidence_excludes_endpoint_and_credential_values() {
+        let descriptor = json!({"usage":"14","appLevelProtocol":6,"protocol":1,"port":48322,
+            "ip":"private-host", "resourcePath":"rtsps://user:private-password@private-host:48322/private-path?token=private-token"});
+        let evidence = stream_endpoint_evidence(
+            &json!({"sessionId":"private-session", "transportMode":"webrtc",
+            "signalingUrl":"wss://private-host/nvst/?token=private-token", "connectionInfo":vec![descriptor; 20]}),
+        );
+        assert_eq!(evidence["connectionCount"], 20);
+        assert_eq!(evidence["connections"].as_array().unwrap().len(), 16);
+        assert_eq!(evidence["connections"][0]["resourceKind"], "rtsps");
+        assert_eq!(evidence["connections"][0]["appLevelProtocol"], 6);
+        assert_eq!(evidence["connections"][0]["usage"], 14);
+        assert_eq!(evidence["signalingPort"], 443);
+        assert!(!evidence.to_string().contains("private"));
+        let invalid = stream_endpoint_evidence(&json!({"transportMode":"private-token",
+            "connectionInfo":[{"usage":"private-token","port":99999999,"resourcePath":"private-token"}]}));
+        assert_eq!(invalid["connections"][0]["port"], Value::Null);
+        assert!(!invalid.to_string().contains("private"));
     }
 
     #[test]

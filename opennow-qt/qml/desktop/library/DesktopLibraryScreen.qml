@@ -28,8 +28,7 @@ FocusScope {
         return (game.availableStores || []).join(" ").toLocaleLowerCase()
     }
     function hasRtx(game) {
-        const blob = ((game.genres || []).join(" ") + " " + String(game.title || "") + " " + String(game.nvidiaTech || "")).toLocaleLowerCase()
-        return blob.indexOf("rtx") >= 0 || blob.indexOf("ray tracing") >= 0
+        return DesktopTokens.gameFeatures(game).indexOf("rtx") >= 0
     }
     function hasController(game) {
         const controls = (game.supportedControls || []).join(" ").toLocaleLowerCase()
@@ -281,6 +280,47 @@ FocusScope {
                 }
                 onClicked: root.activeFilter = modelData.key
             }
+        }
+        Button {
+            objectName: "libraryIconGuide"
+            height: 40
+            implicitHeight: 40
+            implicitWidth: guideRow.implicitWidth + 28
+            padding: 0
+            focusPolicy: Qt.NoFocus
+            hoverEnabled: true
+            background: Rectangle {
+                radius: 11
+                color: parent.hovered ? "#0FFFFFFF" : "transparent"
+                border.width: 1
+                border.color: DesktopTokens.seam
+            }
+            contentItem: Item {
+                implicitWidth: guideRow.implicitWidth
+                implicitHeight: 40
+                Row {
+                    id: guideRow
+                    anchors.centerIn: parent
+                    spacing: 8
+                    Image {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: !Theme.lightMode
+                        width: 14
+                        height: 14
+                        source: "qrc:/qt/qml/OpenNOW/res/icons/desktop-info.svg"
+                        sourceSize: Qt.size(32, 32)
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Icon guide")
+                        color: Theme.focus
+                        font.family: DesktopTokens.bodyFont
+                        font.pixelSize: 14
+                        font.weight: Font.Bold
+                    }
+                }
+            }
+            onClicked: AppController.showOverlay("desktop-icon-guide")
         }
     }
     Text {

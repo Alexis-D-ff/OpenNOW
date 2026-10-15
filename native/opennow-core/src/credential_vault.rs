@@ -24,6 +24,12 @@ pub struct SavedIdentity {
     avatar_url: Option<String>,
     membership_tier: String,
     provider_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_idp_id: Option<String>,
+    #[serde(default)]
+    needs_sign_in: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -162,6 +168,11 @@ impl CredentialVault {
             avatar_url: session.user.avatar_url.clone(),
             membership_tier: session.user.membership_tier.clone(),
             provider_code: session.provider.code.clone(),
+            provider_name: Some(session.provider.display_name.clone())
+                .filter(|name| !name.trim().is_empty()),
+            provider_idp_id: Some(session.provider.idp_id.clone())
+                .filter(|idp_id| !idp_id.is_empty()),
+            needs_sign_in: false,
         };
         if let Some(existing) = metadata
             .accounts
@@ -425,6 +436,23 @@ impl CredentialVault {
             .into_iter()
             .map(|identity| serde_json::to_value(identity).map_err(|error| error.to_string()))
             .collect()
+    }
+
+    pub fn mark_needs_sign_in(&self, user_id: &str) -> Result<(), String> {
+        let mut metadata = self.read_metadata()?;
+        let Some(identity) = metadata
+            .accounts
+            .iter_mut()
+            .find(|identity| identity.user_id == user_id)
+        else {
+            return Ok(());
+        };
+        if identity.needs_sign_in {
+            return Ok(());
+        }
+        identity.needs_sign_in = true;
+        self.write_metadata(&metadata)
+            .map_err(|error| error.to_string())
     }
 
     pub fn set_active(&self, user_id: &str) -> Result<(), String> {
@@ -1062,7 +1090,42 @@ mod tests {
             avatar_url: None,
             membership_tier: "FREE".to_owned(),
             provider_code: "NVIDIA".to_owned(),
+            provider_name: None,
+            provider_idp_id: None,
+            needs_sign_in: false,
         }
+    }
+
+    #[test]
+    fn expired_flag_persists_until_the_account_signs_in_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = CredentialVault::memory(directory.path().into());
+        vault.save(&sample_session("expired-user")).unwrap();
+        let saved = &vault.list().unwrap()[0];
+        assert_eq!(saved["needsSignIn"], false);
+        assert_eq!(saved["providerName"], "NVIDIA");
+        assert_eq!(saved["providerIdpId"], "idp");
+        vault.mark_needs_sign_in("expired-user").unwrap();
+        vault.mark_needs_sign_in("unknown-user").unwrap();
+        let reopened = CredentialVault::memory(directory.path().into());
+        assert_eq!(reopened.list().unwrap()[0]["needsSignIn"], true);
+        vault.save(&sample_session("expired-user")).unwrap();
+        assert_eq!(vault.list().unwrap()[0]["needsSignIn"], false);
+    }
+
+    #[test]
+    fn metadata_saved_before_provider_names_still_loads() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("accounts.json"),
+            br#"{"activeUserId":"old","accounts":[{"userId":"old","displayName":"Old","email":null,"avatarUrl":null,"membershipTier":"ULTIMATE","providerCode":"BPC"}]}"#,
+        )
+        .unwrap();
+        let vault = CredentialVault::memory(directory.path().into());
+        let account = &vault.list().unwrap()[0];
+        assert_eq!(account["providerCode"], "BPC");
+        assert!(account.get("providerName").is_none());
+        assert_eq!(account["needsSignIn"], false);
     }
 
     #[test]

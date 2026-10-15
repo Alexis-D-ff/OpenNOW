@@ -486,6 +486,260 @@ fn launch_metadata() -> Vec<(u16, Value)> {
 }
 
 #[test]
+fn create_uses_the_launched_variant_hdr_metadata_without_saving_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store =
+        crate::settings::SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+    store.set("enableHdr", json!(true)).unwrap();
+    store.set("webrtcCompatibilityMode", json!("off")).unwrap();
+    let saved = store.all();
+    let capabilities = json!({"protocolVersion":7,"nativeHdrSupported":true,"videoBackends":[{
+        "backend":"d3d11","available":true,"codecs":[{"codec":"h265","available":true,
+            "hdrSupported":true,"colorQualities":["8bit_420","10bit_420"],
+            "hdrColorQualities":["10bit_420"]}]
+    }]});
+    for (features, expected_mode, expected_downgrade) in [
+        (
+            json!([{"key":"RTX_ENABLED","value":"true"}]),
+            0,
+            json!("game-unsupported"),
+        ),
+        (
+            json!([{"key":"SUPPORTED_HDR_VERSION","values":["HDR"]}]),
+            1,
+            Value::Null,
+        ),
+        (Value::Null, 1, Value::Null),
+    ] {
+        let mut responses = launch_metadata();
+        responses[1].1["data"]["apps"]["items"][0]["variants"][0]["gfn"]["features"] = features;
+        responses.push((
+            200,
+            json!({"requestStatus":{"statusCode":1},"session":{"sessionId":"hdr-seat","status":1}}),
+        ));
+        let (url, worker) = mock_requests(responses, move |index, request| {
+            if index == 6 {
+                let body: Value =
+                    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                assert_eq!(body["sessionRequestData"]["sdrHdrMode"], expected_mode);
+                assert_eq!(
+                    body["sessionRequestData"]["clientRequestMonitorSettings"][0]["sdrHdrMode"],
+                    expected_mode
+                );
+            }
+        });
+        let (mut service, path) = service(&url);
+        service
+            .cloudmatch
+            .set_test_control_base(url::Url::parse(&url).unwrap());
+        let mut params = launch_params("123");
+        params["runtimeCapabilities"] = capabilities.clone();
+        let settings =
+            crate::cloudmatch::allocation_settings(&store.all(), &auth_fixture("account-a"));
+        let created = service
+            .create_session(&params, &settings, |settings| {
+                crate::streamer::StreamerService::embedded_session_settings(settings, &capabilities)
+                    .map_err(|error| ServiceError {
+                        code: error.code,
+                        message: error.message,
+                    })
+            })
+            .unwrap();
+        assert_eq!(created["session"]["hdrDowngrade"], expected_downgrade);
+        assert_eq!(created["session"]["catalogAppId"], "launch-fixture");
+        assert_eq!(created["session"]["appId"], "123");
+        assert_eq!(
+            service.cloudmatch.active()["session"]["catalogAppId"],
+            "launch-fixture"
+        );
+        assert_eq!(
+            service.cloudmatch.active()["session"]["hdrDowngrade"],
+            expected_downgrade
+        );
+        worker.join().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    assert_eq!(store.all(), saved);
+    assert_eq!(
+        crate::settings::SettingsStore::load(Some(directory.path().to_owned()))
+            .unwrap()
+            .all(),
+        saved
+    );
+}
+
+#[test]
+fn native_session_end_releases_owned_seat_before_next_allocation() {
+    let mut responses = launch_metadata();
+    responses.push((
+        200,
+        json!({"requestStatus":{"statusCode":1},"session":{
+            "sessionId":"replacement-seat","status":1
+        }}),
+    ));
+    let (url, worker) = mock_requests(responses, |index, request| {
+        if index == 6 {
+            assert!(request.starts_with("POST /v2/session?"), "{request}");
+        }
+        assert!(!request.starts_with("DELETE "));
+    });
+    let (mut service, path) = service(&url);
+    service
+        .cloudmatch
+        .set_test_control_base(url::Url::parse(&url).unwrap());
+    let seat = json!({"sessionId":"ended-seat","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(auth_fixture("account-a"), 7, &seat, None).unwrap());
+    let notification = json!({"sessionId":"ended-seat","ownerScope":{
+        "userId":"account-a","providerIdpId":DEFAULT_IDP_ID,"generation":7
+    }});
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    assert!(
+        service
+            .session_routing
+            .lock()
+            .unwrap()
+            .active_owner
+            .is_none()
+    );
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        false
+    );
+    let created = service
+        .create_session(&launch_params("123"), &json!({}), |settings| {
+            Ok(settings.clone())
+        })
+        .unwrap();
+    assert_eq!(created["session"]["sessionId"], "replacement-seat");
+    service
+        .finish_session_create("replacement-seat", true)
+        .unwrap();
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        false
+    );
+    assert_eq!(
+        service.cloudmatch.active()["session"]["sessionId"],
+        "replacement-seat"
+    );
+    worker.join().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn native_session_end_clears_the_same_seat_after_control_generation_changes() {
+    let (service, path) = service("http://127.0.0.1:1");
+    let seat = json!({"sessionId":"seat-a","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(auth_fixture("account-a"), 7, &seat, None).unwrap());
+    let old_snapshot = service.active_session().unwrap()["session"].clone();
+    service.state.lock().unwrap().generation = 8;
+    let restored = service
+        .reconcile_active_session(&reconciliation_hint(), &json!({}))
+        .unwrap();
+    assert_eq!(restored["session"]["ownerScope"]["generation"], 8);
+    assert_eq!(old_snapshot["ownerScope"]["generation"], 7);
+    let notification =
+        json!({"sessionId":old_snapshot["sessionId"],"ownerScope":old_snapshot["ownerScope"]});
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    assert!(
+        service
+            .session_routing
+            .lock()
+            .unwrap()
+            .active_owner
+            .is_none()
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn native_session_end_rejects_stale_owners_and_preserves_pending_handoffs() {
+    let (service, path) = service("http://127.0.0.1:1");
+    let mut owner = auth_fixture("account-a");
+    owner.tokens.expires_at = 0;
+    owner.tokens.id_token_expires_at = Some(0);
+    let seat = json!({"sessionId":"ended-seat","status":3});
+    service.cloudmatch.seed_owned_session(seat.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(owner, 7, &seat, None).unwrap());
+    let notification = json!({"sessionId":"ended-seat","ownerScope":{
+        "userId":"account-a","providerIdpId":DEFAULT_IDP_ID,"generation":7
+    }});
+    for (key, value) in [
+        ("userId", json!("other")),
+        ("providerIdpId", json!("other")),
+    ] {
+        let mut stale = notification.clone();
+        stale["ownerScope"][key] = value;
+        assert_eq!(
+            service.acknowledge_session_end(&stale).unwrap()["cleared"],
+            false
+        );
+        assert_eq!(
+            service.cloudmatch.active()["session"]["sessionId"],
+            "ended-seat"
+        );
+    }
+    for invalid in [
+        json!({}),
+        json!({"sessionId":"ended-seat"}),
+        json!({"sessionId":"","ownerScope":notification["ownerScope"]}),
+        json!({"sessionId":"ended-seat","ownerScope":{"userId":"account-a","providerIdpId":""}}),
+    ] {
+        assert_eq!(
+            service.acknowledge_session_end(&invalid).unwrap_err().code,
+            "invalid_params"
+        );
+    }
+    service
+        .session_routing
+        .lock()
+        .unwrap()
+        .active_owner
+        .as_mut()
+        .unwrap()
+        .allocation_generation = Some(7);
+    assert_eq!(
+        service
+            .acknowledge_session_end(&notification)
+            .unwrap_err()
+            .code,
+        "session_update_busy"
+    );
+    assert_eq!(
+        service.cloudmatch.active()["session"]["sessionId"],
+        "ended-seat"
+    );
+    service
+        .session_routing
+        .lock()
+        .unwrap()
+        .active_owner
+        .as_mut()
+        .unwrap()
+        .allocation_generation = None;
+    service.state.lock().unwrap().session = None;
+    assert_eq!(
+        service.acknowledge_session_end(&notification).unwrap()["cleared"],
+        true
+    );
+    assert!(service.cloudmatch.active()["session"].is_null());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn owned_ad_reports_preserve_event_fields_without_accepting_foreign_session_routing() {
     let response =
         json!({"requestStatus":{"statusCode":1},"session":{"sessionId":"seat-a","status":2}});
@@ -565,7 +819,9 @@ fn reject_concurrent_create_during(discovery: bool) {
     std::thread::scope(|threads| {
         let first = threads.spawn(|| {
             crate::requests::scope(permit.token.clone(), || {
-                service.create_session(&launch_params("123"), &json!({}))
+                service.create_session(&launch_params("123"), &json!({}), |settings| {
+                    Ok(settings.clone())
+                })
             })
         });
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -573,7 +829,11 @@ fn reject_concurrent_create_during(discovery: bool) {
         let service = &service;
         let second = threads.spawn(move || {
             result_tx
-                .send(service.create_session(&launch_params("456"), &json!({})))
+                .send(
+                    service.create_session(&launch_params("456"), &json!({}), |settings| {
+                        Ok(settings.clone())
+                    }),
+                )
                 .unwrap()
         });
         let rejected = result_rx.recv_timeout(Duration::from_secs(1));
@@ -1334,6 +1594,48 @@ fn preparation_uses_owned_context_and_rejects_old_generations_or_other_seats() {
 }
 
 #[test]
+fn alliance_webrtc_preparation_uses_only_the_owned_transport_and_endpoint() {
+    let (service, path) = service("http://127.0.0.1:1");
+    let mut owner = auth_fixture("account-a");
+    owner.provider.idp_id = "alliance-provider".into();
+    owner.provider.code = "ALLIANCE".into();
+    service.state.lock().unwrap().session = Some(owner.clone());
+    let owned = json!({"sessionId":"seat-a","status":3,"transportMode":"webrtc",
+        "signalingUrl":"wss://owned.nvidiagrid.net/nvst/",
+        "connectionInfo":[{"usage":14,"appLevelProtocol":4,"ip":"owned.nvidiagrid.net","port":443,"resourcePath":"/nvst/"}]});
+    service.cloudmatch.seed_owned_session(owned.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(owner.clone(), 7, &owned, None).unwrap());
+    let forged = json!({"session":{"sessionId":"seat-a","transportMode":"nvst","signalingUrl":"wss://evil.invalid/"}});
+    let prepared = service
+        .prepare_owned_stream(&forged, |params| Ok(params.clone()))
+        .unwrap();
+    assert_eq!(prepared["session"]["transportMode"], "webrtc");
+    assert_eq!(prepared["session"]["signalingUrl"], owned["signalingUrl"]);
+    let mut missing = owned.clone();
+    missing["connectionInfo"] = json!([{ "usage":2,"ip":"owned.nvidiagrid.net","port":322 }]);
+    service.cloudmatch.seed_owned_session(missing);
+    assert_eq!(
+        service
+            .prepare_owned_stream(&forged, |_| panic!("invalid endpoint prepared"))
+            .unwrap_err()
+            .code,
+        "session_endpoint_missing"
+    );
+    service.cloudmatch.seed_owned_session(owned.clone());
+    owner.provider = LoginProvider::default_nvidia();
+    service.state.lock().unwrap().session = Some(owner.clone());
+    service.session_routing.lock().unwrap().active_owner =
+        Some(ActiveSeatOwner::capture(owner, 7, &owned, None).unwrap());
+    let prepared = service
+        .prepare_owned_stream(&forged, |params| Ok(params.clone()))
+        .unwrap();
+    assert_eq!(prepared["session"]["transportMode"], "webrtc");
+    assert_eq!(prepared["session"]["signalingUrl"], owned["signalingUrl"]);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[test]
 fn original_identity_regains_each_exact_seat_operation_after_generation_changes() {
     for transition in ["switch-back", "clear-cache", "relogin"] {
         for operation in ["get", "poll", "prepare", "claim", "ad", "stop"] {
@@ -1484,7 +1786,9 @@ fn durable_seat_republication_does_not_renew_allocation_receipt_authority() {
         .cloudmatch
         .set_test_control_base(url::Url::parse(&url).unwrap());
     service
-        .create_session(&launch_params("123"), &json!({}))
+        .create_session(&launch_params("123"), &json!({}), |settings| {
+            Ok(settings.clone())
+        })
         .unwrap();
     service.clear_cache();
     assert_eq!(service.active_session().unwrap()["scope"]["generation"], 8);
@@ -1666,4 +1970,81 @@ fn digevo_unreachable_discovery_endpoint_falls_back_to_latam_west() {
         effective_provider_url_with(&current, |_| false),
         "https://latam-west.dig.geforcenow.nvidiagrid.net/"
     );
+}
+
+#[test]
+fn only_alliance_server_info_dns_failures_explain_the_home_network_requirement() {
+    struct Unresolved;
+    impl reqwest::dns::Resolve for Unresolved {
+        fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::ready(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such host",
+            )
+            .into())))
+        }
+    }
+    let unresolved = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .dns_resolver(std::sync::Arc::new(Unresolved))
+        .build()
+        .unwrap();
+    let direct = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let refused = format!("http://{}/v2/serverInfo", closed.local_addr().unwrap());
+    drop(closed);
+    let partner = "https://prod.partner.geforcenow.nvidiagrid.net/v2/serverInfo".to_owned();
+    let home_network = "Zain can only be reached from inside its home country and network. Turn off any VPN, proxy or custom DNS (such as 1.1.1.1 or 8.8.8.8) and try again. Details: ";
+    type Read = fn(&GfnService) -> Result<Value, ServiceError>;
+    let reads: [(Read, &str); 4] = [
+        (
+            |service| service.library_catalog(&json!({}), &json!({})),
+            "Server info failed",
+        ),
+        (
+            |service| service.subscription(&json!({})),
+            "Server info failed",
+        ),
+        (
+            |service| service.catalog_favorites(&json!({})),
+            "Store server info failed",
+        ),
+        (
+            |service| service.regions(&json!({})),
+            "Region discovery failed",
+        ),
+    ];
+    for (idp_id, client, server_info, stage, prefix) in [
+        ("zain-idp", &unresolved, &partner, "dns", home_network),
+        (DEFAULT_IDP_ID, &unresolved, &partner, "dns", ""),
+        ("zain-idp", &direct, &refused, "connect", ""),
+    ] {
+        for (read, context) in reads {
+            let (mut service, path) = test_service("http://unused.invalid");
+            service.client = client.clone();
+            service.endpoints.server_info = Some(server_info.clone());
+            let mut session = auth_fixture("account-a");
+            session.provider.idp_id = idp_id.into();
+            session.provider.code = "ZAI".into();
+            session.provider.display_name = "Zain".into();
+            let mut state = service.state.lock().unwrap();
+            state.providers = vec![session.provider.clone()];
+            state.session = Some(session);
+            state.generation = 7;
+            state.restore_attempted = true;
+            drop(state);
+            let error = read(&service).unwrap_err();
+            assert_eq!(error.code, "network_error");
+            assert_eq!(
+                error.message,
+                format!("{prefix}{context}: error sending request ({stage})")
+            );
+            std::fs::remove_dir_all(path).ok();
+        }
+    }
 }

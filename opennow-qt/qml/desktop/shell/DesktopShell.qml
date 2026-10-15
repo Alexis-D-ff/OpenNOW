@@ -11,7 +11,7 @@ FocusScope {
     readonly property int footerHeight: DesktopTokens.px(40)
     property string title: qsTr("Home")
     property string subtitle: qsTr("Your library")
-    property bool searchVisible: route !== "settings" && route.indexOf("settings-") !== 0 && route !== "friends" && route !== "updates"
+    property bool searchVisible: route !== "settings" && route.indexOf("settings-") !== 0 && route !== "friends"
     property string searchText: ""
     readonly property bool railCollapsed: ShellStore.settings.desktopRailCollapsed !== false
     // A pinned sidebar reserves space; only transient hover expansion overlays.
@@ -19,6 +19,18 @@ FocusScope {
     signal routeRequested(string route)
     signal consoleModeRequested()
     signal commandPaletteRequested()
+    signal accountSwitcherClosed()
+    property bool accountSwitcherAllowed: true
+    property bool accountSwitcherOpen: false
+    onAccountSwitcherAllowedChanged: if (!accountSwitcherAllowed) accountSwitcherOpen = false
+    onAccountSwitcherOpenChanged: if (!accountSwitcherOpen) accountSwitcherClosed()
+
+    function openAccountSwitcher() {
+        if (!accountSwitcherAllowed || !ShellStore.signedIn)
+            return
+        sidebar.closeOverlay()
+        accountSwitcherOpen = true
+    }
 
     anchors.fill: parent
     focus: true
@@ -175,8 +187,33 @@ FocusScope {
                 DesktopKeyHint { compact: footer.compactHints; keyText: qsTr("Ctrl K"); shortcut: "Ctrl K"; label: qsTr("Commands") }
                 DesktopKeyHint { compact: footer.compactHints; keyText: "?"; label: qsTr("All shortcuts") }
             }
-            Row { anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(24); anchors.verticalCenter: parent.verticalCenter; spacing: DesktopTokens.px(10)
-                visible: x >= shortcutHints.x + shortcutHints.width + DesktopTokens.px(16)
+            DesktopUpdateChip {
+                id: updateChip
+                anchors.right: sessionStatus.visible ? sessionStatus.left : parent.right
+                anchors.rightMargin: DesktopTokens.px(sessionStatus.visible ? 14 : 24)
+                anchors.verticalCenter: parent.verticalCenter
+                panelOpen: updatePanel.opened
+                onClicked: updatePanel.opened ? updatePanel.close() : updatePanel.open()
+                onVisibleChanged: if (!visible) updatePanel.close()
+                DesktopUpdatePanel {
+                    id: updatePanel
+                    x: updateChip.width - width
+                    y: -height - DesktopTokens.px(8)
+                    onSettingsRequested: root.routeRequested("settings-updates")
+                }
+            }
+            Row { id: sessionStatus; anchors.right: parent.right; anchors.rightMargin: DesktopTokens.px(24); anchors.verticalCenter: parent.verticalCenter; spacing: DesktopTokens.px(10)
+                visible: footer.width - DesktopTokens.px(24) - implicitWidth
+                    - (updateChip.visible ? updateChip.width + DesktopTokens.px(14) : 0)
+                    >= shortcutHints.x + shortcutHints.width + DesktopTokens.px(16)
+                Text {
+                    objectName: "desktopRemainingPlaytime"
+                    visible: text !== ""
+                    text: ShellStore.remainingPlaytimeHours === null ? ""
+                        : qsTr("%1 h playtime left").arg(ShellStore.remainingPlaytimeHours.toFixed(1)).toUpperCase()
+                    color: DesktopTokens.textBody; font.family: DesktopTokens.monoFont; font.pixelSize: DesktopTokens.px(11); font.weight: Font.DemiBold; font.letterSpacing: 0.4
+                }
+                Rectangle { visible: ShellStore.remainingPlaytimeHours !== null; width: 1; height: DesktopTokens.px(16); color: DesktopTokens.seam }
                 Rectangle { width: 8; height: 8; radius: 4; color: DesktopTokens.green }
                 Text { text: root.regionStatusText(); color: DesktopTokens.textBody; font.family: DesktopTokens.monoFont; font.pixelSize: DesktopTokens.px(11); font.weight: Font.DemiBold; font.letterSpacing: 0.4 }
                 Rectangle { width: 1; height: DesktopTokens.px(16); color: DesktopTokens.seam }
@@ -187,12 +224,13 @@ FocusScope {
 
     Rectangle {
         id: railScrim
+        objectName: "desktopRailScrim"
         x: root.contentInset
         width: root.width - root.contentInset
         height: root.height
         z: 20
         color: "transparent"
-        visible: sidebar.overlayOpen
+        visible: sidebar.hoverExpanded
         TapHandler { onTapped: sidebar.closeOverlay() }
     }
 
@@ -209,6 +247,24 @@ FocusScope {
             sidebar.closeOverlay()
             collectionDialog.open()
         }
+        onAccountSwitcherRequested: root.openAccountSwitcher()
+    }
+
+    Shortcut {
+        objectName: "accountSwitcherShortcut"
+        sequence: "Ctrl+Shift+A"
+        context: Qt.WindowShortcut
+        autoRepeat: false
+        enabled: root.accountSwitcherAllowed && ShellStore.signedIn && root.visible
+            && root.route !== "settings-shortcuts"
+        onActivated: root.accountSwitcherOpen ? root.accountSwitcherOpen = false : root.openAccountSwitcher()
+    }
+
+    DesktopAccountSwitcher {
+        anchors.fill: parent
+        z: 60
+        opened: root.accountSwitcherOpen
+        onCloseRequested: root.accountSwitcherOpen = false
     }
 
     DesktopCollectionDialog {

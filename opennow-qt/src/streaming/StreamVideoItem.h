@@ -3,6 +3,7 @@
 #include "streaming/PhysicalKeyMap.h"
 #include "streaming/rendering/StreamVideoRenderCallback.h"
 
+#include <QAbstractNativeEventFilter>
 #include <QQuickItem>
 #include <QCursor>
 #include <QHash>
@@ -168,6 +169,16 @@ protected:
 
 private:
     friend class StreamVideoItemTest;
+    class NativeWindowMoveLoopFilter final : public QAbstractNativeEventFilter
+    {
+    public:
+        explicit NativeWindowMoveLoopFilter(StreamVideoItem &item) : m_item(item) {}
+        bool nativeEventFilter(const QByteArray &eventType, void *message,
+                               qintptr *result) override;
+
+    private:
+        StreamVideoItem &m_item;
+    };
     StreamVideoItem(std::unique_ptr<class MacPointerCapture> pointerCapture,
                     bool usesMacPointerCapture, QQuickItem *parent);
     struct PressedKey {
@@ -180,7 +191,9 @@ private:
     void resetRemoteCursor();
     void setRemoteCursorShape(const QCursor &cursor);
     void updateLocalCursor();
+    void refreshVideoSize();
     void syncCaptureState();
+    void setNativeWindowMoveLoop(bool active);
     void connectFrameSwaps();
     void releaseInput();
     void releaseQtMouseButtons();
@@ -200,6 +213,8 @@ private:
     static QPointer<NativeStreamRuntime> s_nativeRuntime;
 
     QSize m_videoSize;
+    QSize m_requestedVideoSize;
+    QSize m_decodedVideoSize;
     QVariantMap m_shortcutBindings;
     std::shared_ptr<StreamVideoRenderCallback> m_renderCallback;
     QHash<quint32, PressedKey> m_pressedKeys;
@@ -228,6 +243,8 @@ private:
     bool m_relativeMouse = false;
     bool m_rawInputActive = false;
     bool m_cursorConfined = false;
+    bool m_nativeWindowMoveLoop = false;
+    NativeWindowMoveLoopFilter m_nativeWindowMoveLoopFilter{*this};
     bool m_remoteCursorKnown = false;
     bool m_serverCursorComposited = true;
     bool m_remoteCursorVisible = false;

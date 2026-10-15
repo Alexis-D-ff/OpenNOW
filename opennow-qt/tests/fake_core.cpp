@@ -56,6 +56,8 @@ int main(int argc, char **argv)
                       << "\",\"ok\":true,\"result\":{\"protocolVersion\":" << protocolVersion
                       << ",\"capabilities\":[\"settings\",\"catalog.libraryPages.v1\",\"catalog.metadata.v1\",\"account.syncObservation.v1\",\"catalog.languages.v1\",\"nativeStreamer.v7\",\"nativeStreamer.ownedNvstNegotiation\""
                       << (std::getenv("OPENNOW_TEST_NO_QUEUE_CAPABILITY") ? "" : ",\"queue.servers.v1\"")
+                      << (std::getenv("OPENNOW_TEST_NO_ACCOUNT_PICKER_CAPABILITY") ? "" : ",\"auth.accountPicker.v1\"")
+                      << (std::getenv("OPENNOW_TEST_NO_TERMINAL_CLEANUP_CAPABILITY") ? "" : ",\"session.terminalCleanup.v1\"")
                       << "]}}\n" << std::flush;
         } else if (method == "updater.startup.ack") {
             ++startupAcknowledgements;
@@ -82,7 +84,7 @@ int main(int argc, char **argv)
             std::cout << "{\"type\":\"response\",\"id\":\"" << id
                       << "\",\"ok\":true,\"result\":{\"settings\":{\"launchInConsoleMode\":"
                       << (launchInConsoleMode ? "true" : "false")
-                      << ",\"switchToConsoleOnPad\":false,\"reducedMotion\":true,\"appLanguage\":\"system\",\"autoCheckForUpdates\":false}}}\n" << std::flush;
+                      << ",\"switchToConsoleOnPad\":false,\"reducedMotion\":true,\"appLanguage\":\"system\",\"autoCheckForUpdates\":false,\"webrtcCompatibilityMode\":\"auto\"}}}\n" << std::flush;
         } else if (method == "settings.set") {
             const auto consoleModeWrite = line.find("\"key\":\"launchInConsoleMode\"")
                 != std::string::npos;

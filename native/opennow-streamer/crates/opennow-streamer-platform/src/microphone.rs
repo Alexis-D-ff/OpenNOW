@@ -33,6 +33,7 @@ struct PcmFrame {
     samples: [i16; MICROPHONE_FRAME_SAMPLES],
     timestamp: u32,
     captured_at: Instant,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -48,6 +49,7 @@ struct QueueState {
     stopped: bool,
     error: Option<String>,
     last_pcm: Instant,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -69,6 +71,7 @@ impl MicrophoneShared {
                 stopped: false,
                 error: None,
                 last_pcm: Instant::now(),
+                generation: 0,
             }),
             ready: Condvar::new(),
             dropped_pcm: AtomicU64::new(0),
@@ -122,7 +125,7 @@ impl MicrophoneShared {
         }
         let failed = self
             .device_status()
-            .is_some_and(|status| status != SDL_AudioStatus::SDL_AUDIO_PLAYING);
+            .is_some_and(|status| status == SDL_AudioStatus::SDL_AUDIO_PAUSED);
         if failed {
             self.close(Some(
                 "microphone capture device stopped or disconnected".to_owned(),
@@ -148,10 +151,12 @@ impl MicrophoneShared {
             state.pcm.pop_front();
             self.dropped_pcm.fetch_add(1, Ordering::Relaxed);
         }
+        let generation = state.generation;
         state.pcm.push_back(PcmFrame {
             samples: *samples,
             timestamp,
             captured_at,
+            generation,
         });
         self.ready.notify_one();
     }
@@ -182,9 +187,13 @@ impl MicrophoneShared {
         }
     }
 
-    fn push_encoded(&self, frame: EncodedMicrophoneFrame, captured_at: Instant) {
+    fn push_encoded(&self, frame: EncodedMicrophoneFrame, captured_at: Instant, generation: u64) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.stopped {
+            return;
+        }
+        if state.generation != generation {
+            self.dropped_encoded.fetch_add(1, Ordering::Relaxed);
             return;
         }
         if captured_at.elapsed() > MAX_FRAME_AGE {
@@ -198,6 +207,17 @@ impl MicrophoneShared {
         state
             .encoded
             .push_back(EncodedPacket { frame, captured_at });
+    }
+
+    fn flush_for_reopen(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.generation = state.generation.wrapping_add(1);
+        self.dropped_pcm
+            .fetch_add(state.pcm.len() as u64, Ordering::Relaxed);
+        self.dropped_encoded
+            .fetch_add(state.encoded.len() as u64, Ordering::Relaxed);
+        state.pcm.clear();
+        state.encoded.clear();
     }
 }
 
@@ -256,7 +276,7 @@ fn encoder() -> Result<opus::Encoder, String> {
     )
     .map_err(|error| format!("microphone Opus encoder initialization failed: {error}"))?;
     encoder
-        .set_bitrate(opus::Bitrate::Bits(32_000))
+        .set_bitrate(opus::Bitrate::Bits(16_000))
         .map_err(|error| format!("microphone Opus bitrate configuration failed: {error}"))?;
     Ok(encoder)
 }
@@ -271,6 +291,7 @@ fn run_encoder(shared: Arc<MicrophoneShared>, mut encoder: opus::Encoder) {
                     timestamp: frame.timestamp,
                 },
                 frame.captured_at,
+                frame.generation,
             ),
             Err(error) => {
                 shared.close(Some(format!("microphone Opus encoding failed: {error}")));
@@ -281,6 +302,7 @@ fn run_encoder(shared: Arc<MicrophoneShared>, mut encoder: opus::Encoder) {
 }
 
 struct CaptureDevice {
+    id: u32,
     shared: Arc<MicrophoneShared>,
     _callback: Box<UnsafeCell<CaptureCallback>>,
     _audio: sdl2::AudioSubsystem,
@@ -305,7 +327,11 @@ impl CaptureDevice {
         audio: sdl2::AudioSubsystem,
         shared: Arc<MicrophoneShared>,
         origin: Instant,
+        resume: bool,
     ) -> Result<Self, String> {
+        if shared.stopped() {
+            return Err("microphone capture request was cancelled".to_owned());
+        }
         let callback = Box::new(UnsafeCell::new(CaptureCallback::new(Arc::clone(&shared))));
         let desired = sys::SDL_AudioSpec {
             freq: MICROPHONE_SAMPLE_RATE as i32,
@@ -327,16 +353,13 @@ impl CaptureDevice {
                 sdl2::get_error()
             ));
         }
-        *shared
-            .device
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(id);
         unsafe {
             (*callback.get()).timestamp = (origin.elapsed().as_micros()
                 * u128::from(MICROPHONE_SAMPLE_RATE)
                 / 1_000_000) as u32;
         }
         let device = Self {
+            id,
             shared,
             _callback: callback,
             _audio: audio,
@@ -348,6 +371,20 @@ impl CaptureDevice {
             return Err(
                 "microphone device did not provide signed 16-bit mono 48 kHz PCM".to_owned(),
             );
+        }
+        {
+            let mut current = device
+                .shared
+                .device
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if device.shared.stopped() {
+                return Err("microphone capture request was cancelled".to_owned());
+            }
+            if resume {
+                unsafe { sys::SDL_PauseAudioDevice(id, 0) };
+            }
+            *current = Some(id);
         }
         Ok(device)
     }
@@ -370,6 +407,24 @@ impl CaptureDevice {
         self.shared.pause_device();
     }
 
+    fn close(&mut self) {
+        if self.id == 0 {
+            return;
+        }
+        let id = std::mem::replace(&mut self.id, 0);
+        {
+            let mut current = self
+                .shared
+                .device
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *current == Some(id) {
+                *current = None;
+            }
+        }
+        unsafe { sys::SDL_CloseAudioDevice(id) };
+    }
+
     #[cfg(test)]
     fn status(&self) -> SDL_AudioStatus {
         self.shared
@@ -380,14 +435,7 @@ impl CaptureDevice {
 
 impl Drop for CaptureDevice {
     fn drop(&mut self) {
-        let mut device = self
-            .shared
-            .device
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(id) = device.take() {
-            unsafe { sys::SDL_CloseAudioDevice(id) };
-        }
+        self.close();
     }
 }
 
@@ -396,6 +444,9 @@ pub(crate) struct MicrophoneCapture {
     worker: Option<JoinHandle<()>>,
     shared: Arc<MicrophoneShared>,
     _sdl: sdl2::Sdl,
+    origin: Instant,
+    reopen_started: Option<Instant>,
+    next_reopen: Instant,
 }
 
 impl MicrophoneCapture {
@@ -419,7 +470,7 @@ impl MicrophoneCapture {
         let audio = sdl
             .audio()
             .map_err(|error| format!("microphone audio initialization failed: {error}"))?;
-        let device = CaptureDevice::open(audio, Arc::clone(&shared), origin)?;
+        let device = CaptureDevice::open(audio, Arc::clone(&shared), origin, false)?;
         shared
             .state
             .lock()
@@ -435,6 +486,9 @@ impl MicrophoneCapture {
             worker: Some(worker),
             shared: Arc::clone(&shared),
             _sdl: sdl,
+            origin,
+            reopen_started: None,
+            next_reopen: Instant::now(),
         };
         if shared.stopped() {
             return Err("microphone capture request was cancelled".to_owned());
@@ -457,6 +511,41 @@ impl MicrophoneCapture {
         self.shared.poll_device();
         if self.shared.stopped() {
             return;
+        }
+        let now = Instant::now();
+        if self.reopen_started.is_some()
+            || self.shared.device_status() == Some(SDL_AudioStatus::SDL_AUDIO_STOPPED)
+        {
+            self.device.close();
+            let started = *self.reopen_started.get_or_insert_with(|| {
+                self.shared.flush_for_reopen();
+                now
+            });
+            if now >= self.next_reopen {
+                self.next_reopen = now + Duration::from_millis(250);
+                match CaptureDevice::open(
+                    self.device._audio.clone(),
+                    Arc::clone(&self.shared),
+                    self.origin,
+                    true,
+                ) {
+                    Ok(device) => {
+                        self.device = device;
+                        self.shared.flush_for_reopen();
+                        self.shared
+                            .state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .last_pcm = now;
+                        self.reopen_started = None;
+                    }
+                    Err(error) if now.duration_since(started) >= Duration::from_secs(1) => {
+                        self.shared
+                            .close(Some(format!("microphone device recovery failed: {error}")));
+                    }
+                    Err(_) => {}
+                }
+            }
         }
         if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
             self.shared.close(Some(
@@ -660,6 +749,7 @@ mod tests {
                 timestamp: 960,
             },
             Instant::now(),
+            0,
         );
         shared
             .state
@@ -675,6 +765,7 @@ mod tests {
                 timestamp: 48_000,
             },
             Instant::now(),
+            0,
         );
         let receiver = session.receiver();
         assert_eq!(receiver.try_recv().unwrap().unwrap().timestamp, 48_000);
@@ -685,6 +776,7 @@ mod tests {
                 timestamp: 999,
             },
             Instant::now() - Duration::from_secs(1),
+            0,
         );
         assert_eq!(receiver.try_recv(), Ok(None));
         assert_eq!(receiver.status().dropped_encoded_frames, 2);
@@ -762,6 +854,7 @@ mod tests {
                     timestamp,
                 },
                 Instant::now(),
+                0,
             );
         }
         assert_eq!(session.status().dropped_encoded_frames, 2);
@@ -774,6 +867,7 @@ mod tests {
                 timestamp: 999,
             },
             Instant::now(),
+            0,
         );
         shared.push_pcm(&[2; MICROPHONE_FRAME_SAMPLES], 999, Instant::now());
         assert!(!session.status().enabled);
@@ -803,6 +897,114 @@ mod tests {
     }
 
     #[test]
+    fn microphone_encoder_uses_verified_voice_bitrate() {
+        assert_eq!(
+            encoder().unwrap().get_bitrate().unwrap(),
+            opus::Bitrate::Bits(16_000)
+        );
+    }
+
+    #[test]
+    fn reopening_flushes_pcm_encoded_and_in_flight_generations() {
+        let shared = MicrophoneShared::new();
+        shared.push_pcm(&[1; MICROPHONE_FRAME_SAMPLES], 0, Instant::now());
+        let in_flight = shared.pop_pcm().unwrap();
+        shared.push_pcm(&[2; MICROPHONE_FRAME_SAMPLES], 480, Instant::now());
+        shared.push_encoded(
+            EncodedMicrophoneFrame {
+                opus: vec![2],
+                timestamp: 480,
+            },
+            Instant::now(),
+            0,
+        );
+        shared.flush_for_reopen();
+        shared.push_encoded(
+            EncodedMicrophoneFrame {
+                opus: vec![1],
+                timestamp: in_flight.timestamp,
+            },
+            in_flight.captured_at,
+            in_flight.generation,
+        );
+        assert!(shared.state.lock().unwrap().pcm.is_empty());
+        assert!(shared.state.lock().unwrap().encoded.is_empty());
+        assert_eq!(shared.dropped_pcm.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.dropped_encoded.load(Ordering::Relaxed), 2);
+        shared.push_encoded(
+            EncodedMicrophoneFrame {
+                opus: vec![3],
+                timestamp: 960,
+            },
+            Instant::now(),
+            1,
+        );
+        let mut session = MicrophoneSession::from_shared(Arc::clone(&shared));
+        assert_eq!(session.try_recv().unwrap().unwrap().timestamp, 960);
+    }
+
+    #[test]
+    #[ignore = "requires SDL_AUDIODRIVER=dummy and a dedicated test process"]
+    fn dummy_hotplug_reopens_default_capture_without_closing_uplink() {
+        assert_eq!(std::env::var("SDL_AUDIODRIVER").as_deref(), Ok("dummy"));
+        let shared = MicrophoneShared::new();
+        let mut capture =
+            MicrophoneCapture::start("", Arc::clone(&shared), Instant::now()).unwrap();
+        let session = MicrophoneSession::from_shared(Arc::clone(&shared));
+        let first = wait_for_packet(&session.receiver());
+        capture.reopen_started = Some(Instant::now());
+        capture.poll();
+        assert_eq!(shared.state.lock().unwrap().generation, 1);
+        assert!(!shared.stopped());
+        assert!(capture.device.status() == SDL_AudioStatus::SDL_AUDIO_PLAYING);
+        assert_eq!(*shared.device.lock().unwrap(), Some(capture.device.id));
+        let next = wait_for_packet(&session.receiver());
+        assert!(next.timestamp.wrapping_sub(first.timestamp) >= MICROPHONE_FRAME_SAMPLES as u32);
+        let id = capture.device.id;
+        session.receiver().stop();
+        capture.reopen_started = Some(Instant::now());
+        capture.poll();
+        assert!(shared.stopped());
+        assert_eq!(capture.device.id, id);
+        assert_eq!(shared.state.lock().unwrap().generation, 1);
+    }
+
+    #[test]
+    #[ignore = "requires SDL_AUDIODRIVER=dummy and a dedicated test process"]
+    fn dummy_hotplug_retry_budget_fails_only_microphone_when_default_is_busy() {
+        assert_eq!(std::env::var("SDL_AUDIODRIVER").as_deref(), Ok("dummy"));
+        let shared = MicrophoneShared::new();
+        let origin = Instant::now();
+        let mut capture = MicrophoneCapture::start("", Arc::clone(&shared), origin).unwrap();
+        capture.device.close();
+        let blocker = CaptureDevice::open(
+            capture.device._audio.clone(),
+            MicrophoneShared::new(),
+            origin,
+            false,
+        )
+        .unwrap();
+        capture.reopen_started = Some(Instant::now() - Duration::from_secs(2));
+        capture.poll();
+        assert!(shared.stopped());
+        assert!(
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("microphone device recovery failed")
+        );
+        assert_eq!(
+            blocker.status() as u32,
+            SDL_AudioStatus::SDL_AUDIO_PAUSED as u32
+        );
+        assert_eq!(*shared.device.lock().unwrap(), None);
+    }
+
+    #[test]
     fn dropping_session_stops_idle_worker_and_receiver() {
         let shared = MicrophoneShared::new();
         let session = MicrophoneSession::from_shared(Arc::clone(&shared));
@@ -823,6 +1025,7 @@ mod tests {
                 timestamp: 0,
             },
             Instant::now(),
+            0,
         );
         shared.close(Some("device disconnected".to_owned()));
         assert_eq!(session.try_recv(), Err("device disconnected".to_owned()));

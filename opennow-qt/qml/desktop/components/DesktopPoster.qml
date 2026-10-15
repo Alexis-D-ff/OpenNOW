@@ -15,6 +15,7 @@ ItemDelegate {
     readonly property int artHeight: Math.round(artWidth * 198 / 132)
     readonly property bool cardLifted: hovered || activeFocus
     signal contextRequested(real sceneX, real sceneY)
+    Accessible.description: labels.summary
     // Keep focus geometry inside the delegate so GridView clipping never cuts
     // off the top/left ring while the tile scales up.
     width: tileWidth
@@ -34,7 +35,7 @@ ItemDelegate {
             x: root.artGutter; y: root.artGutter; width: root.artWidth; height: root.artHeight
             artwork: DesktopTokens.artworkUrl(root.game, false)
             cornerRadius: 12
-            scrimStart: root.cardLifted || root.showPlay ? 0.48 : 1
+            scrimStart: root.cardLifted || root.showPlay ? 0.3 : 1
             fallbackColor: "#1A2232"
         }
         Rectangle {
@@ -51,6 +52,7 @@ ItemDelegate {
             }
         }
         DesktopPosterOverlay {
+            id: posterOverlay
             x: root.artGutter + 9
             anchors.bottom: art.bottom
             anchors.bottomMargin: 12
@@ -58,12 +60,29 @@ ItemDelegate {
             game: root.game
             visible: root.cardLifted && !root.showTitle
         }
+        DesktopGameLabels {
+            id: labels
+            x: art.x + 8
+            y: art.y + 8
+            width: art.width - 16
+            height: art.height - 16
+            game: root.game
+            liftedBottom: posterOverlay.visible ? posterOverlay.height + 10 : 0
+        }
         Column {
             x: root.artGutter; y: root.artGutter + root.artHeight + 6; width: root.artWidth; spacing: 5
             visible: root.showTitle
             Text { width: parent.width; text: root.game ? String(root.game.title || qsTr("Game")) : qsTr("Game"); color: DesktopTokens.textHigh; elide: Text.ElideRight; font.family: DesktopTokens.bodyFont; font.pixelSize: 12; font.weight: Font.Bold }
             Text { width: parent.width; text: root.game && root.game.price ? String(root.game.price) : qsTr("Available"); color: DesktopTokens.textMuted; elide: Text.ElideRight; font.family: DesktopTokens.monoFont; font.pixelSize: 10; font.weight: Font.DemiBold }
         }
+    }
+    DesktopGameLabelTip {
+        x: root.artGutter
+        y: root.artGutter
+        width: root.artWidth
+        height: root.artHeight
+        game: root.game
+        requested: root.hovered || (root.activeFocus && AppController.inputMode !== "pointer")
     }
     TapHandler {
         acceptedButtons: Qt.RightButton

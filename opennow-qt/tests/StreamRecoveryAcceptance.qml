@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import OpenNOW
 
 QtObject {
@@ -9,15 +10,32 @@ QtObject {
         property bool running: false
         property string lastError: ""
         property var commands: []
-        signal presentationError(string message)
+        signal presentationError(string message, string errorCode)
         signal responseReceived(var response)
         signal eventReceived(var event)
+        signal sessionTimerReceived(int timerType, double secondsLeft, bool active)
         signal callbacksDropped(int count)
         function start() { return true }
         function send(command) { commands = commands.concat([command]); return true }
     }
     property Component statsComponent: Component {
         DesktopStreamStats { width: 1280; height: 720 }
+    }
+    property Component connectingDesktop: Component { DesktopStreamScreen { width: 640; height: 360 } }
+    property Component connectingConsole: Component { StreamScreen { width: 640; height: 360 } }
+    property Component captureDesktop: Component { DesktopStreamScreen { anchors.fill: parent } }
+    property Component captureConsole: Component { StreamScreen { anchors.fill: parent } }
+    property Component captureContainer: Component {
+        Item {
+            id: host
+            property bool desktopMode: false
+            property Component streamComponent
+            transformOrigin: Item.TopLeft
+            ShellViewport {
+                desktopSurfaceActive: host.desktopMode
+                Loader { anchors.fill: parent; sourceComponent: host.streamComponent }
+            }
+        }
     }
     property QtObject client: QtObject {
         property string state: "stopped"
@@ -91,16 +109,21 @@ QtObject {
         check(AppController.route === "accounts" && find(parent, "desktopApp") === unlockDesktop
             && find(parent, "streamSurfaceHost") === unlockSurface,
             "explicit account navigation retains the desktop and native video item")
+        const picker = find(parent, "desktopAccountPicker")
+        check(picker && picker.visible && picker.activeFocus
+            && Math.abs(picker.width - unlockDesktop.width) < 1
+            && Math.abs(picker.height - unlockDesktop.height) < 1,
+            "the account picker fills the locked desktop stream window and owns focus")
+        check(!unlockDesktop.signInVisible && !unlockDesktop.shellVisible && !unlockSurface.inputEnabled
+            && !unlockSurface.captureActive && (ControllerInput.shellCaptureEnabled || ControllerInput.inputSuspended),
+            "account selection owns keyboard, pointer, and controller input instead of gameplay")
+        ShellStore.openPin("unlock", ShellStore.savedAccounts[0])
         const loader = find(parent, "desktopProfileLoader")
         const viewport = find(parent, "desktopProfileViewport")
         check(loader && loader.item && viewport && viewport.scale > 0
             && Math.abs(viewport.width * viewport.scale - unlockDesktop.width) < 1
             && Math.abs(viewport.height * viewport.scale - unlockDesktop.height) < 1,
-            "existing account screens scale to the locked desktop stream window")
-        check(!unlockDesktop.signInVisible && !unlockDesktop.shellVisible && !unlockSurface.inputEnabled
-            && !unlockSurface.captureActive && (ControllerInput.shellCaptureEnabled || ControllerInput.inputSuspended),
-            "account selection owns keyboard, pointer, and controller input instead of gameplay")
-        ShellStore.openPin("unlock", ShellStore.savedAccounts[0])
+            "the PIN screen scales to the locked desktop stream window")
         check(AppController.route === "profile-pin" && loader.item && loader.item.heading.indexOf("Locked player") >= 0
             && find(parent, "streamSurfaceHost") === unlockSurface,
             "the existing PIN screen replaces only the profile loader")
@@ -486,6 +509,56 @@ QtObject {
         }
         ShellStore.savedAccounts = []
     }
+    function checkTerminalSessionCleanup() {
+        client.state = "ready"
+        const owner = {generation:7,userId:"terminal-owner",providerIdpId:"terminal-provider"}
+        ShellStore.activeSession = {sessionId:"terminal-seat",status:3,ownerScope:owner}
+        ShellStore.streamer = {sessionId:"terminal-seat",status:"streaming"}
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamCreateRequestId = ""
+        ShellStore.streamStopRequestId = ""
+        ShellStore.remoteSessionsRequestId = ""
+        ShellStore.sessionClaimRequestId = ""
+        ShellStore.launchInspectRequestId = ""
+        ShellStore.queueLaunchWaitingForSubscription = false
+        ShellStore.finishRemoteSession({source:"nvst-server",code:"server-terminated",
+            sessionId:"terminal-seat",resumable:false})
+        let id = ShellStore.sessionEndRequestId
+        const call = client.calls.find(call => call.id === id)
+        check(id !== "" && call.method === "session.ended"
+            && call.params.sessionId === "terminal-seat" && call.params.ownerScope.generation === 7,
+            "native termination notifies the core with the exact ended seat and owner")
+        check(ShellStore.activeSession === null && ShellStore.streamBusy,
+            "another launch waits for core cleanup even after the UI leaves the stream")
+        client.requestFailed(id, "busy", "Try again")
+        check(ShellStore.pendingSessionEnd !== null && ShellStore.sessionEndRequestId === ""
+            && ShellStore.streamBusy, "a failed acknowledgement retains cleanup ownership")
+        client.state = "stopped"
+        const beforeRestart = client.calls.length
+        ShellStore.sessionEndRetryTimer.triggered()
+        check(client.calls.length === beforeRestart && ShellStore.pendingSessionEnd !== null,
+            "cleanup stays pending while the core is offline")
+        client.state = "ready"
+        check(ShellStore.authSessionRequestId !== "" && ShellStore.activeSessionRequestId !== "",
+            "restarting the core initializes authentication and its local seat lookup")
+        client.responseReceived(ShellStore.authSessionRequestId, {session:null,generation:0})
+        client.responseReceived(ShellStore.activeSessionRequestId,
+            {session:{sessionId:"terminal-seat",status:3,ownerScope:owner}})
+        check(ShellStore.activeSession === null,
+            "a stale startup lookup cannot revive the ended seat during cleanup")
+        ShellStore.sessionEndRetryTimer.triggered()
+        id = ShellStore.sessionEndRequestId
+        check(id !== "" && client.calls[client.calls.length - 1].method === "session.ended",
+            "transient acknowledgement failure retries the same seat")
+        client.responseReceived(id, {sessionId:"terminal-seat",cleared:true})
+        check(ShellStore.pendingSessionEnd === null && ShellStore.sessionEndRequestId === ""
+            && !ShellStore.streamBusy, "core acknowledgement unblocks the next launch")
+        ShellStore.acceptStreamingSession({sessionId:"terminal-seat",status:3,ownerScope:owner})
+        check(ShellStore.activeSession === null,
+            "a late session snapshot cannot revive the natively terminated seat")
+        ShellStore.streamerStopRequestId = ""
+    }
+
     function checkQueuedPollRetries() {
         client.state = "ready"
         const queued = {sessionId:"queue-fixture",status:1,phase:"queued",queuePosition:21,
@@ -583,18 +656,272 @@ QtObject {
         ShellStore.authSession = null
         ShellStore.authGeneration = 0
     }
+    function checkPresentationClassification() {
+        const owner = {generation:3,userId:"present-owner",providerIdpId:"present-provider"}
+        for (const code of ["streamer_presentation_unsupported", "streamer_presentation_failed"]) {
+            const unsupported = code === "streamer_presentation_unsupported"
+            ShellStore.cancelSessionRecovery()
+            ShellStore.streamerRecoveryExhausted = false
+            ShellStore.sessionReconnectAttempts = 0
+            ShellStore.streamerStopRequestId = ""
+            ShellStore.streamerStopExpected = false
+            ShellStore.activeSession = {sessionId:"present-seat",status:3,ownerScope:owner}
+            ShellStore.streamer = {sessionId:"present-seat",status:"streaming"}
+            const commandsBefore = runtime.commands.length
+            const callsBefore = client.calls.length
+            runtime.presentationError("presentation fixture " + code, code)
+            check(ShellStore.streamer.errorCode === code, code + " reaches the streamer snapshot")
+            check(ShellStore.streamerRestartTimer.running === !unsupported,
+                  code + (unsupported ? " must not schedule a transport reconnect"
+                                      : " keeps bounded transport recovery"))
+            check(ShellStore.streamerRecoveryExhausted === unsupported
+                  && (ShellStore.streamState === "error") === unsupported,
+                  code + " terminal state matches its classification")
+            check(ShellStore.sessionReconnectAttempts === 0, code + " consumes no reconnect budget yet")
+            check(!client.calls.slice(callsBefore).some(call => call.method === "session.stop"),
+                  code + " never stops the cloud session")
+            const stops = runtime.commands.slice(commandsBefore).filter(command => command.type === "stop")
+            check(stops.length === (unsupported ? 1 : 0),
+                  code + (unsupported ? " releases the incompatible native presenter once"
+                                      : " leaves stop to the recovery timer"))
+            check(ShellStore.activeSession && ShellStore.activeSession.sessionId === "present-seat",
+                  code + " keeps the seat for retry or confirmed exit")
+            check(ShellStore.lastError === "presentation fixture " + code, code + " keeps the actionable message")
+            ShellStore.streamerRestartTimer.stop()
+        }
+        ShellStore.cancelSessionRecovery()
+        ShellStore.streamerRecoveryExhausted = false
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamerStopExpected = false
+        ShellStore.activeSession = null
+        ShellStore.streamer = {status:"stopped"}
+    }
+    function checkRemoteTerminationReporting() {
+        client.state = "ready"
+        const auth = {user:{userId:"report-owner",displayName:"Report owner"},provider:{idpId:"report-provider"}}
+        const owner = {generation:1,userId:"report-owner",providerIdpId:"report-provider"}
+        ShellStore.authSession = auth
+        ShellStore.authGeneration = 1
+        const consent = value => ShellStore.settings = Object.assign({}, ShellStore.settings, {automaticBugReports:value})
+        consent("enabled")
+        runtime.running = false
+        const timeout = {type:"error", code:"nvst-recovery-exhausted",
+            message:"NVST recovery failed after one attempt: Timeout",
+            termination:{source:"nvst-transport",code:"nvst-recovery-exhausted",resumable:null}}
+        const incidents = since => client.calls.slice(since).filter(call => call.method === "bug_report.incident")
+        const tracked = (since, event) => client.calls.slice(since)
+            .filter(call => call.method === "analytics.track" && call.params.event === event)
+        const ended = since => tracked(since, "session_ended").map(call => call.params.props)
+        const begin = sessionId => {
+            ShellStore.cancelSessionRecovery()
+            ShellStore.streamPollTimer.stop()
+            ShellStore.activeSession = {sessionId:sessionId,status:3,phase:"streaming",appId:"100",ownerScope:owner}
+            ShellStore.streamer = {sessionId:sessionId,status:"streaming",firstFrameLatencyMs:1}
+            ShellStore.streamStartedAtMs = Date.now() - 60000
+            ShellStore.streamState = "streaming"
+            ShellStore.streamerStopExpected = false
+            ShellStore.streamerRecoveryExhausted = false
+            ShellStore.sessionReconnectAttempts = 0
+            ShellStore.coreSessionRestoreId = ""
+            ShellStore.sessionStopIntentId = ""
+            ShellStore.streamerStopRequestId = ""
+            ShellStore.streamerStartRequestId = ""
+            ShellStore.streamerPrepareRequestId = ""
+            ShellStore.streamStopRequestId = ""
+            ShellStore.streamPollRequestId = ""
+            return client.calls.length
+        }
+        const fail = () => {
+            ShellStore.acceptNativeEvent(timeout)
+            ShellStore.acceptNativeEvent({type:"status", status:"stopped", message:timeout.message,
+                termination:timeout.termination})
+            check(ShellStore.streamerRestartTimer.running, "a native timeout schedules bounded recovery")
+        }
+        const discover = () => {
+            ShellStore.streamerRestartTimer.stop()
+            ShellStore.streamerRestartTimer.triggered()
+            check(ShellStore.recoveryDiscoveryRequestId !== "", "recovery reconciles the seat with CloudMatch")
+            return ShellStore.recoveryDiscoveryRequestId
+        }
+        const terminate = sessionId => client.eventReceived("session.changed", {scope:owner,session:null,
+            termination:{source:"cloudmatch-http",httpStatus:404,sessionId:sessionId,resumable:false}})
+
+        for (const termination of [
+            {source:"cloudmatch-http",httpStatus:404,resumable:false},
+            {source:"cloudmatch-session-status",status:7,resumable:false}
+        ]) {
+            const sessionId = "report-terminated-" + termination.source
+            const since = begin(sessionId)
+            fail()
+            const reported = incidents(since)
+            check(reported.length === 1 && reported[0].params.code === "nvst_recovery_exhausted"
+                && tracked(since, "session_error").length === 1,
+                termination.source + " the native failure remains an observable incident")
+            client.responseReceived(discover(), {scope:owner,session:null,
+                termination:Object.assign({sessionId:sessionId}, termination)})
+            terminate(sessionId)
+            const summary = ended(since)
+            check(!ShellStore.activeSession && summary.length === 1 && summary[0].outcome === "remote_ended"
+                && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+                termination.source + " confirmed termination is remote_ended and keeps the initiating code, got "
+                + JSON.stringify(summary))
+        }
+
+        let since = begin("report-unreported")
+        consent("disabled")
+        fail()
+        check(incidents(since).length === 0, "an opted-out failure produces no incident")
+        consent("enabled")
+        terminate("report-unreported")
+        let summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended"
+            && summary[0].error_code === "nvst_recovery_exhausted",
+            "confirmed termination is classified without a reported incident")
+
+        since = begin("report-exhausted")
+        fail()
+        ShellStore.sessionReconnectAttempts = ShellStore.maximumSessionReconnectAttempts
+        ShellStore.streamerRestartTimer.stop()
+        ShellStore.streamerRestartTimer.triggered()
+        check(ShellStore.streamerRecoveryExhausted, "recovery exhausts its budget")
+        terminate("report-exhausted")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended"
+            && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+            "a stale exhausted streamer error cannot overwrite the authoritative ending")
+
+        since = begin("report-recovered")
+        fail()
+        client.responseReceived(discover(), {scope:owner,
+            session:{sessionId:"report-recovered",status:3,streamingBaseUrl:"https://example.invalid"}})
+        check(ShellStore.sessionClaimRequestId !== "", "a live seat is reclaimed")
+        client.responseReceived(ShellStore.sessionClaimRequestId,
+            {session:{sessionId:"report-recovered",status:3,phase:"resuming",resumePending:true}})
+        ShellStore.streamPollTimer.stop()
+        ShellStore.streamer = {sessionId:"report-recovered",status:"streaming"}
+        ShellStore.acceptNativeEvent({type:"status", event:"first-frame", status:"streaming", backend:"fixture"})
+        terminate("report-recovered")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended" && summary[0].error_code === undefined
+            && incidents(since).length === 1,
+            "a remote end after recovered media keeps the recovered incident but no stale error code")
+
+        since = begin("report-clean")
+        terminate("report-clean")
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "remote_ended" && summary[0].error_code === undefined
+            && incidents(since).length === 0, "a healthy confirmed termination carries no failure")
+
+        since = begin("report-unconfirmed")
+        fail()
+        client.eventReceived("session.changed", {scope:owner,session:null})
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "error"
+            && summary[0].error_code === "nvst_recovery_exhausted" && incidents(since).length === 1,
+            "an unconfirmed session end remains an error")
+
+        since = begin("report-stopped")
+        fail()
+        ShellStore.stopStreamingSession()
+        client.responseReceived(ShellStore.streamStopRequestId, {session:null})
+        summary = ended(since)
+        check(summary.length === 1 && summary[0].outcome === "error" && incidents(since).length === 1,
+            "stopping a failed stream remains an error and ends once")
+
+        ShellStore.streamerRestartTimer.stop()
+        ShellStore.streamerStopRequestId = ""
+        ShellStore.streamerStopExpected = false
+        ShellStore.streamer = {status:"stopped"}
+        ShellStore.acceptStreamingSession(null)
+        ShellStore.streamStartedAtMs = 0
+        ShellStore.authSession = null
+        ShellStore.authGeneration = 0
+    }
+    function checkConnectingPresentation(parent) {
+        const saved = {session:ShellStore.activeSession, streamer:ShellStore.streamer,
+            state:ShellStore.streamState, restarts:ShellStore.streamerRestartAttempts,
+            overlay:AppController.overlay, capture:ShellStore.streamCaptureRect}
+        ShellStore.activeSession = {sessionId:"connecting-fixture", status:3}
+        for (const component of [connectingDesktop, connectingConsole]) {
+            ShellStore.streamerRestartAttempts = 0
+            ShellStore.streamState = "connecting"
+            ShellStore.streamer = {sessionId:"connecting-fixture", status:"connecting", transport:"webrtc"}
+            const view = component.createObject(parent)
+            const surface = find(view, "streamSurfaceHost")
+            check(surface !== null, "connecting view retains its native video item")
+            check(surface.visible, "connecting must expose the video item before its first frame")
+            check(!surface.inputEnabled && !surface.focus, "connecting does not capture gameplay input")
+            if (component === connectingConsole)
+                check(!surface.enabled, "connecting console video must not accept pointer or Tab focus")
+            ShellStore.streamState = "reconnecting"
+            ShellStore.streamerRestartAttempts = 1
+            check(surface.visible && !surface.inputEnabled, "a reconnect also initializes presentation before its first frame")
+            if (component === connectingConsole)
+                check(!surface.enabled, "reconnecting console video must not accept pointer or Tab focus")
+            AppController.showOverlay("desktop-stream-menu")
+            check(surface.visible && !surface.inputEnabled, "a connecting overlay must not hide the video surface")
+            AppController.showOverlay("")
+            ShellStore.streamerRestartAttempts = 0
+            ShellStore.streamState = "streaming"
+            ShellStore.streamer = {sessionId:"connecting-fixture", status:"streaming", firstFrameLatencyMs:1}
+            check(find(view, "streamSurfaceHost") === surface && surface.visible && surface.enabled && surface.inputEnabled,
+                "first presentation enables input without recreating the video item")
+            AppController.showOverlay("desktop-stream-menu")
+            check(surface.visible && !surface.inputEnabled, "streaming overlays retain presentation but release input")
+            AppController.showOverlay("")
+            ShellStore.streamState = "error"
+            ShellStore.streamer = {sessionId:"connecting-fixture", status:"connecting"}
+            check(!surface.visible, "a terminal shell error cannot expose a stale connecting surface")
+            view.visible = false
+            view.destroy()
+        }
+        ShellStore.activeSession = saved.session
+        ShellStore.streamer = saved.streamer
+        ShellStore.streamState = saved.state
+        ShellStore.streamerRestartAttempts = saved.restarts
+        ShellStore.streamCaptureRect = saved.capture
+        AppController.showOverlay(saved.overlay)
+    }
+
+    function checkCaptureCoordinates(parent) {
+        const saved = ShellStore.streamCaptureRect
+        for (const desktop of [false, true]) {
+            for (const size of [[960,540,1], [1600,900,1], [1280,800,1], [960,540,1.5], [1367,769,1]]) {
+                const view = captureContainer.createObject(parent, {
+                    width:size[0], height:size[1], scale:size[2], x:31, y:27,
+                    desktopMode:desktop, streamComponent:desktop ? captureDesktop : captureConsole
+                })
+                check(view !== null, "capture viewport loads")
+                const window = view.Window.window
+                const rect = ShellStore.streamCaptureRect
+                check(window && rect.x === window.x + 31 && rect.y === window.y + 27,
+                    "capture origin uses window coordinates")
+                check(rect.width === size[0] * size[2] && rect.height === size[1] * size[2],
+                    "capture size uses mapped viewport coordinates: " + desktop + " " + size)
+                view.visible = false
+                view.destroy()
+            }
+        }
+        ShellStore.streamCaptureRect = saved
+    }
+
     function run(parent) {
         client.state = "stopped"
         ShellStore.streamerStartRequestId = "fixture-blocked"
         ShellStore.streamInputPauseRequestId = "fixture-blocked"
+        checkCaptureCoordinates(parent)
+        checkConnectingPresentation(parent)
         // This is another reply for the same seat, not the first session.
         ShellStore.activeSession = {sessionId:"fixture", phase:"ready", status:2}
+        const sessionStartedAt = Date.now() - 600000
+        ShellStore.streamStartedAtMs = sessionStartedAt
         ShellStore.streamerRestartAttempts = 2
         ShellStore.sessionReconnectAttempts = 2
         ShellStore.acceptStreamingSession({sessionId:"fixture", phase:"ready", status:2})
         check(ShellStore.sessionReconnectAttempts === 2, "seat claim must not reset video retries")
-        ShellStore.acceptStreamerSnapshot({sessionId:"fixture", status:"streaming"})
+        ShellStore.acceptStreamerSnapshot({sessionId:"fixture", status:"streaming", sessionStartedAtMs:String(Date.now())})
         check(ShellStore.streamerRestartAttempts === 2, "transport startup must not reset video retries")
+        check(ShellStore.streamStartedAtMs === sessionStartedAt, "native attachment cannot reset cloud-session elapsed time")
         client.state = "ready"
         ShellStore.sessionReconnectAttempts = ShellStore.maximumSessionReconnectAttempts
         for (let i = 0; i < 20; ++i)
@@ -643,6 +970,9 @@ QtObject {
         id = ShellStore.streamPollRequestId
         client.responseReceived(id, {session:{sessionId:"fixture", status:2, phase:"ready", resumePending:false}})
         check(client.calls.some(call => call.method === "streamer.prepare"), "prepare only after ready poll")
+        check(ShellStore.streamStartedAtMs === sessionStartedAt
+            && Number(ShellStore.streamer.sessionStartedAtMs) > sessionStartedAt,
+            "discovery, claim, resume polling, and native restart retain the original session clock")
         ShellStore.cancelSessionRecovery()
         ShellStore.streamer = {status:"stopped"}
         ShellStore.recoverStreamingSession("cancel fixture")
@@ -689,6 +1019,7 @@ QtObject {
         check(stats.cards.every(card => card.key !== "PacketLoss"), "honor hidden metrics")
         stats.destroy()
         checkQueuedPollRetries()
+        checkPresentationClassification()
         checkOwnedTerminations()
         checkActiveTimerExhaustion()
         checkCoreRestartPreservesSession()
@@ -696,6 +1027,8 @@ QtObject {
         checkExitAfterExhaustedRestore()
         checkAuthenticationRecovery()
         checkSavedProfileBootstrap()
+        checkRemoteTerminationReporting()
+        checkTerminalSessionCleanup()
         ShellStore.activeSession = null
         ShellStore.streamer = null
         beginLiveProfileUnlock(parent)

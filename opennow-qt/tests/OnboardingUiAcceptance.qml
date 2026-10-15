@@ -11,7 +11,7 @@ QtObject {
         const screen = acceptance.find(parent, "desktopOnboardingScreen")
         acceptance.check(screen, "UI fixture needs an onboarding step")
         const step = screen.stepIndex
-        screen.goToStep(2)
+        screen.goToStep(screen.steps.indexOf("picture"))
         const picker = acceptance.find(screen, "onboardingResolution")
         acceptance.check(picker && picker.groups.length > 0 && picker.available.length > 1,
             "resolution picker lost the grouped settings choices")
@@ -32,7 +32,7 @@ QtObject {
         picker.selected(original)
         screen.goToStep(step)
         if (Qt.application.arguments.indexOf("--onboarding-resolution-expanded") >= 0) {
-            acceptance.check(step === 2, "expanded resolution capture needs Picture")
+            acceptance.check(screen.step === "picture", "expanded resolution capture needs Picture")
             acceptance.find(screen, "onboardingResolution").expanded = true
         }
         return true
@@ -44,12 +44,19 @@ QtObject {
         const scroll = acceptance.find(screen, "onboardingScroll")
         const body = acceptance.find(screen, "onboardingPageBody")
         const point = scroll.mapToItem(screen, 0, 0)
-        const railWidth = screen.compact ? 0 : DesktopTokens.px(236)
-        acceptance.check(Math.abs((point.x - railWidth) - (screen.width - point.x - scroll.width)) <= 1,
+        acceptance.check(Math.abs(point.x - (screen.width - point.x - scroll.width)) <= 1,
             "onboarding page has unequal horizontal gutters")
+        acceptance.check(Math.abs(body.x - (scroll.width - body.x - body.width)) <= 1,
+            "onboarding content column is not horizontally centered")
         if (body.height + 2 * scroll.pageMargin <= scroll.height) {
-            acceptance.check(Math.abs(body.y - (scroll.height - body.height) / 2) <= 1,
-                "short onboarding page is not vertically centered")
+            const centered = (scroll.height - scroll.balance - body.height) / 2
+            acceptance.check(Math.abs(body.y - Math.max(scroll.pageMargin, centered)) <= 1,
+                "short onboarding page is not centered on the window")
+            if (centered >= scroll.pageMargin) {
+                const middle = body.mapToItem(screen, 0, body.height / 2).y
+                acceptance.check(Math.abs(middle - screen.height / 2) <= 1,
+                    "short onboarding page is not centered on the window")
+            }
             acceptance.check(Math.abs(scroll.contentHeight - scroll.height) <= 1,
                 "short onboarding page scrolls unnecessarily")
         } else {

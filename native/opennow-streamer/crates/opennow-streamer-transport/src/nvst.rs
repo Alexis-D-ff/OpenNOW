@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::nvst_audio_jitter::{AudioJitterBuffer, AudioPacket};
 use aes::cipher::{BlockEncrypt, KeyIvInit, StreamCipher};
 use aes::{Aes128, Aes256};
 use crc32fast::hash as crc32;
@@ -27,8 +28,14 @@ use socket2::{Domain, Protocol, Socket, Type};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-use super::nvst_microphone::{MICROPHONE_QUEUE_CAPACITY, MicrophoneQueue};
+use super::nvst_microphone::{
+    MICROPHONE_QUEUE_CAPACITY, MicrophonePacketizer, MicrophoneQueue, MicrophoneRtpConfig,
+};
 use super::nvst_network::is_vpn_interface;
+use super::nvst_server_control::{
+    ControlKeepaliveHealth, FramePacingFeedbackMode, NvstServerTermination, NvstSessionTimer,
+    ServerControlDiagnostics, ServerControlMessage, server_control_messages,
+};
 use str0m::channel::ChannelId;
 use str0m::config::Fingerprint;
 use str0m::format::{Codec, FormatParams};
@@ -36,26 +43,34 @@ use str0m::media::{Frequency, MediaKind, Mid};
 use str0m::net::{Protocol as RtcProtocol, Receive};
 use str0m::rtp::{RtpHeader as BundleRtpHeader, Ssrc};
 use str0m::stats::CandidatePairStats;
-use str0m::{Candidate, Event, IceCreds, Input, Output, Rtc, RtcConfig};
+use str0m::{
+    Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig, RtcError,
+};
 
 use super::frame_stage_timing::FrameStageTimingsAccumulator;
 use super::nvst_bandwidth::{BandwidthEstimator, PacketBandwidthSample};
 use super::nvst_control::{
     DEFAULT_FRAME_TIME_US, FRAME_ACK_PAYLOAD_LEN, FRAME_PACING_INTERVAL, MAX_NACK_PACKET_COUNT,
-    QOS_REPORT_INTERVAL, QosPacketSnapshot, QosReport, frame_ack, frame_pacing_report, idr_request,
-    nack_v2,
+    QOS_REPORT_INTERVAL, QosPacketSnapshot, QosReport, frame_ack, frame_invalidation_range,
+    frame_pacing_report, idr_request, nack_v2,
 };
 use super::nvst_cursor::{CursorCommand, NvstCursorCapture, valid_cursor_channel_message};
 use super::nvst_haptics::NvstHaptics;
 use super::nvst_input::{
-    NvstEncodedInput, NvstInputChannelState, NvstInputChannels, NvstInputCodec, SonyDeviceControl,
-    for_each_sony_output, native_input_type_is_motion, native_input_type_name, native_input_types,
+    GenericHidMessage, NvstEncodedInput, NvstInputChannelState, NvstInputChannels, NvstInputCodec,
+    NvstInputWrite, SonyDeviceControl, for_each_generic_hid_message, for_each_sony_output,
+    generic_hid_command, native_input_type_is_motion, native_input_type_name, native_input_types,
     next_control_keepalive, server_cursor_messages, sony_device_change_command,
     sony_report_command,
 };
+use super::nvst_input_delivery::{NvstInputDelivery, NvstInputDeliveryError};
+pub use super::nvst_invalidation::NvstFrameType;
+use super::nvst_invalidation::{FrameInvalidation, FrameInvalidationFeedback};
 use super::{
     EncodedMediaFrame, MediaConsumer, TransportError, deliver_media_frame, install_crypto,
 };
+use opennow_streamer_hid::generic::{GenericError, GenericOutbound, GenericSession};
+use opennow_streamer_hid::generic_runtime::{GenericIngress, GenericRuntime};
 use opennow_streamer_hid::{
     DRAIN_PER_ITERATION, EndpointToken, HidOutbound, HidRuntime, HidSession, IngressItem,
     SonyCapability,
@@ -85,8 +100,9 @@ const NACK_RETRY_INTERVAL: Duration = Duration::from_millis(4);
 const DEFAULT_NACK_RTT: Duration = Duration::from_millis(30);
 const NACK_TRACKING_TIMEOUT: Duration = Duration::from_millis(52);
 const MAX_NACK_ATTEMPTS: u8 = 3;
-const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
-const MAX_PENDING_NACK_RANGES: usize = 16;
+const RFI_BACKSTOP_TIMEOUT: Duration = Duration::from_millis(250);
+const IDR_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PENDING_NACK_PACKETS: usize = 2048;
 const MAX_PENDING_FRAME_ACKS: usize = 512;
 pub const MAX_CONTROL_REPORT_BYTES: usize = 1_071;
 pub const MIN_CONTROL_REPORT_BYTES: usize = 4 + FRAME_ACK_PAYLOAD_LEN;
@@ -535,12 +551,18 @@ impl ControlReportBatch {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PendingNackRange {
-    first: u64,
-    last: u64,
+struct PendingNack {
     requested_at: Instant,
     last_sent_at: Option<Instant>,
     attempts: u8,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum VideoStartup {
+    #[default]
+    Immediate,
+    WaitingForPlay,
+    PlayComplete(Instant),
 }
 
 const RECENT_NETWORK_MAX_SAMPLE_GAP: Duration = Duration::from_secs(3);
@@ -604,6 +626,8 @@ impl RecentNetworkMetrics {
 
 #[derive(Debug)]
 pub struct NvstFeedbackState {
+    pub(crate) idle_warning_active: AtomicBool,
+    frame_pacing_enabled: AtomicBool,
     pub haptics: crate::NvstHaptics,
     /// Bound video stream SSRC (0 until the first packet is authenticated).
     video_ssrc: AtomicU32,
@@ -614,6 +638,7 @@ pub struct NvstFeedbackState {
     report_prior: Mutex<(u32, u32)>,
     recent_network_metrics: Mutex<RecentNetworkMetrics>,
     bundle_receive_bytes: AtomicU64,
+    authenticated_transport_ready: AtomicBool,
     video_receive_bytes: AtomicU64,
     reception_timing: Mutex<ReceptionTiming>,
     ice_ping: Mutex<Option<(Instant, Duration)>>,
@@ -621,17 +646,22 @@ pub struct NvstFeedbackState {
     bundle_ping: Mutex<Option<(Instant, Duration)>>,
     /// Remains set through send attempts until assembly receives a fresh keyframe.
     keyframe_needed: AtomicBool,
-    pending_nacks: Mutex<VecDeque<PendingNackRange>>,
+    pub(crate) frame_invalidation: FrameInvalidationFeedback,
+    pending_nacks: Mutex<BTreeMap<u64, PendingNack>>,
+    nack_overflows: AtomicU64,
     last_sender_frame: AtomicU32,
     completed_frame_bytes: AtomicU64,
     pending_frame_acks: Mutex<VecDeque<CompletedFrameFeedback>>,
     frame_packet_timings: Mutex<VecDeque<FramePacketTiming>>,
     frame_stage_timings: Mutex<FrameStageTimingsAccumulator>,
+    video_startup: Mutex<VideoStartup>,
 }
 
 impl Default for NvstFeedbackState {
     fn default() -> Self {
         Self {
+            idle_warning_active: AtomicBool::new(false),
+            frame_pacing_enabled: AtomicBool::new(true),
             haptics: crate::NvstHaptics::default(),
             video_ssrc: AtomicU32::new(0),
             highest_sequence: AtomicU32::new(0),
@@ -640,23 +670,100 @@ impl Default for NvstFeedbackState {
             report_prior: Mutex::new((0, 0)),
             recent_network_metrics: Mutex::new(RecentNetworkMetrics::default()),
             bundle_receive_bytes: AtomicU64::new(0),
+            authenticated_transport_ready: AtomicBool::new(false),
             video_receive_bytes: AtomicU64::new(0),
             reception_timing: Mutex::new(ReceptionTiming::default()),
             ice_ping: Mutex::new(None),
             video_ping: Mutex::new(None),
             bundle_ping: Mutex::new(None),
             keyframe_needed: AtomicBool::new(false),
-            pending_nacks: Mutex::new(VecDeque::new()),
+            frame_invalidation: FrameInvalidationFeedback::default(),
+            pending_nacks: Mutex::new(BTreeMap::new()),
+            nack_overflows: AtomicU64::new(0),
             last_sender_frame: AtomicU32::new(0),
             completed_frame_bytes: AtomicU64::new(0),
             pending_frame_acks: Mutex::new(VecDeque::new()),
             frame_packet_timings: Mutex::new(VecDeque::new()),
             frame_stage_timings: Mutex::new(FrameStageTimingsAccumulator::default()),
+            video_startup: Mutex::new(VideoStartup::Immediate),
         }
     }
 }
 
 impl NvstFeedbackState {
+    fn receive_server_control(
+        &self,
+        bytes: &[u8],
+        diagnostics: &mut ServerControlDiagnostics,
+        events: &Sender<NvstReceiveEvent>,
+    ) -> bool {
+        for message in server_control_messages(bytes) {
+            match message {
+                Ok(ServerControlMessage::Timer(timer)) => {
+                    self.idle_warning_active
+                        .store(timer.active, Ordering::Release);
+                    let _ = events.send(NvstReceiveEvent::SessionTimer(timer));
+                }
+                Ok(ServerControlMessage::Termination { wire_code, extra }) => {
+                    self.idle_warning_active.store(false, Ordering::Release);
+                    let _ = events.send(NvstReceiveEvent::ServerTermination(
+                        NvstServerTermination::from_wire(wire_code, extra),
+                    ));
+                    return true;
+                }
+                Ok(ServerControlMessage::FramePacingMode { stream_index, mode }) => {
+                    if stream_index == 0 {
+                        self.frame_pacing_enabled
+                            .store(mode == FramePacingFeedbackMode::Interval, Ordering::Release);
+                    } else {
+                        diagnostics.invalid_stream = diagnostics.invalid_stream.saturating_add(1);
+                    }
+                }
+                Ok(ServerControlMessage::Unhandled) => {}
+                Ok(ServerControlMessage::Unknown(code)) => {
+                    diagnostics.unknown = diagnostics.unknown.saturating_add(1);
+                    diagnostics.last_unknown = Some(code);
+                }
+                Err(_) => diagnostics.malformed = diagnostics.malformed.saturating_add(1),
+            }
+        }
+        false
+    }
+
+    pub fn authenticated_transport_ready(&self) -> bool {
+        self.authenticated_transport_ready.load(Ordering::Acquire)
+            || self.socket_receive_bytes() > 0
+    }
+
+    fn wait_for_play(&self) {
+        *self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = VideoStartup::WaitingForPlay;
+    }
+
+    fn complete_play(&self, now: Instant) {
+        let mut startup = self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*startup, VideoStartup::WaitingForPlay) {
+            *startup = VideoStartup::PlayComplete(now);
+        }
+    }
+
+    fn video_timeout_origin(&self, default: Instant) -> Option<Instant> {
+        match *self
+            .video_startup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            VideoStartup::Immediate => Some(default),
+            VideoStartup::WaitingForPlay => None,
+            VideoStartup::PlayComplete(at) => Some(at.max(default)),
+        }
+    }
+
     fn record_socket_receive(
         &self,
         socket: StreamSocket,
@@ -844,31 +951,27 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(queued) = pending.iter_mut().find(|queued| {
-            first_missing_index <= queued.last.saturating_add(1)
-                && last_missing_index.saturating_add(1) >= queued.first
-        }) {
-            let first = queued.first.min(first_missing_index);
-            let last = queued.last.max(last_missing_index);
-            if first != queued.first || last != queued.last {
-                queued.first = first;
-                queued.last = last;
-                queued.requested_at = now;
-                queued.last_sent_at = None;
-                queued.attempts = 0;
-            }
-            return;
-        }
-        if pending.len() == MAX_PENDING_NACK_RANGES {
-            pending.pop_front();
-        }
-        pending.push_back(PendingNackRange {
-            first: first_missing_index,
-            last: last_missing_index,
-            requested_at: now,
-            last_sent_at: None,
-            attempts: 0,
+        pending.retain(|_, packet| {
+            now.saturating_duration_since(packet.requested_at) < NACK_TRACKING_TIMEOUT
         });
+        for index in first_missing_index..=last_missing_index {
+            if pending.contains_key(&index) {
+                continue;
+            }
+            if pending.len() == MAX_PENDING_NACK_PACKETS {
+                self.nack_overflows.fetch_add(1, Ordering::Relaxed);
+                self.request_keyframe();
+                break;
+            }
+            pending.insert(
+                index,
+                PendingNack {
+                    requested_at: now,
+                    last_sent_at: None,
+                    attempts: 0,
+                },
+            );
+        }
     }
 
     fn resolve_nack(&self, received_index: u64) -> bool {
@@ -876,32 +979,9 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut updated = VecDeque::with_capacity(pending.len().saturating_add(1));
-        let mut resolved = false;
-        while let Some(range) = pending.pop_front() {
-            if received_index < range.first || received_index > range.last {
-                updated.push_back(range);
-                continue;
-            }
-            // A naturally reordered packet can fill the gap before feedback
-            // leaves the client. Remove it either way, but count it as a NACK
-            // recovery only after at least one request was actually sent.
-            resolved |= range.last_sent_at.is_some();
-            if range.first < received_index {
-                updated.push_back(PendingNackRange {
-                    last: received_index - 1,
-                    ..range
-                });
-            }
-            if received_index < range.last {
-                updated.push_back(PendingNackRange {
-                    first: received_index + 1,
-                    ..range
-                });
-            }
-        }
-        *pending = updated;
-        resolved
+        pending
+            .remove(&received_index)
+            .is_some_and(|packet| packet.last_sent_at.is_some())
     }
 
     fn publish_completed_frame(&self, frame: &EncodedVideoAccessUnit) {
@@ -1197,7 +1277,7 @@ impl NvstFeedbackState {
         control_open: bool,
     ) -> (bool, bool) {
         if !self.keyframe_request_pending()
-            || now.saturating_duration_since(last_attempt) < KEYFRAME_REQUEST_COOLDOWN
+            || now.saturating_duration_since(last_attempt) < IDR_RETRY_INTERVAL
         {
             return (false, false);
         }
@@ -1219,39 +1299,26 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pending.retain(|range| {
-            now.saturating_duration_since(range.requested_at) < NACK_TRACKING_TIMEOUT
+        pending.retain(|_, packet| {
+            now.saturating_duration_since(packet.requested_at) < NACK_TRACKING_TIMEOUT
         });
-        let index = pending.iter().position(|range| {
-            range.attempts < max_attempts
-                && range.last_sent_at.is_none_or(|last_sent| {
+        let eligible = |packet: &PendingNack| {
+            packet.attempts < max_attempts
+                && packet.last_sent_at.is_none_or(|last_sent| {
                     now.saturating_duration_since(last_sent) >= retry_interval
                 })
-        })?;
-        let mut range = pending.remove(index)?;
-        let send_last = range.last.min(
-            range
-                .first
-                .saturating_add((MAX_NACK_PACKET_COUNT.saturating_sub(1)) as u64),
-        );
-        if send_last < range.last {
-            pending.insert(
-                index,
-                PendingNackRange {
-                    first: send_last + 1,
-                    last: range.last,
-                    requested_at: range.requested_at,
-                    last_sent_at: None,
-                    attempts: 0,
-                },
-            );
-            range.last = send_last;
+        };
+        let first = *pending.iter().find(|(_, packet)| eligible(packet))?.0;
+        let mut last = first;
+        for (&index, packet) in pending.range_mut(first..).take(MAX_NACK_PACKET_COUNT) {
+            if index > last.saturating_add(1) || !eligible(packet) {
+                break;
+            }
+            packet.last_sent_at = Some(now);
+            packet.attempts = packet.attempts.saturating_add(1);
+            last = index;
         }
-        range.last_sent_at = Some(now);
-        range.attempts = range.attempts.saturating_add(1);
-        let result = (range.first, range.last);
-        pending.insert(index, range);
-        Some(result)
+        Some((first, last))
     }
 
     fn mark_nack_send_failed(&self, first: u64, last: u64) {
@@ -1259,12 +1326,9 @@ impl NvstFeedbackState {
             .pending_nacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(range) = pending
-            .iter_mut()
-            .find(|range| range.first == first && range.last == last)
-        {
-            range.last_sent_at = None;
-            range.attempts = range.attempts.saturating_sub(1);
+        for (_, packet) in pending.range_mut(first..=last) {
+            packet.last_sent_at = None;
+            packet.attempts = packet.attempts.saturating_sub(1);
         }
     }
 
@@ -1285,6 +1349,7 @@ pub type SharedNvstFeedback = Arc<NvstFeedbackState>;
 /// `AEAD_AES_256_GCM`; every SRTP profile requires an explicit `srtpSaltHex`.
 #[derive(Clone)]
 pub struct NvstVideoConfig {
+    pub recovery_policy: crate::NvstRecoveryPolicy,
     client_udp_port: u16,
     video_peer: SocketAddr,
     video_peer_port_end: Option<u16>,
@@ -1306,9 +1371,13 @@ pub struct NvstVideoConfig {
     /// cloud model. When set, video RTP/SRTP arrives on this socket while the
     /// ICE/DTLS bundle socket only carries control/audio keepalive traffic.
     mjolnir_udp_port: Option<u16>,
+    /// GFN unified-socket mode: Mjolnir video SRTP shares the ICE/DTLS bundle socket
+    /// instead of a dedicated video socket, so the bundle demuxes raw video RTP.
+    unified_socket: bool,
     codec: NvstVideoCodec,
     audio_track: Option<NvstAudioTrack>,
     microphone_available: bool,
+    microphone_rtp: MicrophoneRtpConfig,
     expected_payload_type: Option<u8>,
     expected_ssrc: Option<u32>,
     reorder_window_packets: usize,
@@ -1351,6 +1420,7 @@ impl fmt::Debug for NvstVideoConfig {
             .field("max_control_report_bytes", &self.max_control_report_bytes)
             .field("hid_device_mask", &self.hid_device_mask)
             .field("mjolnir_udp_port", &self.mjolnir_udp_port)
+            .field("unified_socket", &self.unified_socket)
             .field("codec", &self.codec)
             .field("audio_track", &self.audio_track)
             .field("expected_payload_type", &self.expected_payload_type)
@@ -1611,16 +1681,7 @@ impl NvstVideoConfig {
             .transpose()?;
         let remote_dtls_fingerprint =
             optional_string(object, "remoteDtlsFingerprint")?.map(str::to_owned);
-        let rtcp_on_sctp = match object.get("rtcpOnSctp") {
-            Some(Value::Bool(value)) => *value,
-            Some(_) => {
-                return Err(NvstConfigError::InvalidFieldType {
-                    field: "rtcpOnSctp",
-                    expected: "boolean",
-                });
-            }
-            None => false,
-        };
+        let rtcp_on_sctp = optional_bool(object, "rtcpOnSctp")?.unwrap_or(false);
         let feedback_version = optional_u8(object, "qosFeedbackVersion")?;
         let timings_version = optional_u8(object, "qosTimingsVersion")?;
         let blob_version = optional_u8(object, "qosBlobStatsVersion")?;
@@ -1656,6 +1717,12 @@ impl NvstVideoConfig {
         if mjolnir_udp_port == Some(0) {
             return Err(NvstConfigError::OutOfRange {
                 field: "mjolnirUdpPort",
+            });
+        }
+        let unified_socket = optional_bool(object, "unifiedSocket")?.unwrap_or(false);
+        if unified_socket && mjolnir_udp_port.is_some() {
+            return Err(NvstConfigError::OutOfRange {
+                field: "unifiedSocket",
             });
         }
         let hid_device_mask = optional_u32(object, "hidDeviceMask")?.unwrap_or(0);
@@ -1719,7 +1786,43 @@ impl NvstVideoConfig {
             == Some(true)
             && remote_dtls_fingerprint.is_some()
             && stun_credentials.is_some();
+        let microphone_rtp = MicrophoneRtpConfig {
+            opus_payload_type: optional_u8(object, "microphoneOpusPayloadType")?
+                .unwrap_or(GFN_OPUS_PAYLOAD_TYPE),
+            red_payload_type: optional_u8(object, "microphoneRedPayloadType")?,
+            redundancy_level: optional_u8(object, "microphoneRedundancyLevel")?.unwrap_or(0),
+        };
+        for (field, payload_type) in [
+            (
+                "microphoneOpusPayloadType",
+                Some(microphone_rtp.opus_payload_type),
+            ),
+            ("microphoneRedPayloadType", microphone_rtp.red_payload_type),
+        ] {
+            if payload_type.is_some_and(|pt| pt > 127 || (64..=95).contains(&pt)) {
+                return Err(NvstConfigError::OutOfRange { field });
+            }
+        }
+        if microphone_rtp.redundancy_level > 3 {
+            return Err(NvstConfigError::OutOfRange {
+                field: "microphoneRedundancyLevel",
+            });
+        }
+        if microphone_rtp.red_payload_type == Some(microphone_rtp.opus_payload_type) {
+            return Err(NvstConfigError::OutOfRange {
+                field: "microphoneRedPayloadType",
+            });
+        }
         Ok(Self {
+            recovery_policy: object
+                .get("recoveryPolicy")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| NvstConfigError::InvalidFieldType {
+                    field: "recoveryPolicy",
+                    expected: "a recovery policy object",
+                })?
+                .unwrap_or_default(),
             client_udp_port,
             video_peer: SocketAddr::new(peer_ip, video_peer_port),
             video_peer_port_end,
@@ -1735,10 +1838,12 @@ impl NvstVideoConfig {
             frame_pacing_feedback,
             max_control_report_bytes,
             mjolnir_udp_port,
+            unified_socket,
             hid_device_mask,
             codec,
             audio_track,
             microphone_available,
+            microphone_rtp,
             expected_payload_type,
             expected_ssrc,
             reorder_window_packets,
@@ -1810,6 +1915,12 @@ impl NvstVideoConfig {
 
     pub fn mjolnir_udp_port(&self) -> Option<u16> {
         self.mjolnir_udp_port
+    }
+
+    /// Unified-socket video is still Mjolnir video: it recovers through the private
+    /// NACK-v2 and control IDR dialect, not bundle RTCP Generic NACK/PLI.
+    fn carries_mjolnir_video(&self) -> bool {
+        self.mjolnir_udp_port.is_some() || self.unified_socket
     }
 }
 
@@ -1955,6 +2066,20 @@ fn optional_u64(
     }
 }
 
+fn optional_bool(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<bool>, NvstConfigError> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(NvstConfigError::InvalidFieldType {
+            field,
+            expected: "boolean",
+        }),
+    }
+}
+
 fn optional_u16(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
@@ -2059,6 +2184,8 @@ pub struct EncodedVideoAccessUnit {
     pub timestamp: u32,
     pub frame_index: u32,
     pub first_stream_packet_index: u32,
+    /// GameStream frame-header frame type; `None` when the stream carries no frame header.
+    pub frame_type: Option<NvstFrameType>,
     pub keyframe: bool,
     pub contiguous: bool,
     pub bytes: Vec<u8>,
@@ -2069,7 +2196,87 @@ pub enum NvstReceiverState {
     Running,
     Paused,
     RecoveryRequired,
-    Stopped,
+    Stopped(NvstStopCause),
+}
+
+/// Why a receiver worker stopped. Carries only operation names and OS error codes, never
+/// endpoints or payloads, so it can reach diagnostics and the reported error message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NvstStopCause {
+    Requested,
+    ControllerClosed,
+    UpstreamGateClosed,
+    MediaConsumerClosed,
+    InputDeliveryFailed,
+    HidOutputBlocked,
+    RandomnessUnavailable,
+    Socket {
+        operation: &'static str,
+        kind: std::io::ErrorKind,
+        os_code: Option<i32>,
+    },
+    WebRtc {
+        operation: &'static str,
+        error: &'static str,
+    },
+}
+
+impl NvstStopCause {
+    fn socket(operation: &'static str, error: &std::io::Error) -> Self {
+        Self::Socket {
+            operation,
+            kind: error.kind(),
+            os_code: error.raw_os_error(),
+        }
+    }
+
+    fn webrtc(operation: &'static str, error: &RtcError) -> Self {
+        let error = match error {
+            RtcError::RemoteSdp(_) | RtcError::Sdp(_) => "sdp",
+            RtcError::Rtp(_) | RtcError::Packet(..) => "rtp",
+            RtcError::Io(_) => "io",
+            RtcError::Dtls(_) => "dtls",
+            RtcError::Net(_) => "net",
+            RtcError::Ice(_) => "ice",
+            RtcError::Sctp(_) => "sctp",
+            _ => "other",
+        };
+        Self::WebRtc { operation, error }
+    }
+}
+
+impl std::fmt::Display for NvstStopCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Requested => formatter.write_str("cause=requested"),
+            Self::ControllerClosed => formatter.write_str("cause=controller-closed"),
+            Self::UpstreamGateClosed => formatter.write_str("cause=upstream-gate-closed"),
+            Self::MediaConsumerClosed => formatter.write_str("cause=media-consumer-closed"),
+            Self::InputDeliveryFailed => formatter.write_str("cause=input-delivery-failed"),
+            Self::HidOutputBlocked => formatter.write_str("cause=hid-output-blocked"),
+            Self::RandomnessUnavailable => formatter.write_str("cause=randomness-unavailable"),
+            Self::Socket {
+                operation,
+                kind,
+                os_code,
+            } => {
+                write!(
+                    formatter,
+                    "cause=socket operation={operation} kind={kind:?}"
+                )?;
+                match os_code {
+                    Some(code) => write!(formatter, " os_code={code}"),
+                    None => formatter.write_str(" os_code=none"),
+                }
+            }
+            Self::WebRtc { operation, error } => {
+                write!(
+                    formatter,
+                    "cause=webrtc operation={operation} error={error}"
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2148,7 +2355,11 @@ pub enum NvstReceiveEvent {
     Frame(EncodedVideoAccessUnit),
     TransportReady(&'static str),
     InputReady(u16),
-    InputUnavailable(String),
+    InputUnavailable(&'static str),
+    UserInput,
+    TextRejected(&'static str),
+    SessionTimer(NvstSessionTimer),
+    ServerTermination(NvstServerTermination),
     MicrophoneError(String),
     Cursor(Vec<u8>),
     CursorCapture(bool),
@@ -2881,6 +3092,27 @@ fn send_pending_nack(
     }
 }
 
+fn send_pending_frame_invalidation(
+    feedback: &NvstFeedbackState,
+    now: Instant,
+    rtc: &mut Rtc,
+    channels: NvstInputChannels,
+) {
+    let Some((first, last)) = feedback.frame_invalidation.take() else {
+        return;
+    };
+    if !channels.send_control(rtc, &frame_invalidation_range(first, last, 0).encoded()) {
+        feedback.frame_invalidation.restore((first, last));
+        return;
+    }
+    feedback.frame_invalidation.record_sent(now);
+    opennow_streamer_protocol::log::log_async(
+        "INFO",
+        "nvst-rfi",
+        &format!("invalidation sent frames={first}..={last}"),
+    );
+}
+
 fn uses_rtcp_video_feedback(mjolnir: bool, rtcp_channel_open: bool) -> bool {
     !mjolnir && rtcp_channel_open
 }
@@ -3029,7 +3261,7 @@ struct VideoAccessUnitAssembler {
     codec: NvstVideoCodec,
     current_frame: Option<u32>,
     first_stream_packet_index: Option<u32>,
-    keyframe_hint: bool,
+    frame_type: Option<NvstFrameType>,
     last_packet_payload_length: Option<usize>,
     expected_access_unit_length: Option<usize>,
     invalid_av1_length_logged: bool,
@@ -3039,13 +3271,31 @@ struct VideoAccessUnitAssembler {
     max_access_unit_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GsFrameHeader {
+    frame_type: NvstFrameType,
+}
+
+impl GsFrameHeader {
+    fn parse(payload: &[u8], header_size: usize) -> Option<Self> {
+        let frame_type = match payload {
+            [0x47, 0x53, _, value, ..] if header_size >= 4 => {
+                NvstFrameType::from_wire(value & 0x0f)
+            }
+            [0x01 | 0x81, _, _, value, ..] if header_size > 0 => NvstFrameType::from_wire(*value),
+            _ => return None,
+        };
+        Some(Self { frame_type })
+    }
+}
+
 impl VideoAccessUnitAssembler {
     fn new(codec: NvstVideoCodec, max_access_unit_bytes: usize) -> Self {
         Self {
             codec,
             current_frame: None,
             first_stream_packet_index: None,
-            keyframe_hint: false,
+            frame_type: None,
             last_packet_payload_length: None,
             expected_access_unit_length: None,
             invalid_av1_length_logged: false,
@@ -3059,7 +3309,7 @@ impl VideoAccessUnitAssembler {
     fn reset(&mut self) {
         self.current_frame = None;
         self.first_stream_packet_index = None;
-        self.keyframe_hint = false;
+        self.frame_type = None;
         self.last_packet_payload_length = None;
         self.expected_access_unit_length = None;
         self.bytes.clear();
@@ -3080,10 +3330,11 @@ impl VideoAccessUnitAssembler {
         let mut picture_payload = payload;
         if header.is_start_of_frame() {
             self.reset();
-            self.keyframe_hint = payload.get(3).is_some_and(|value| *value == 2);
             picture_payload = video_picture_payload(self.codec, payload)
                 .ok_or(NvstDropReason::MissingAnnexBStartCode)?;
             frame_header_size = payload.len() - picture_payload.len();
+            self.frame_type =
+                GsFrameHeader::parse(payload, frame_header_size).map(|header| header.frame_type);
             if !self.first_start_payload_logged {
                 self.first_start_payload_logged = true;
                 eprintln!(
@@ -3174,11 +3425,11 @@ impl VideoAccessUnitAssembler {
         if !self.first_access_unit_logged {
             self.first_access_unit_logged = true;
             eprintln!(
-                "NVST first {} access unit: frame={} bytes={} keyframeHint={} raw={}",
+                "NVST first {} access unit: frame={} bytes={} frameType={:?} raw={}",
                 self.codec.label(),
                 header.frame_index,
                 bytes.len(),
-                self.keyframe_hint,
+                self.frame_type,
                 diagnostic_hex(&bytes, 64),
             );
         }
@@ -3192,7 +3443,12 @@ impl VideoAccessUnitAssembler {
             timestamp,
             frame_index: header.frame_index,
             first_stream_packet_index,
-            keyframe: video_access_unit_is_keyframe(self.codec, &bytes, self.keyframe_hint),
+            frame_type: self.frame_type,
+            keyframe: video_access_unit_is_keyframe(
+                self.codec,
+                &bytes,
+                self.frame_type == Some(NvstFrameType::I),
+            ),
             contiguous: true,
             bytes,
         }))
@@ -3342,6 +3598,14 @@ impl RtpReorderBuffer {
             self.gap_wait = None;
         }
         self.packets.insert(index, packet);
+        self.drain(now, recovery)
+    }
+
+    fn poll_deadline(&mut self, now: Instant) -> ReorderResult {
+        self.drain(now, None)
+    }
+
+    fn drain(&mut self, now: Instant, mut recovery: Option<NvstRecovery>) -> ReorderResult {
         let mut ready = Vec::new();
         let mut nack = None;
         loop {
@@ -3916,6 +4180,10 @@ impl FecReorderBuffer {
             };
         }
 
+        self.poll_deadline(now)
+    }
+
+    fn poll_deadline(&mut self, now: Instant) -> ReorderResult {
         let mut result = ReorderResult {
             ready: Vec::new(),
             nack: None,
@@ -4002,7 +4270,7 @@ impl FecReorderBuffer {
             // A later block proves that the head block has stopped arriving normally. Ask for
             // only the first contiguous missing run and retain all subsequent blocks while the
             // retransmission is in flight.
-            if self.blocks.len() == 1 {
+            if self.blocks.len() == 1 && self.gap_wait.is_none() {
                 break;
             }
             let (first_missing, last_missing) = head
@@ -4167,6 +4435,7 @@ pub struct NvstVideoReceiver {
     last_authenticated_packet: Option<Instant>,
     initial_timeout_pending: bool,
     frame_progress: FrameProgressWatchdog,
+    frame_invalidation: FrameInvalidation,
 }
 
 impl NvstVideoReceiver {
@@ -4202,6 +4471,7 @@ impl NvstVideoReceiver {
             last_authenticated_packet: None,
             initial_timeout_pending: true,
             frame_progress: FrameProgressWatchdog::default(),
+            frame_invalidation: FrameInvalidation::default(),
         }
     }
 
@@ -4242,12 +4512,12 @@ impl NvstVideoReceiver {
         Some(NvstReceiveEvent::Lifecycle(self.state))
     }
 
-    pub fn stop(&mut self) -> Option<NvstReceiveEvent> {
-        if self.state == NvstReceiverState::Stopped {
+    pub fn stop(&mut self, cause: NvstStopCause) -> Option<NvstReceiveEvent> {
+        if matches!(self.state, NvstReceiverState::Stopped(_)) {
             return None;
         }
         self.reset_media_state();
-        self.state = NvstReceiverState::Stopped;
+        self.state = NvstReceiverState::Stopped(cause);
         Some(NvstReceiveEvent::Lifecycle(self.state))
     }
 
@@ -4257,9 +4527,10 @@ impl NvstVideoReceiver {
         if self.state != NvstReceiverState::Running {
             return None;
         }
-        let last_packet = self
-            .last_authenticated_packet
-            .unwrap_or(self.timeout_origin);
+        let last_packet = self.config.feedback.video_timeout_origin(
+            self.last_authenticated_packet
+                .unwrap_or(self.timeout_origin),
+        )?;
         let idle_for = now.saturating_duration_since(last_packet);
         let timeout = if self.initial_timeout_pending {
             self.config.startup_timeout
@@ -4293,7 +4564,7 @@ impl NvstVideoReceiver {
         now: Instant,
         policy: NvstFrameProgressPolicy,
     ) -> Option<NvstFrameProgressEvent> {
-        if self.state != NvstReceiverState::Running {
+        if self.state != NvstReceiverState::Running || self.initial_timeout_pending {
             return None;
         }
         let assembled_at = self.config.feedback().last_assembled_frame_at();
@@ -4307,6 +4578,7 @@ impl NvstVideoReceiver {
                 (None, epoch) => epoch?,
             }
         };
+        let base = self.config.feedback.video_timeout_origin(base)?;
         let idle_for = now.saturating_duration_since(base);
         match self.frame_progress.stage {
             NvstFrameProgressStage::Tracking => {
@@ -4355,7 +4627,7 @@ impl NvstVideoReceiver {
             NvstReceiverState::Paused => {
                 return vec![NvstReceiveEvent::Dropped(NvstDropReason::Paused)];
             }
-            NvstReceiverState::Stopped => {
+            NvstReceiverState::Stopped(_) => {
                 return vec![NvstReceiveEvent::Dropped(NvstDropReason::Stopped)];
             }
             NvstReceiverState::RecoveryRequired => {
@@ -4398,8 +4670,13 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(packet.header.ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
-        self.frame_progress.authenticated(now);
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+            self.frame_progress.authenticated(now);
+        }
+        self.frame_invalidation
+            .poll_backstop(now, RFI_BACKSTOP_TIMEOUT, &self.config.feedback);
         self.authenticated_packets += 1;
         let sequence = u32::try_from(packet.index & 0xffff_ffff).unwrap_or(u32::MAX);
         let reordered =
@@ -4439,12 +4716,33 @@ impl NvstVideoReceiver {
             if layout.shard_index < layout.data_shards
                 && matches!(result.dropped, Some(NvstDropReason::Unsupported(_)))
             {
-                self.invalidate_picture();
+                self.invalidate_picture(now);
             }
             result
         } else {
             self.reorder.push(packet, now)
         };
+        self.consume_reorder_result(result, now)
+    }
+
+    pub fn poll_recovery(&mut self, now: Instant) -> Vec<NvstReceiveEvent> {
+        if self.state != NvstReceiverState::Running {
+            return Vec::new();
+        }
+        self.frame_invalidation
+            .poll_backstop(now, RFI_BACKSTOP_TIMEOUT, &self.config.feedback);
+        let reordered = self.reorder.poll_deadline(now);
+        let mut events = self.consume_reorder_result(reordered, now);
+        let fec = self.fec_reorder.poll_deadline(now);
+        events.extend(self.consume_reorder_result(fec, now));
+        events
+    }
+
+    fn consume_reorder_result(
+        &mut self,
+        result: ReorderResult,
+        now: Instant,
+    ) -> Vec<NvstReceiveEvent> {
         self.fec_repaired_packets += result.fec_repaired as u64;
         let mut events = Vec::new();
         if let Some((first_missing_index, last_missing_index)) = result.nack {
@@ -4460,7 +4758,7 @@ impl NvstVideoReceiver {
         }
         if let Some(recovery) = result.recovery {
             self.packet_gap_recoveries += 1;
-            self.invalidate_picture();
+            self.invalidate_picture(now);
             self.config.feedback.clear_nacks();
             events.push(NvstReceiveEvent::RecoveryNeeded(recovery));
         }
@@ -4468,7 +4766,7 @@ impl NvstVideoReceiver {
             let payload = match packet.header.payload(&packet.plaintext) {
                 Ok(payload) => payload,
                 Err(error) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(NvstDropReason::MalformedRtp(
                         error,
                     )));
@@ -4478,7 +4776,7 @@ impl NvstVideoReceiver {
             let (mut nv_packet, media) = match NvVideoPacket::parse(&packet.header, payload) {
                 Ok(value) => value,
                 Err(error) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(NvstDropReason::MalformedRtp(
                         error,
                     )));
@@ -4504,7 +4802,7 @@ impl NvstVideoReceiver {
                 // A new SOF before EOF means the previous reference frame was
                 // incomplete even when RTP sequence numbers were continuous.
                 // Never let the following P-frame look contiguous to the decoder.
-                self.invalidate_picture();
+                self.invalidate_picture(now);
                 self.config.feedback.clear_nacks();
                 events.push(NvstReceiveEvent::Dropped(
                     NvstDropReason::FrameDiscontinuity,
@@ -4517,7 +4815,7 @@ impl NvstVideoReceiver {
                     last.wrapping_add(1) & STREAM_PACKET_INDEX_MASK != nv_packet.stream_packet_index
                 })
             {
-                self.invalidate_picture();
+                self.invalidate_picture(now);
                 events.push(NvstReceiveEvent::Dropped(
                     NvstDropReason::FrameDiscontinuity,
                 ));
@@ -4529,8 +4827,20 @@ impl NvstVideoReceiver {
                 .push(nv_packet, packet.header.timestamp, media)
             {
                 Ok(Some(mut frame)) => {
-                    frame.contiguous = self.next_frame_contiguous;
+                    let loss_before = !self.next_frame_contiguous;
                     self.next_frame_contiguous = true;
+                    if !self.frame_invalidation.admit(
+                        &mut frame,
+                        loss_before,
+                        now,
+                        &self.config.feedback,
+                    ) {
+                        self.config.feedback.publish_completed_frame(&frame);
+                        self.config
+                            .feedback
+                            .retire_undelivered_frame(frame.frame_index);
+                        continue;
+                    }
                     self.frames_emitted += 1;
                     if self
                         .frame_progress
@@ -4546,7 +4856,7 @@ impl NvstVideoReceiver {
                 }
                 Ok(None) => {}
                 Err(reason) => {
-                    self.invalidate_picture();
+                    self.invalidate_picture(now);
                     events.push(NvstReceiveEvent::Dropped(reason));
                 }
             }
@@ -4554,11 +4864,13 @@ impl NvstVideoReceiver {
         events
     }
 
-    fn invalidate_picture(&mut self) {
+    fn invalidate_picture(&mut self, now: Instant) {
         self.assembler.reset();
         self.last_stream_packet_index = None;
         self.next_frame_contiguous = false;
-        self.config.feedback.request_keyframe();
+        if !self.frame_invalidation.lose(now) {
+            self.config.feedback.request_keyframe();
+        }
     }
 
     /// Returns an SRTCP Receiver Report to send to the video peer, at most once per
@@ -4576,7 +4888,7 @@ impl NvstVideoReceiver {
     /// depend on when buffered log lines happen to flush.
     pub fn stats_line(&self, origin: Instant) -> String {
         format!(
-            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} gaps={} ssrc={:?}",
+            "elapsed={:.1}s auth={} fec={} fecRecovered={} frames={} replay={} stale={} nackRecovered={} nackPending={} nackOverflow={} gaps={} {} ssrc={:?}",
             origin.elapsed().as_secs_f64(),
             self.authenticated_packets,
             self.fec_packets,
@@ -4585,7 +4897,15 @@ impl NvstVideoReceiver {
             self.replay_rejections,
             self.stale_packets,
             self.recovered_retransmissions,
+            self.config
+                .feedback
+                .pending_nacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            self.config.feedback.nack_overflows.load(Ordering::Relaxed),
             self.packet_gap_recoveries,
+            self.config.feedback.frame_invalidation.stats(),
             self.bound_ssrc,
         )
     }
@@ -4601,7 +4921,7 @@ impl NvstVideoReceiver {
             NvstReceiverState::Paused => {
                 return vec![NvstReceiveEvent::Dropped(NvstDropReason::Paused)];
             }
-            NvstReceiverState::Stopped => {
+            NvstReceiverState::Stopped(_) => {
                 return vec![NvstReceiveEvent::Dropped(NvstDropReason::Stopped)];
             }
             NvstReceiverState::RecoveryRequired => {
@@ -4611,7 +4931,10 @@ impl NvstVideoReceiver {
         }
         self.bound_ssrc.get_or_insert(ssrc);
         self.last_authenticated_packet = Some(now);
-        self.initial_timeout_pending = false;
+        if !self.initial_timeout_pending || self.config.feedback.video_timeout_origin(now).is_some()
+        {
+            self.initial_timeout_pending = false;
+        }
         // The bundle path cannot assemble video: the Mjolnir frame metadata lives
         // in the `0x4753` RTP extension, which str0m does not surface. The official
         // cloud path delivers video exclusively on the raw Mjolnir socket, so bundle
@@ -4634,6 +4957,7 @@ impl NvstVideoReceiver {
             .clear();
         self.config.feedback().reset_frame_stage_epoch();
         self.frame_progress.reset();
+        self.frame_invalidation.reset(&self.config.feedback);
     }
 }
 
@@ -4747,7 +5071,7 @@ fn xor_mapped_address(source: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> 
     value
 }
 
-fn find_stun_attribute(packet: &[u8], wanted_type: u16) -> Option<(usize, &[u8])> {
+pub(crate) fn find_stun_attribute(packet: &[u8], wanted_type: u16) -> Option<(usize, &[u8])> {
     let mut offset = STUN_HEADER_LEN;
     while offset + 4 <= packet.len() {
         let attribute_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
@@ -5410,7 +5734,7 @@ fn set_exclusive_udp_address(socket: &Socket) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn disable_udp_connreset(socket: &Socket) -> std::io::Result<()> {
+pub(crate) fn disable_udp_connreset(socket: &Socket) -> std::io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
         SIO_UDP_CONNRESET, SOCKET_ERROR, WSAGetLastError, WSAIoctl,
@@ -5443,6 +5767,42 @@ fn disable_udp_connreset(socket: &Socket) -> std::io::Result<()> {
     Ok(())
 }
 
+fn idle_ms(last: Option<Instant>, now: Instant) -> String {
+    last.map_or_else(
+        || "none".to_owned(),
+        |last| now.saturating_duration_since(last).as_millis().to_string(),
+    )
+}
+
+/// Failure-time bundle state: when each direction last moved, so a report can tell whether
+/// ingress stopped at the socket, the SCTP association, or downstream of both.
+#[derive(Debug, Default)]
+struct BundleLiveness {
+    last_inbound: Option<Instant>,
+    last_peer_inbound: Option<Instant>,
+    last_outbound: Option<Instant>,
+    last_channel_data: Option<Instant>,
+    ice_state: Option<IceConnectionState>,
+    port_unreachable: u64,
+    channels_closed: u64,
+}
+
+impl BundleLiveness {
+    fn snapshot(&self, now: Instant) -> String {
+        format!(
+            "rx_idle_ms={} peer_rx_idle_ms={} tx_idle_ms={} sctp_rx_idle_ms={} ice_state={} port_unreachable={} channels_closed={}",
+            idle_ms(self.last_inbound, now),
+            idle_ms(self.last_peer_inbound, now),
+            idle_ms(self.last_outbound, now),
+            idle_ms(self.last_channel_data, now),
+            self.ice_state
+                .map_or_else(|| "none".to_owned(), |state| format!("{state:?}")),
+            self.port_unreachable,
+            self.channels_closed,
+        )
+    }
+}
+
 fn log_udp_error(operation: &str, local_port: u16, error: &std::io::Error) {
     // Structured OS codes, never endpoints, payloads, or ICE credentials.
     opennow_streamer_protocol::log::log_async(
@@ -5472,6 +5832,96 @@ fn udp_receive_is_idle(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::Interrupted
             | std::io::ErrorKind::ConnectionReset
     )
+}
+
+#[derive(Default)]
+struct VideoKeepaliveState {
+    pings_sent: u64,
+    ping_tracker: StreamPingTracker,
+    first_failure: Option<Instant>,
+    failed_attempts: u64,
+    deferred_total: u64,
+}
+
+impl VideoKeepaliveState {
+    fn record_send(
+        &mut self,
+        result: std::io::Result<usize>,
+        transaction_id: Option<[u8; 12]>,
+        now: Instant,
+        budget: Duration,
+        operation: &'static str,
+        local_port: u16,
+    ) -> std::io::Result<()> {
+        const WSAENOBUFS: i32 = 10055;
+        match result {
+            Ok(_) => {
+                if let Some(first_failure) = self.first_failure.take() {
+                    opennow_streamer_protocol::log::log_async(
+                        "INFO",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=recovered failed_attempts={} failure_ms={}",
+                            self.failed_attempts,
+                            now.saturating_duration_since(first_failure).as_millis(),
+                        ),
+                    );
+                }
+                self.failed_attempts = 0;
+                self.pings_sent += 1;
+                if let Some(transaction_id) = transaction_id {
+                    self.ping_tracker.sent(transaction_id, now);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(first_failure) = self.first_failure
+                    && now.saturating_duration_since(first_failure) >= budget
+                {
+                    opennow_streamer_protocol::log::log_async(
+                        "WARN",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=exhausted failed_attempts={} failure_ms={} budget_ms={}",
+                            self.failed_attempts.saturating_add(1),
+                            now.saturating_duration_since(first_failure).as_millis(),
+                            budget.as_millis(),
+                        ),
+                    );
+                    return Err(error);
+                }
+                if udp_icmp_port_unreachable(&error) {
+                    if self.first_failure.is_some() {
+                        self.failed_attempts = self.failed_attempts.saturating_add(1);
+                    }
+                    return Ok(());
+                }
+                if error.raw_os_error() != Some(WSAENOBUFS)
+                    && !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    )
+                {
+                    return Err(error);
+                }
+                self.failed_attempts = self.failed_attempts.saturating_add(1);
+                self.first_failure.get_or_insert(now);
+                self.deferred_total = self.deferred_total.saturating_add(1);
+                if self.failed_attempts == 1 {
+                    log_udp_error(operation, local_port, &error);
+                    opennow_streamer_protocol::log::log_async(
+                        "WARN",
+                        "nvst-udp",
+                        &format!(
+                            "operation={operation} local_port={local_port} keepalive_send=deferred budget_ms={} retry=next-scheduled-keepalive",
+                            budget.as_millis(),
+                        ),
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Reserves the dedicated NATT-only video (Mjolnir) socket. The native streamer
@@ -5731,6 +6181,9 @@ fn spawn_receiver_thread(
     event_sender: Sender<NvstReceiveEvent>,
     setup: NvstWorkerSetup,
 ) -> Result<NvstUdpReceiverSession, NvstUdpReceiverError> {
+    if setup.rtc.is_some() && setup.upstream_ready.is_some() {
+        config.feedback.wait_for_play();
+    }
     socket
         .set_read_timeout(Some(UDP_RECEIVE_POLL_INTERVAL))
         .map_err(NvstUdpReceiverError::Configure)?;
@@ -5826,6 +6279,21 @@ fn prepare_nvst_webrtc_bundle(
             api.declare_media(Mid::from(audio.mid.as_str()), MediaKind::Audio);
         }
         if config.microphone_available() {
+            for payload_type in [
+                Some(config.microphone_rtp.opus_payload_type),
+                config.microphone_rtp.red_payload_type,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                api.register_payload_type(
+                    payload_type.into(),
+                    Codec::Opus,
+                    Frequency::FORTY_EIGHT_KHZ,
+                    Some(1),
+                    FormatParams::default(),
+                );
+            }
             api.declare_media(Mid::from("2"), MediaKind::Audio);
             api.declare_stream_tx(Ssrc::from(1), None, Mid::from("2"), None);
         }
@@ -6100,7 +6568,7 @@ fn finish_nvst_input_handshake(
             .unwrap_or(u64::MAX);
         if !channels.send_activation(rtc, timestamp_us) {
             let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
-                "input activation could not be queued".to_owned(),
+                "input activation could not be queued",
             ));
             return false;
         }
@@ -6123,51 +6591,72 @@ fn finish_nvst_input_handshake(
     true
 }
 
+fn classify_nvst_unready_input(
+    rtc: &mut Rtc,
+    channels: Option<NvstInputChannels>,
+    message: &NvstEncodedInput,
+) -> NvstInputWrite {
+    if !rtc.is_alive()
+        || channels.is_some_and(|channels| !channels.encoded_channel_is_open(rtc, message))
+    {
+        NvstInputWrite::Closed
+    } else {
+        NvstInputWrite::Deferred
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn send_nvst_captured_input(
     codec: &mut NvstInputCodec,
+    delivery: &mut NvstInputDelivery,
     bytes: &[u8],
     timestamp_us: u64,
     reply: Option<mpsc::SyncSender<Result<(), TransportError>>>,
     input_ready: &AtomicBool,
     event_sender: &Sender<NvstReceiveEvent>,
-    mut send: impl FnMut(&NvstEncodedInput) -> bool,
+    idle_warning_active: &AtomicBool,
+    mut send: impl FnMut(&NvstEncodedInput) -> NvstInputWrite,
 ) -> bool {
-    let previous_codec = codec.clone();
-    let result = codec
-        .encode(bytes, timestamp_us)
-        .map_err(|error| error.to_string())
-        .and_then(|messages| {
-            for message in messages {
-                if !send(&message) {
-                    return Err(format!(
-                        "input packet could not be queued on {:?}",
-                        message.route
-                    ));
-                }
-            }
-            Ok(())
-        });
-    let failed = result.is_err();
+    let result = delivery.submit(codec, bytes, timestamp_us, |message| {
+        let outcome = send(message);
+        report_nvst_user_input(message, outcome, idle_warning_active, event_sender);
+        outcome
+    });
     if let Err(error) = &result {
-        *codec = previous_codec;
-        eprintln!("NVST input packet rejected: {error}");
+        match error {
+            NvstInputDeliveryError::Encoding(error) => {
+                eprintln!("NVST input packet rejected: {error}")
+            }
+            NvstInputDeliveryError::Exhausted => eprintln!("NVST pending input queue exhausted"),
+            NvstInputDeliveryError::Closed => eprintln!("NVST input channel closed"),
+        }
     }
+    let failed = result.is_err();
     if let Some(reply) = reply {
-        let _ = reply.send(result.map_err(|_| TransportError::InputNotReady));
-        return true;
+        let _ = reply.send(result.map_err(|_| TransportError::Closed));
     }
-    if !failed
-        || native_input_types(bytes).is_ok_and(|types| {
-            !types.is_empty() && types.into_iter().all(native_input_type_is_motion)
-        })
-    {
+    if !failed {
         return true;
     }
     input_ready.store(false, Ordering::Release);
     let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
-        "discrete input delivery failed; stopping to prevent stuck input".to_owned(),
+        "discrete input delivery failed; stopping to prevent stuck input",
     ));
     false
+}
+
+fn report_nvst_user_input(
+    message: &NvstEncodedInput,
+    outcome: NvstInputWrite,
+    idle_warning_active: &AtomicBool,
+    event_sender: &Sender<NvstReceiveEvent>,
+) {
+    if outcome.is_sent()
+        && message.is_meaningful()
+        && idle_warning_active.swap(false, Ordering::AcqRel)
+    {
+        let _ = event_sender.send(NvstReceiveEvent::UserInput);
+    }
 }
 
 struct EndpointGuard {
@@ -6183,7 +6672,12 @@ impl Drop for EndpointGuard {
 
 const SONY_SHUTDOWN_FLUSH_BUDGET: Duration = Duration::from_millis(50);
 
-fn queue_hid_shutdown(hid_session: &mut HidSession, channels: NvstInputChannels, rtc: &mut Rtc) {
+fn queue_hid_shutdown(
+    hid_session: &mut HidSession,
+    channels: NvstInputChannels,
+    rtc: &mut Rtc,
+) -> bool {
+    let mut queued = true;
     for outbound in hid_session.retire_all() {
         let command = match outbound {
             HidOutbound::Release { low_id, bytes } => sony_report_command(low_id, &bytes),
@@ -6193,7 +6687,562 @@ fn queue_hid_shutdown(hid_session: &mut HidSession, channels: NvstInputChannels,
             HidOutbound::Attach { .. } | HidOutbound::Report { .. } => None,
         };
         if let Some(command) = command {
-            let _ = channels.send_control_teardown(rtc, &command);
+            queued &= channels.send_control_teardown(rtc, &command);
+        }
+    }
+    queued
+}
+
+fn send_generic_hid_actions(
+    session: &mut GenericSession,
+    actions: Vec<GenericOutbound>,
+    mut send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    for action in actions {
+        let teardown = matches!(
+            action,
+            GenericOutbound::Detach { .. } | GenericOutbound::Report { release: true, .. }
+        );
+        let Some(command) = generic_hid_command(&action) else {
+            return false;
+        };
+        if !send(&command, teardown) {
+            return false;
+        }
+        session.sent(&action);
+    }
+    true
+}
+
+fn pump_generic_hid_pending(
+    runtime: &GenericRuntime,
+    session: &mut GenericSession,
+    release_epoch: &mut u64,
+    mut send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    let (capture, current_epoch) = runtime.capture_state();
+    if *release_epoch != current_epoch {
+        let releases = session.set_capture(false);
+        if !send_generic_hid_actions(session, releases, &mut send) {
+            return false;
+        }
+        *release_epoch = current_epoch;
+    }
+    let (inventory, _) = runtime.inventory_snapshot();
+    let actions = session.reconcile(&inventory, capture);
+    if !send_generic_hid_actions(session, actions, &mut send) {
+        return false;
+    }
+    for item in runtime.drain(32) {
+        let actions = match item {
+            GenericIngress::Report(report) => session.report(report).into_iter().collect(),
+            GenericIngress::Fault { slot, incarnation } => session.fault(slot, incarnation),
+            GenericIngress::Release { .. } => Vec::new(),
+        };
+        if !send_generic_hid_actions(session, actions, &mut send) {
+            return false;
+        }
+    }
+    runtime.publish_admissions(session);
+    true
+}
+
+fn store_generic_hid_message(
+    session: &mut GenericSession,
+    runtime: &GenericRuntime,
+    message: GenericHidMessage<'_>,
+    send: impl FnMut(&[u8], bool) -> bool,
+) -> bool {
+    match message {
+        GenericHidMessage::Response {
+            request_id,
+            control,
+            opaque,
+            device_id,
+        } => {
+            session.handle_response(request_id, control, opaque, device_id);
+            runtime.publish_admissions(session);
+        }
+        GenericHidMessage::Output {
+            device_id,
+            interface,
+            operation,
+            bytes,
+        } => {
+            if let Some(output) = session.output(device_id, interface, operation, bytes) {
+                let (slot, incarnation) = (output.slot, output.incarnation);
+                match runtime.push_output(output) {
+                    Ok(())
+                    | Err(
+                        GenericError::Inactive | GenericError::Unbound | GenericError::StaleSource,
+                    ) => {}
+                    Err(_) => {
+                        let actions = session.fault(slot, incarnation);
+                        runtime.publish_admissions(session);
+                        return send_generic_hid_actions(session, actions, send);
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod generic_hid_tests {
+    use super::*;
+    use opennow_streamer_hid::generic::{GenericDevice, GenericInterface, GenericReport};
+
+    fn device(incarnation: u64) -> GenericDevice {
+        GenericDevice {
+            slot: 0,
+            incarnation,
+            vendor: 0x044f,
+            product: 0x0402,
+            revision: 0x0100,
+            interfaces: vec![GenericInterface {
+                number: 2,
+                descriptor: vec![
+                    0x05, 0x01, 0x09, 0x04, 0xa1, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x08, 0x15,
+                    0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30,
+                    0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xc0,
+                ],
+            }],
+        }
+    }
+
+    fn report(axis: u8) -> GenericReport {
+        GenericReport {
+            slot: 0,
+            incarnation: 1,
+            interface: 2,
+            operation: 0,
+            error: false,
+            bytes: vec![0xff, axis],
+        }
+    }
+
+    fn runtime() -> GenericRuntime {
+        let runtime = GenericRuntime::new();
+        runtime.replace_inventory(vec![device(1)]).unwrap();
+        runtime.bind_session(1);
+        runtime.set_capture(true);
+        runtime
+    }
+
+    fn admit(runtime: &GenericRuntime, session: &mut GenericSession) {
+        assert!(pump_generic_hid_pending(
+            runtime,
+            session,
+            &mut 0,
+            |_, teardown| {
+                assert!(!teardown);
+                true
+            }
+        ));
+        session.handle_response(10, 1, 0, 42);
+        assert!(session.output(42, 2, 0, &[1]).is_some());
+    }
+
+    #[test]
+    fn generic_admission_publication_tracks_server_response_and_pause_detach() {
+        use opennow_streamer_hid::generic::GenericAdmission;
+        for control in [0, 1, 2, 255] {
+            let runtime = runtime();
+            let mut source = device(1);
+            source.interfaces[0].descriptor.clear();
+            runtime.replace_inventory(vec![source]).unwrap();
+            let mut session = GenericSession::new(1);
+            let mut release_epoch = 0;
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, _| true
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                GenericHidMessage::Response {
+                    request_id: 10,
+                    control,
+                    opaque: u32::MAX,
+                    device_id: 42,
+                },
+                |_, _| true
+            ));
+            let expected = if control == 1 {
+                GenericAdmission::Admitted
+            } else {
+                GenericAdmission::Declined
+            };
+            assert_eq!(runtime.admissions_snapshot()[0].admission, expected);
+            if control != 1 {
+                continue;
+            }
+            runtime.set_capture(false);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| teardown
+            ));
+            let status = runtime.admissions_snapshot()[0];
+            assert_eq!(status.incarnation, 1);
+            assert_eq!(status.admission, GenericAdmission::Pending);
+            runtime.set_capture(true);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut release_epoch,
+                |_, teardown| !teardown
+            ));
+            assert_eq!(
+                runtime.admissions_snapshot()[0].admission,
+                GenericAdmission::Pending
+            );
+        }
+    }
+
+    #[test]
+    fn generic_registration_accepts_only_pending_sent_control_one_and_rejects_stale_ack() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| false
+        ));
+        session.handle_response(10, 1, 0, 42);
+        assert!(session.output(42, 2, 0, &[1]).is_none());
+        for (control, opaque, returned) in [(3, 0, 42), (1, 0, 255), (1, 0, 9)] {
+            let mut session = GenericSession::new(1);
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            session.handle_response(99, 1, 0, 42);
+            assert!(session.output(42, 2, 0, &[1]).is_none());
+            session.handle_response(10, control, opaque, returned);
+            assert!(session.output(returned, 2, 0, &[1]).is_none());
+        }
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        let actions = session.retire_all();
+        assert!(send_generic_hid_actions(
+            &mut session,
+            actions,
+            |_, teardown| teardown
+        ));
+        runtime.replace_inventory(vec![device(2)]).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        session.handle_response(10, 1, 0, 43);
+        assert!(session.output(43, 2, 0, &[1]).is_none());
+        session.handle_response(11, 1, 0xf, 44);
+        assert_eq!(session.output(44, 2, 0, &[1]).unwrap().incarnation, 2);
+    }
+
+    #[test]
+    fn generic_release_uses_last_successful_send_and_precedes_collapsed_capture_reports() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        runtime.submit_report(report(0xa5)).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        runtime.submit_report(report(0x55)).unwrap();
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| false
+        ));
+        runtime.set_capture(false);
+        runtime.set_capture(true);
+        runtime.submit_report(report(0x66)).unwrap();
+        let mut sent = vec![];
+        let mut epoch = 0;
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut epoch,
+            |command, teardown| {
+                sent.push((command.to_vec(), teardown));
+                true
+            }
+        ));
+        assert_eq!(epoch, 1);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0].0[12..], &[0, 0xa5]);
+        assert!(sent[0].1);
+        assert_eq!(&sent[1].0[12..], &[0xff, 0x66]);
+        assert!(!sent[1].1);
+        runtime.set_capture(false);
+        assert!(!pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut epoch,
+            |_, _| false
+        ));
+        assert_eq!(epoch, 1);
+    }
+
+    #[test]
+    fn generic_wire_response_and_empty_get_error_round_trip_without_sony_haptics() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        let response = [0x06, 0x02, 0x0b, 0, 0x1a, 0, 0, 0, 10, 1, 0, 0, 0, 0xf, 42];
+        for_each_generic_hid_message(&response, |message| {
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                message,
+                |_, _| true
+            ));
+        });
+        assert!(session.output(42, 2, 0, &[1]).is_some());
+        let get = [0x06, 0x02, 0x0a, 0, 0x11, 0, 0, 0, 42, 2, 3, 1, 0, 1];
+        for_each_generic_hid_message(&get, |message| {
+            assert!(store_generic_hid_message(
+                &mut session,
+                &runtime,
+                message,
+                |_, _| true
+            ));
+        });
+        let output = runtime.take_output().unwrap();
+        assert_eq!(output.bytes, [1, 0, 1]);
+        runtime
+            .submit_report(GenericReport {
+                slot: output.slot,
+                incarnation: output.incarnation,
+                interface: output.interface,
+                operation: output.operation,
+                error: true,
+                bytes: vec![],
+            })
+            .unwrap();
+        let mut sent = vec![];
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                assert!(!teardown);
+                sent.push(command.to_vec());
+                true
+            }
+        ));
+        assert_eq!(
+            sent,
+            vec![vec![0x0d, 0x02, 8, 0, 0x22, 0x11, 0, 0, 0, 42, 1, 3]]
+        );
+        runtime.submit_report(report(0xa5)).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        runtime.set_capture(false);
+        sent.clear();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                assert!(teardown);
+                sent.push(command.to_vec());
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0][12..], &[0, 0xa5]);
+    }
+
+    #[test]
+    fn generic_drain_is_bounded_and_fault_or_inventory_removal_releases_before_detach() {
+        let runtime = runtime();
+        let mut session = GenericSession::new(1);
+        admit(&runtime, &mut session);
+        for _ in 0..40 {
+            runtime.submit_report(report(0x77)).unwrap();
+        }
+        let mut count = 0;
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| {
+                count += 1;
+                true
+            }
+        ));
+        assert_eq!(count, 32);
+        assert_eq!(runtime.drain(32).len(), 8);
+        for _ in 0..64 {
+            runtime.submit_report(report(0x77)).unwrap();
+        }
+        assert_eq!(
+            runtime.submit_report(report(0x77)),
+            Err(GenericError::Overflow)
+        );
+        let mut sent = vec![];
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                sent.push(command.to_vec());
+                assert!(teardown);
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[0][12..], &[0, 0x77]);
+        assert_eq!(&sent[1][12..14], &[42, 3]);
+        assert!(session.output(42, 2, 0, &[1]).is_none());
+        runtime.replace_inventory(vec![device(2)]).unwrap();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |_, _| true
+        ));
+        session.handle_response(11, 1, 0, 43);
+        runtime.replace_inventory(vec![]).unwrap();
+        sent.clear();
+        assert!(pump_generic_hid_pending(
+            &runtime,
+            &mut session,
+            &mut 0,
+            |command, teardown| {
+                sent.push(command.to_vec());
+                assert!(teardown);
+                true
+            }
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0][12..14], &[43, 3]);
+    }
+
+    #[test]
+    fn generic_outputs_are_typed_and_overflow_retires_source_or_reports_queue_failure() {
+        for queues_release in [true, false] {
+            let runtime = runtime();
+            let mut session = GenericSession::new(1);
+            admit(&runtime, &mut session);
+            runtime.submit_report(report(0xa5)).unwrap();
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            for _ in 0..32 {
+                assert!(store_generic_hid_message(
+                    &mut session,
+                    &runtime,
+                    GenericHidMessage::Output {
+                        device_id: 42,
+                        interface: 2,
+                        operation: 3,
+                        bytes: &[1, 0, 1],
+                    },
+                    |_, _| panic!("valid output should not send transport response")
+                ));
+            }
+            let mut sent = vec![];
+            assert_eq!(
+                store_generic_hid_message(
+                    &mut session,
+                    &runtime,
+                    GenericHidMessage::Output {
+                        device_id: 42,
+                        interface: 2,
+                        operation: 3,
+                        bytes: &[1, 0, 1],
+                    },
+                    |command, teardown| {
+                        sent.push(command.to_vec());
+                        assert!(teardown);
+                        queues_release
+                    }
+                ),
+                queues_release
+            );
+            assert!(session.output(42, 2, 0, &[1]).is_none());
+            assert_eq!(sent.len(), if queues_release { 2 } else { 1 });
+            let output = runtime.take_output().unwrap();
+            assert_eq!(
+                (
+                    output.slot,
+                    output.incarnation,
+                    output.interface,
+                    output.operation
+                ),
+                (0, 1, 2, 3)
+            );
+            assert_eq!(output.bytes, [1, 0, 1]);
+        }
+    }
+
+    #[test]
+    fn generic_shutdown_queues_release_and_detach_and_invalid_descriptor_uses_detach() {
+        for valid_descriptor in [true, false] {
+            let runtime = runtime();
+            if !valid_descriptor {
+                let mut entry = device(1);
+                entry.interfaces[0].descriptor.clear();
+                runtime.replace_inventory(vec![entry]).unwrap();
+            }
+            let mut session = GenericSession::new(1);
+            admit(&runtime, &mut session);
+            runtime.submit_report(report(0xa5)).unwrap();
+            assert!(pump_generic_hid_pending(
+                &runtime,
+                &mut session,
+                &mut 0,
+                |_, _| true
+            ));
+            let mut sent = vec![];
+            let actions = session.retire_all();
+            assert!(send_generic_hid_actions(
+                &mut session,
+                actions,
+                |command, teardown| {
+                    sent.push(command.to_vec());
+                    assert!(teardown);
+                    true
+                }
+            ));
+            assert_eq!(sent.len(), if valid_descriptor { 2 } else { 1 });
+            assert_eq!(&sent.last().unwrap()[12..14], &[42, 3]);
+            runtime.unbind_session(1);
+            assert!(runtime.take_output().is_none());
+            assert!(session.retire_all().is_empty());
         }
     }
 }
@@ -6249,7 +7298,7 @@ fn pump_hid_pending(
         let retirement = input_codec.set_rich_slot_mask(mask, timestamp_us);
         let mut failed = false;
         for message in &retirement {
-            if !channels.send_encoded(rtc, message) {
+            if !channels.send_encoded(rtc, message).is_sent() {
                 failed = true;
                 break;
             }
@@ -6360,12 +7409,14 @@ fn run_nvst_webrtc_bundle(
     let stun_credentials = config.stun_credentials.clone();
     let feedback = config.feedback();
     let audio_track = config.audio_track().cloned();
+    let mut microphone_packetizer = MicrophonePacketizer::new(config.microphone_rtp);
     let frame_time_us = config.frame_time_us;
     // With a dedicated Mjolnir video socket the bundle only carries
     // control/audio keepalive traffic; the Mjolnir receiver owns the media
     // timeout, so the bundle must not raise a spurious media recovery.
-    let mjolnir = config.mjolnir_udp_port.is_some();
-    let owns_media_timeout = !mjolnir;
+    let unified_socket = config.unified_socket;
+    let owns_media_timeout = config.mjolnir_udp_port.is_none();
+    let mjolnir = config.carries_mjolnir_video();
     let hid_device_mask = config.hid_device_mask();
     let physical_local = socket.local_addr().ok().map_or_else(
         || bundle_peer,
@@ -6397,7 +7448,7 @@ fn run_nvst_webrtc_bundle(
     let rtcp_sender_ssrc = RTCP_SENDER_SSRC;
     let mut last_rtcp_send = Instant::now() - SRTCP_RR_INTERVAL;
     let mut last_recovery_send = Instant::now();
-    let mut last_keyframe_attempt = Instant::now() - KEYFRAME_REQUEST_COOLDOWN;
+    let mut last_keyframe_attempt = Instant::now() - IDR_RETRY_INTERVAL;
     let mut keyframe_attempts = 0_u64;
     let mut last_keyframe_attempt_log: Option<Instant> = None;
     let mut rtcp_reports_sent = 0_u64;
@@ -6415,23 +7466,35 @@ fn run_nvst_webrtc_bundle(
         })
     });
     let mut hid_published_mask = 0_u16;
+    let mut generic_session = hid_runtime
+        .as_ref()
+        .map(|runtime| GenericSession::new(runtime.session_generation().unwrap_or(0)));
+    let mut generic_release_epoch = 0;
     let mut input_state = NvstInputChannelState::default();
     let mut input_codec = NvstInputCodec::default();
+    let mut input_delivery = NvstInputDelivery::default();
     let mut last_input_types = Vec::new();
     let mut mouse_motion_packets = 0_u64;
     let mut cursor_capture = NvstCursorCapture::default();
     let mut control_keepalive_at = next_control_keepalive(Instant::now());
+    let mut control_keepalive_health = ControlKeepaliveHealth::default();
+    let mut server_control_diagnostics = ServerControlDiagnostics::default();
     let mut input_timeout_reported = false;
     let mut upstream_ready = upstream_ready;
     let mut upstream_allowed = upstream_ready.is_none();
     let mut pending_input_version = None;
     let mut audio_receiver = NvstAudioReceiver::default();
-    let mut reported_port_unreachable = false;
+    let mut audio_jitter = audio_track
+        .as_ref()
+        .map(|track| AudioJitterBuffer::new(track.clock_rate_hz));
+    let mut last_audio_jitter_log = Instant::now();
+    let mut liveness = BundleLiveness::default();
     'bundle: loop {
         let now = Instant::now();
         if let Some(ready) = upstream_ready.as_ref() {
             match ready.try_recv() {
                 Ok(()) => {
+                    feedback.complete_play(now);
                     upstream_allowed = true;
                     upstream_ready = None;
                     control_keepalive_at = now;
@@ -6440,8 +7503,10 @@ fn run_nvst_webrtc_bundle(
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
-                    rtc.disconnect();
-                    forward_optional(&event_sender, receiver.stop());
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::UpstreamGateClosed),
+                    );
                     break 'bundle;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -6472,16 +7537,52 @@ fn run_nvst_webrtc_bundle(
                     forward_optional(&event_sender, receiver.resume())
                 }
                 Ok(UdpReceiverCommand::Recover) => {
+                    opennow_streamer_protocol::log::log_async(
+                        "WARN",
+                        "nvst-bundle",
+                        &format!(
+                            "recovery-snapshot {} inbound={inbound_datagrams} outbound={outbound_datagrams} dtls_ready={dtls_ready} sctp_started={sctp_started} input_ready={}",
+                            liveness.snapshot(Instant::now()),
+                            input_ready.load(Ordering::Acquire),
+                        ),
+                    );
                     forward_optional(&event_sender, receiver.recover())
                 }
                 Ok(UdpReceiverCommand::SendText { text, timestamp_us }) => {
-                    if upstream_allowed
-                        && !text.is_cancelled()
-                        && input_state.is_ready()
-                        && let Some(channels) = input_channels
-                        && !channels.send_text(&mut rtc, &text, timestamp_us)
-                    {
-                        eprintln!("NVST text submission rejected by reliable channel");
+                    let result = input_delivery.submit_text(text, timestamp_us, |message| {
+                        let outcome = if upstream_allowed
+                            && input_state.is_ready()
+                            && let Some(channels) = input_channels
+                        {
+                            channels.send_encoded(&mut rtc, message)
+                        } else {
+                            classify_nvst_unready_input(&mut rtc, input_channels, message)
+                        };
+                        report_nvst_user_input(
+                            message,
+                            outcome,
+                            &feedback.idle_warning_active,
+                            &event_sender,
+                        );
+                        outcome
+                    });
+                    match result {
+                        Ok(()) => {}
+                        Err(NvstInputDeliveryError::Exhausted) => {
+                            let _ = event_sender
+                                .send(NvstReceiveEvent::TextRejected("paste-queue-full"));
+                        }
+                        Err(_) => {
+                            input_ready.store(false, Ordering::Release);
+                            let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
+                                "text input channel closed",
+                            ));
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::InputDeliveryFailed),
+                            );
+                            break 'bundle;
+                        }
                     }
                 }
                 Ok(UdpReceiverCommand::SendInput { bytes, reply }) => {
@@ -6541,11 +7642,13 @@ fn run_nvst_webrtc_bundle(
                             .unwrap_or(u64::MAX);
                         if !send_nvst_captured_input(
                             &mut input_codec,
+                            &mut input_delivery,
                             &bytes,
                             timestamp_us,
                             reply,
                             &input_ready,
                             &event_sender,
+                            &feedback.idle_warning_active,
                             |message| {
                                 if should_log {
                                     eprintln!(
@@ -6558,49 +7661,95 @@ fn run_nvst_webrtc_bundle(
                                 channels.send_encoded(&mut rtc, message)
                             },
                         ) {
-                            rtc.disconnect();
-                            forward_optional(&event_sender, receiver.stop());
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::InputDeliveryFailed),
+                            );
                             break 'bundle;
                         }
-                    } else if let Some(reply) = reply {
-                        let _ = reply.send(Err(TransportError::InputNotReady));
+                    } else {
+                        let timestamp_us = transport_origin
+                            .elapsed()
+                            .as_micros()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
+                        if !send_nvst_captured_input(
+                            &mut input_codec,
+                            &mut input_delivery,
+                            &bytes,
+                            timestamp_us,
+                            reply,
+                            &input_ready,
+                            &event_sender,
+                            &feedback.idle_warning_active,
+                            |message| {
+                                classify_nvst_unready_input(&mut rtc, input_channels, message)
+                            },
+                        ) {
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::InputDeliveryFailed),
+                            );
+                            break 'bundle;
+                        }
                     }
                 }
-                Ok(UdpReceiverCommand::Stop) | Err(TryRecvError::Disconnected) => {
-                    if let (Some(_), Some(hid_session), Some(channels)) =
-                        (hid_runtime.as_ref(), hid_session.as_mut(), input_channels)
-                    {
-                        queue_hid_shutdown(hid_session, channels, &mut rtc);
-                        forward_rtc_outputs(
-                            &mut rtc,
-                            |output| {
-                                if let Output::Transmit(transmit) = output {
-                                    let _ = socket.send_to(&transmit.contents, bundle_peer);
-                                }
-                            },
-                            SONY_SHUTDOWN_FLUSH_BUDGET,
-                        );
-                    }
-                    if let Some(hid_runtime) = hid_runtime.as_ref()
-                        && let Some(generation) = hid_runtime.session_generation()
-                    {
-                        hid_runtime.unbind_session(generation);
-                    }
-                    rtc.disconnect();
-                    forward_optional(&event_sender, receiver.stop());
+                command @ (Ok(UdpReceiverCommand::Stop) | Err(TryRecvError::Disconnected)) => {
+                    let cause = if command.is_ok() {
+                        NvstStopCause::Requested
+                    } else {
+                        NvstStopCause::ControllerClosed
+                    };
+                    opennow_streamer_protocol::log::log_async(
+                        "INFO",
+                        "nvst-bundle",
+                        &format!(
+                            "stop-snapshot {cause} {} inbound={inbound_datagrams} outbound={outbound_datagrams} dtls_ready={dtls_ready} sctp_started={sctp_started}",
+                            liveness.snapshot(Instant::now()),
+                        ),
+                    );
+                    forward_optional(&event_sender, receiver.stop(cause));
                     break 'bundle;
                 }
                 Err(TryRecvError::Empty) => break,
             }
         }
 
+        if upstream_allowed
+            && let Some(channels) = input_channels
+            && input_delivery
+                .flush(|message| {
+                    let outcome = if input_state.is_ready() {
+                        channels.send_encoded(&mut rtc, message)
+                    } else {
+                        classify_nvst_unready_input(&mut rtc, Some(channels), message)
+                    };
+                    report_nvst_user_input(
+                        message,
+                        outcome,
+                        &feedback.idle_warning_active,
+                        &event_sender,
+                    );
+                    outcome
+                })
+                .is_err()
+        {
+            input_ready.store(false, Ordering::Release);
+            let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
+                "discrete input delivery failed; stopping to prevent stuck input",
+            ));
+            forward_optional(
+                &event_sender,
+                receiver.stop(NvstStopCause::InputDeliveryFailed),
+            );
+            break 'bundle;
+        }
+
         // Official first burst is three ICE Binding Requests, plus NATT
         // ping-string PING. After DTLS they keep pinging at 100ms.
         if upstream_allowed && input_state.control_is_open() && now >= control_keepalive_at {
-            if let Some(channels) = input_channels
-                && !channels.send_keepalive(&mut rtc, 0)
-            {
-                eprintln!("NVST control keepalive could not be queued");
+            if let Some(channels) = input_channels {
+                control_keepalive_health.record(channels.send_keepalive(&mut rtc, 0));
             }
             control_keepalive_at = next_control_keepalive(now);
         }
@@ -6617,6 +7766,7 @@ fn run_nvst_webrtc_bundle(
         }
         if upstream_allowed
             && input_state.is_ready()
+            && input_delivery.is_empty()
             && let (Some(hid_runtime), Some(hid_session), Some(channels)) =
                 (hid_runtime.as_ref(), hid_session.as_mut(), input_channels)
         {
@@ -6636,13 +7786,44 @@ fn run_nvst_webrtc_bundle(
             ) {
                 input_ready.store(false, Ordering::Release);
                 let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
-                    "sony hid output could not be queued; stopping to prevent stuck input"
-                        .to_owned(),
+                    "sony hid output could not be queued; stopping to prevent stuck input",
                 ));
-                rtc.disconnect();
-                forward_optional(&event_sender, receiver.stop());
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::HidOutputBlocked),
+                );
                 break 'bundle;
             }
+        }
+        if upstream_allowed
+            && input_state.is_ready()
+            && let (Some(runtime), Some(session), Some(channels)) = (
+                hid_runtime.as_ref(),
+                generic_session.as_mut(),
+                input_channels,
+            )
+            && !pump_generic_hid_pending(
+                &runtime.generic,
+                session,
+                &mut generic_release_epoch,
+                |command, teardown| {
+                    if teardown {
+                        channels.send_control_teardown(&mut rtc, command)
+                    } else {
+                        channels.send_control(&mut rtc, command)
+                    }
+                },
+            )
+        {
+            input_ready.store(false, Ordering::Release);
+            let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
+                "generic hid output could not be queued; stopping to prevent stuck input",
+            ));
+            forward_optional(
+                &event_sender,
+                receiver.stop(NvstStopCause::HidOutputBlocked),
+            );
+            break 'bundle;
         }
         if upstream_allowed
             && !input_timeout_reported
@@ -6650,7 +7831,7 @@ fn run_nvst_webrtc_bundle(
         {
             input_timeout_reported = true;
             let _ = event_sender.send(NvstReceiveEvent::InputUnavailable(
-                "input handshake timed out".to_owned(),
+                "input handshake timed out",
             ));
         }
         let ping_interval = if dtls_ready {
@@ -6673,7 +7854,10 @@ fn run_nvst_webrtc_bundle(
                                 continue;
                             }
                             eprintln!("NVST ICE send failed: {error}");
-                            forward_optional(&event_sender, receiver.stop());
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::socket("bundle-ice-send", &error)),
+                            );
                             break 'bundle;
                         }
                     }
@@ -6691,7 +7875,10 @@ fn run_nvst_webrtc_bundle(
                 if let Err(error) = socket.send_to(&natt, bundle_peer) {
                     if !udp_icmp_port_unreachable(&error) {
                         eprintln!("NVST NATT send failed: {error}");
-                        forward_optional(&event_sender, receiver.stop());
+                        forward_optional(
+                            &event_sender,
+                            receiver.stop(NvstStopCause::socket("bundle-natt-send", &error)),
+                        );
                         break 'bundle;
                     }
                     None
@@ -6734,6 +7921,7 @@ fn run_nvst_webrtc_bundle(
                     break;
                 };
                 if frame_pacing_feedback
+                    && feedback.frame_pacing_enabled.load(Ordering::Acquire)
                     && now.duration_since(last_frame_pacing_send) >= FRAME_PACING_INTERVAL
                 {
                     // Packet-completion intervals are intentionally bursty and are not display
@@ -6780,6 +7968,34 @@ fn run_nvst_webrtc_bundle(
         }
 
         if now.duration_since(last_control_stats_log) >= Duration::from_secs(10) {
+            let input_stats = input_delivery.snapshot();
+            opennow_streamer_protocol::log::log_async(
+                "INFO",
+                "nvst-input",
+                &format!(
+                    "pendingMessages={} pendingBytes={} pendingTextMessages={} pendingTextBytes={} deferredWrites={} droppedMotion={}",
+                    input_stats.pending_messages,
+                    input_stats.pending_bytes,
+                    input_stats.pending_text_messages,
+                    input_stats.pending_text_bytes,
+                    input_stats.deferred_writes,
+                    input_stats.dropped_motion,
+                ),
+            );
+            opennow_streamer_protocol::log::log_async(
+                "INFO",
+                "nvst-control",
+                &format!(
+                    "keepaliveFailures={} keepaliveConsecutiveFailures={} keepaliveRecoveries={} unknownCommands={} lastUnknownCommand={:?} malformedCommands={} invalidStreamCommands={}",
+                    control_keepalive_health.failures,
+                    control_keepalive_health.consecutive_failures,
+                    control_keepalive_health.recoveries,
+                    server_control_diagnostics.unknown,
+                    server_control_diagnostics.last_unknown,
+                    server_control_diagnostics.malformed,
+                    server_control_diagnostics.invalid_stream,
+                ),
+            );
             opennow_streamer_protocol::log::log_async(
                 "INFO",
                 "nvst-bundle",
@@ -6863,6 +8079,13 @@ fn run_nvst_webrtc_bundle(
             last_recovery_send = now;
         }
 
+        if upstream_allowed
+            && input_state.control_is_open()
+            && let Some(channels) = input_channels
+        {
+            send_pending_frame_invalidation(&feedback, now, &mut rtc, channels);
+        }
+
         // Do not gate control IDR on stream_snapshot(): it is needed most when
         // the server has not sent any video yet. Bound failed sends as well as
         // successful ones, and leave the request armed until a keyframe arrives.
@@ -6906,17 +8129,21 @@ fn run_nvst_webrtc_bundle(
         if upstream_allowed && microphone_generation != microphone_queue.generation {
             microphone_generation = microphone_queue.generation;
             rtc.direct_api().remove_stream_tx(Ssrc::from(1));
+            microphone_packetizer.clear();
         }
         if upstream_allowed && dtls_ready {
             while let Some(frame) = microphone_queue.pop(Instant::now()) {
+                let timestamp = frame.timestamp;
+                let queued_at = frame.queued_at;
+                let (payload_type, payload) = microphone_packetizer.packetize(frame);
                 rtc.direct_api()
                     .declare_stream_tx(Ssrc::from(1), None, Mid::from("2"), None)
                     .write_rtp(str0m::rtp::RtpWrite::new(
-                        GFN_OPUS_PAYLOAD_TYPE.into(),
+                        payload_type.into(),
                         microphone_sequence.into(),
-                        frame.timestamp,
-                        frame.queued_at,
-                        frame.payload,
+                        timestamp,
+                        queued_at,
+                        payload,
                     ));
                 microphone_sequence += 1;
             }
@@ -6929,6 +8156,7 @@ fn run_nvst_webrtc_bundle(
                 }
                 Ok(Output::Transmit(transmit)) => {
                     outbound_datagrams += 1;
+                    liveness.last_outbound = Some(Instant::now());
                     let kind = if looks_like_stun(&transmit.contents) {
                         "stun"
                     } else if looks_like_dtls(&transmit.contents) {
@@ -6958,7 +8186,10 @@ fn run_nvst_webrtc_bundle(
                             continue;
                         }
                         eprintln!("NVST WebRTC send failed: {error}");
-                        forward_optional(&event_sender, receiver.stop());
+                        forward_optional(
+                            &event_sender,
+                            receiver.stop(NvstStopCause::socket("bundle-webrtc-send", &error)),
+                        );
                         break 'bundle;
                     }
                     ice_responses.sent(&transmit.contents);
@@ -6973,6 +8204,7 @@ fn run_nvst_webrtc_bundle(
                         Instant::now(),
                     ),
                     Event::IceConnectionStateChange(state) => {
+                        liveness.ice_state = Some(state);
                         opennow_streamer_protocol::log::log_async(
                             "INFO",
                             "nvst-ice",
@@ -6984,6 +8216,9 @@ fn run_nvst_webrtc_bundle(
                     }
                     Event::Connected => {
                         dtls_ready = true;
+                        feedback
+                            .authenticated_transport_ready
+                            .store(true, Ordering::Release);
                         let _ = event_sender.send(NvstReceiveEvent::TransportReady("dtls"));
                         eprintln!("NVST DTLS handshake complete; waiting for SRTP/Mjolnir");
                         if !sctp_started {
@@ -7019,6 +8254,7 @@ fn run_nvst_webrtc_bundle(
                         }
                     }
                     Event::ChannelData(data) => {
+                        liveness.last_channel_data = Some(Instant::now());
                         if let Some(channels) = input_channels
                             && channels.contains(data.id)
                         {
@@ -7026,6 +8262,14 @@ fn run_nvst_webrtc_bundle(
                             if data.id == channels.control_reliable
                                 || data.id == channels.control_partial
                             {
+                                if feedback.receive_server_control(
+                                    &data.data,
+                                    &mut server_control_diagnostics,
+                                    &event_sender,
+                                ) {
+                                    input_ready.store(false, Ordering::Release);
+                                    break 'bundle;
+                                }
                                 feedback.haptics.receive(&data.data);
                             }
                             if data.id == channels.control_reliable
@@ -7041,6 +8285,37 @@ fn run_nvst_webrtc_bundle(
                                         &feedback.haptics,
                                     );
                                 });
+                            }
+                            if data.id == channels.control_reliable
+                                && let (Some(session), Some(runtime)) =
+                                    (generic_session.as_mut(), hid_runtime.as_ref())
+                            {
+                                let mut queued = true;
+                                for_each_generic_hid_message(&data.data, |message| {
+                                    if queued {
+                                        queued = store_generic_hid_message(
+                                            session,
+                                            &runtime.generic,
+                                            message,
+                                            |command, teardown| {
+                                                if teardown {
+                                                    channels
+                                                        .send_control_teardown(&mut rtc, command)
+                                                } else {
+                                                    channels.send_control(&mut rtc, command)
+                                                }
+                                            },
+                                        );
+                                    }
+                                });
+                                if !queued {
+                                    input_ready.store(false, Ordering::Release);
+                                    forward_optional(
+                                        &event_sender,
+                                        receiver.stop(NvstStopCause::HidOutputBlocked),
+                                    );
+                                    break 'bundle;
+                                }
                             }
                             let cursor_messages = if Some(data.id) == channels.cursor {
                                 Vec::new()
@@ -7118,6 +8393,16 @@ fn run_nvst_webrtc_bundle(
                         }
                     }
                     Event::ChannelClose(id) => {
+                        liveness.channels_closed += 1;
+                        opennow_streamer_protocol::log::log_async(
+                            "WARN",
+                            "nvst-sctp",
+                            &format!(
+                                "channel-close label={} {}",
+                                input_channels.map_or("unknown", |channels| channels.label(id)),
+                                liveness.snapshot(Instant::now()),
+                            ),
+                        );
                         if let Some(channels) = input_channels {
                             if id == channels.control_reliable {
                                 cursor_capture.reset();
@@ -7131,8 +8416,8 @@ fn run_nvst_webrtc_bundle(
                                 } else {
                                     "reliable input data channel closed"
                                 };
-                                let _ = event_sender
-                                    .send(NvstReceiveEvent::InputUnavailable(reason.to_owned()));
+                                let _ =
+                                    event_sender.send(NvstReceiveEvent::InputUnavailable(reason));
                             }
                         }
                         if input_channels.is_some_and(|channels| id == channels.control_partial) {
@@ -7150,37 +8435,21 @@ fn run_nvst_webrtc_bundle(
                         });
                         if is_audio {
                             audio_streams.authenticated(&mut rtc, *packet.header.ssrc);
-                            let audio = audio_track.as_ref().expect("audio track checked above");
                             let received_at_us = packet
                                 .timestamp
                                 .saturating_duration_since(transport_origin)
                                 .as_micros()
                                 .try_into()
                                 .unwrap_or(u64::MAX);
-                            let frames = match audio_receiver.depacketize(
-                                audio,
-                                &packet.header,
-                                packet.payload,
-                                received_at_us,
-                            ) {
-                                Ok(frames) => frames,
-                                Err(reason) => {
-                                    let _ = event_sender.send(NvstReceiveEvent::Dropped(reason));
-                                    continue;
-                                }
-                            };
-                            for frame in frames {
-                                match audio_receiver.deliver(&media_consumer, frame) {
-                                    Ok(()) | Err(TransportError::MediaConsumerBackpressured) => {}
-                                    Err(_) => {
-                                        let _ = event_sender.send(NvstReceiveEvent::Dropped(
-                                            NvstDropReason::MediaConsumerClosed,
-                                        ));
-                                        rtc.disconnect();
-                                        forward_optional(&event_sender, receiver.stop());
-                                        break 'bundle;
-                                    }
-                                }
+                            if let Some(jitter) = audio_jitter.as_mut() {
+                                jitter.push(
+                                    AudioPacket {
+                                        header: packet.header,
+                                        payload: packet.payload,
+                                        received_at_us,
+                                    },
+                                    Instant::now(),
+                                );
                             }
                         } else {
                             let received_at = Instant::now();
@@ -7199,8 +8468,10 @@ fn run_nvst_webrtc_bundle(
                                     &mut video_delivery_gap,
                                     event,
                                 ) {
-                                    rtc.disconnect();
-                                    forward_optional(&event_sender, receiver.stop());
+                                    forward_optional(
+                                        &event_sender,
+                                        receiver.stop(NvstStopCause::MediaConsumerClosed),
+                                    );
                                     break 'bundle;
                                 }
                             }
@@ -7210,31 +8481,85 @@ fn run_nvst_webrtc_bundle(
                 },
                 Err(error) => {
                     eprintln!("NVST WebRTC bundle failed: {error}");
-                    forward_optional(&event_sender, receiver.stop());
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::webrtc("poll-output", &error)),
+                    );
                     break 'bundle;
                 }
             }
         };
 
         drop(microphone_queue);
+        if let (Some(jitter), Some(track)) = (audio_jitter.as_mut(), audio_track.as_ref()) {
+            while let Some(packet) = jitter.pop(Instant::now()) {
+                let frames = match audio_receiver.depacketize(
+                    track,
+                    &packet.header,
+                    packet.payload,
+                    packet.received_at_us,
+                ) {
+                    Ok(frames) => frames,
+                    Err(reason) => {
+                        let _ = event_sender.send(NvstReceiveEvent::Dropped(reason));
+                        continue;
+                    }
+                };
+                for frame in frames {
+                    match audio_receiver.deliver(&media_consumer, frame) {
+                        Ok(()) | Err(TransportError::MediaConsumerBackpressured) => {}
+                        Err(_) => {
+                            let _ = event_sender.send(NvstReceiveEvent::Dropped(
+                                NvstDropReason::MediaConsumerClosed,
+                            ));
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::MediaConsumerClosed),
+                            );
+                            break 'bundle;
+                        }
+                    }
+                }
+            }
+            if last_audio_jitter_log.elapsed() >= Duration::from_secs(1) {
+                opennow_streamer_protocol::log::log_async(
+                    "INFO",
+                    "audio-jitter",
+                    &format!(
+                        "target_ms={} queued={} stats={:?}",
+                        jitter.target_ms(),
+                        jitter.len(),
+                        jitter.stats
+                    ),
+                );
+                last_audio_jitter_log = Instant::now();
+            }
+        }
         let wait = timeout
             .saturating_duration_since(Instant::now())
             .min(CONTROL_RECEIVE_POLL_INTERVAL);
         if wait.is_zero() {
             if let Err(error) = rtc.handle_input(Input::Timeout(Instant::now())) {
                 eprintln!("NVST WebRTC timer failed: {error}");
-                forward_optional(&event_sender, receiver.stop());
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::webrtc("timer", &error)),
+                );
                 break 'bundle;
             }
         } else {
             if let Err(error) = socket.set_read_timeout(Some(wait)) {
                 eprintln!("NVST UDP timeout configuration failed: {error}");
-                forward_optional(&event_sender, receiver.stop());
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::socket("bundle-read-timeout", &error)),
+                );
                 break 'bundle;
             }
             match socket.recv_from(&mut datagram) {
                 Ok((length, source)) => {
                     inbound_datagrams += 1;
+                    liveness.last_inbound = Some(Instant::now());
                     if inbound_datagrams == 1 {
                         log_udp_first_inbound(
                             "bundle",
@@ -7255,6 +8580,7 @@ fn run_nvst_webrtc_bundle(
                     if source != bundle_peer {
                         continue;
                     }
+                    liveness.last_peer_inbound = liveness.last_inbound;
                     feedback.record_socket_receive(StreamSocket::Bundle, true, dtls_ready, length);
                     if let Some(credentials) = stun_credentials.as_ref() {
                         let received_at = Instant::now();
@@ -7272,7 +8598,10 @@ fn run_nvst_webrtc_bundle(
                             && !udp_icmp_port_unreachable(&error)
                         {
                             eprintln!("NVST PONG send failed: {error}");
-                            forward_optional(&event_sender, receiver.stop());
+                            forward_optional(
+                                &event_sender,
+                                receiver.stop(NvstStopCause::socket("bundle-pong-send", &error)),
+                            );
                             break 'bundle;
                         }
                         continue;
@@ -7283,6 +8612,28 @@ fn run_nvst_webrtc_bundle(
                                 audio_streams.admit(&mut rtc, audio, &datagram[..length])
                             }))
                     {
+                        if unified_socket {
+                            let received_at = Instant::now();
+                            for event in
+                                receiver.process_datagram(source, &datagram[..length], received_at)
+                            {
+                                if !forward_receive_event(
+                                    &media_consumer,
+                                    &event_sender,
+                                    &feedback,
+                                    transport_origin,
+                                    received_at,
+                                    &mut video_delivery_gap,
+                                    event,
+                                ) {
+                                    forward_optional(
+                                        &event_sender,
+                                        receiver.stop(NvstStopCause::MediaConsumerClosed),
+                                    );
+                                    break 'bundle;
+                                }
+                            }
+                        }
                         continue;
                     }
                     let destination = receive_destination;
@@ -7308,14 +8659,17 @@ fn run_nvst_webrtc_bundle(
                         },
                     )) {
                         eprintln!("NVST WebRTC handle_input failed: {error}");
-                        forward_optional(&event_sender, receiver.stop());
+                        forward_optional(
+                            &event_sender,
+                            receiver.stop(NvstStopCause::webrtc("receive", &error)),
+                        );
                         break 'bundle;
                     }
                 }
                 Err(error) if udp_receive_is_idle(&error) => {
                     if udp_icmp_port_unreachable(&error) {
-                        if !reported_port_unreachable {
-                            reported_port_unreachable = true;
+                        liveness.port_unreachable += 1;
+                        if liveness.port_unreachable == 1 {
                             log_udp_error("bundle-receive-port-unreachable", local_port, &error);
                         }
                         thread::sleep(CONTROL_RECEIVE_POLL_INTERVAL);
@@ -7324,14 +8678,37 @@ fn run_nvst_webrtc_bundle(
                 }
                 Err(error) => {
                     log_udp_error("bundle-receive", local_port, &error);
-                    forward_optional(&event_sender, receiver.stop());
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("bundle-receive", &error)),
+                    );
                     break 'bundle;
                 }
             }
         }
 
+        let now = Instant::now();
+        if unified_socket {
+            for event in receiver.poll_recovery(now) {
+                if !forward_receive_event(
+                    &media_consumer,
+                    &event_sender,
+                    &feedback,
+                    transport_origin,
+                    now,
+                    &mut video_delivery_gap,
+                    event,
+                ) {
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::MediaConsumerClosed),
+                    );
+                    break 'bundle;
+                }
+            }
+        }
         let timeout = if owns_media_timeout {
-            receiver.poll_timeout(Instant::now())
+            receiver.poll_timeout(now)
         } else {
             None
         };
@@ -7340,27 +8717,43 @@ fn run_nvst_webrtc_bundle(
                 "NVST WebRTC timeout counters: inbound={inbound_datagrams}, dtlsReady={dtls_ready}"
             );
         }
+        let packets_stalled = timeout.is_some();
         forward_optional(&event_sender, timeout);
+        if unified_socket && !packets_stalled {
+            forward_frame_progress(&mut receiver, &event_sender, now);
+        }
     }
+    let mut shutdown_queued = true;
     if let Some(hid_runtime) = hid_runtime.as_ref() {
         if let (Some(hid_session), Some(channels)) = (hid_session.as_mut(), input_channels) {
-            for outbound in hid_session.retire_all() {
-                let command = match outbound {
-                    HidOutbound::Release { low_id, bytes } => sony_report_command(low_id, &bytes),
-                    HidOutbound::Removal { low_id } => {
-                        sony_device_change_command(SonyDeviceControl::Removal, low_id)
-                    }
-                    HidOutbound::Attach { .. } | HidOutbound::Report { .. } => None,
-                };
-                if let Some(command) = command {
-                    let _ = channels.send_control_teardown(&mut rtc, &command);
-                }
-            }
+            shutdown_queued &= queue_hid_shutdown(hid_session, channels, &mut rtc);
         }
+        if let (Some(session), Some(channels)) = (generic_session.as_mut(), input_channels) {
+            let actions = session.retire_all();
+            shutdown_queued &= send_generic_hid_actions(session, actions, |command, _| {
+                channels.send_control_teardown(&mut rtc, command)
+            });
+        }
+        forward_rtc_outputs(
+            &mut rtc,
+            |output| {
+                if let Output::Transmit(transmit) = output {
+                    let _ = socket.send_to(&transmit.contents, bundle_peer);
+                }
+            },
+            SONY_SHUTDOWN_FLUSH_BUDGET,
+        );
         if let Some(generation) = hid_runtime.session_generation() {
             hid_runtime.unbind_session(generation);
         }
     }
+    if !shutdown_queued {
+        input_ready.store(false, Ordering::Release);
+        let _ = event_sender.send(NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+            NvstStopCause::HidOutputBlocked,
+        )));
+    }
+    rtc.disconnect();
 }
 
 fn run_nvst_udp_receiver(
@@ -7375,6 +8768,24 @@ fn run_nvst_udp_receiver(
         run_nvst_webrtc_bundle(socket, config, commands, outputs, transport_origin, setup);
         return;
     }
+    run_nvst_video_receiver(
+        socket,
+        config,
+        commands,
+        outputs,
+        transport_origin,
+        |socket, packet, peer| socket.send_to(packet, peer),
+    );
+}
+
+fn run_nvst_video_receiver(
+    socket: UdpSocket,
+    config: NvstVideoConfig,
+    commands: Receiver<UdpReceiverCommand>,
+    outputs: NvstReceiverOutputs,
+    transport_origin: Instant,
+    mut send_keepalive: impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>,
+) {
     let local_port = socket.local_addr().map_or(0, |addr| addr.port());
     log_udp_receiver_start(
         "video",
@@ -7395,8 +8806,7 @@ fn run_nvst_udp_receiver(
     let mut datagram = vec![0_u8; 65_536];
     let mut peer_seen = false;
     let mut last_ping = Instant::now() - PING_INTERVAL_BEFORE_CONNECTION;
-    let mut pings_sent = 0_u64;
-    let mut ping_tracker = StreamPingTracker::default();
+    let mut keepalive = VideoKeepaliveState::default();
     let mut inbound_datagrams = 0_u64;
     let mut handled_stun = 0_u64;
     let mut invalid_stun = 0_u64;
@@ -7405,7 +8815,8 @@ fn run_nvst_udp_receiver(
     let mut receiver_reports_sent = 0_u64;
     let stats_origin = Instant::now();
     let mut last_stats_log = Instant::now();
-    let mut reported_port_unreachable = false;
+    let mut last_inbound_at = None;
+    let mut port_unreachable = 0_u64;
     loop {
         loop {
             match commands.try_recv() {
@@ -7422,8 +8833,13 @@ fn run_nvst_udp_receiver(
                         let _ = reply.send(Err(TransportError::InputNotReady));
                     }
                 }
-                Ok(UdpReceiverCommand::Stop) | Err(TryRecvError::Disconnected) => {
-                    forward_optional(&event_sender, receiver.stop());
+                command @ (Ok(UdpReceiverCommand::Stop) | Err(TryRecvError::Disconnected)) => {
+                    let cause = if command.is_ok() {
+                        NvstStopCause::Requested
+                    } else {
+                        NvstStopCause::ControllerClosed
+                    };
+                    forward_optional(&event_sender, receiver.stop(cause));
                     return;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -7444,7 +8860,10 @@ fn run_nvst_udp_receiver(
                 let mut transaction_id = [0_u8; 12];
                 if let Err(error) = getrandom::fill(&mut transaction_id) {
                     eprintln!("NVST NATT transaction generation failed: {error}");
-                    forward_optional(&event_sender, receiver.stop());
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::RandomnessUnavailable),
+                    );
                     return;
                 }
                 let ping = build_natt_hole_punch_request(
@@ -7454,34 +8873,48 @@ fn run_nvst_udp_receiver(
                     &transaction_id,
                 );
                 let sent_at = Instant::now();
-                if let Err(error) = socket.send_to(&ping, receiver.config.video_peer) {
-                    if !udp_icmp_port_unreachable(&error) {
-                        log_udp_error("video-natt-send", local_port, &error);
-                        eprintln!("NVST NATT send failed: {error}");
-                        forward_optional(&event_sender, receiver.stop());
-                        return;
-                    }
-                } else {
-                    pings_sent += 1;
+                if let Err(error) = keepalive.record_send(
+                    send_keepalive(&socket, &ping, receiver.config.video_peer),
+                    Some(transaction_id),
+                    sent_at,
+                    receiver.config.timeout,
+                    "video-natt-send",
+                    local_port,
+                ) {
+                    log_udp_error("video-natt-send", local_port, &error);
+                    eprintln!("NVST NATT send failed: {error}");
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("video-natt-send", &error)),
+                    );
+                    return;
                 }
-                ping_tracker.sent(transaction_id, sent_at);
             } else {
-                if let Err(error) =
-                    socket.send_to(&receiver.config.ping_payload, receiver.config.video_peer)
-                {
-                    if !udp_icmp_port_unreachable(&error) {
-                        log_udp_error("video-ping-send", local_port, &error);
-                        eprintln!("NVST ping send failed: {error}");
-                        forward_optional(&event_sender, receiver.stop());
-                        return;
-                    }
-                } else {
-                    pings_sent += 1;
+                if let Err(error) = keepalive.record_send(
+                    send_keepalive(
+                        &socket,
+                        &receiver.config.ping_payload,
+                        receiver.config.video_peer,
+                    ),
+                    None,
+                    now,
+                    receiver.config.timeout,
+                    "video-ping-send",
+                    local_port,
+                ) {
+                    log_udp_error("video-ping-send", local_port, &error);
+                    eprintln!("NVST ping send failed: {error}");
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("video-ping-send", &error)),
+                    );
+                    return;
                 }
             }
             last_ping = now;
         }
 
+        let inbound_before = inbound_datagrams;
         match socket.recv_from(&mut datagram) {
             Ok((length, source)) => 'datagram: {
                 inbound_datagrams += 1;
@@ -7512,9 +8945,12 @@ fn run_nvst_udp_receiver(
                 }
                 if expected_source && let Some(credentials) = stun_credentials.as_ref() {
                     let received_at = Instant::now();
-                    if let Some(elapsed) =
-                        ping_tracker.receive(&datagram[..length], source, credentials, received_at)
-                    {
+                    if let Some(elapsed) = keepalive.ping_tracker.receive(
+                        &datagram[..length],
+                        source,
+                        credentials,
+                        received_at,
+                    ) {
                         receiver
                             .config
                             .feedback()
@@ -7529,7 +8965,13 @@ fn run_nvst_udp_receiver(
                                 && !udp_icmp_port_unreachable(&error)
                             {
                                 eprintln!("NVST STUN response send failed: {error}");
-                                forward_optional(&event_sender, receiver.stop());
+                                forward_optional(
+                                    &event_sender,
+                                    receiver.stop(NvstStopCause::socket(
+                                        "video-stun-response-send",
+                                        &error,
+                                    )),
+                                );
                                 return;
                             }
                             break 'datagram;
@@ -7561,15 +9003,18 @@ fn run_nvst_udp_receiver(
                         &mut video_delivery_gap,
                         event,
                     ) {
-                        forward_optional(&event_sender, receiver.stop());
+                        forward_optional(
+                            &event_sender,
+                            receiver.stop(NvstStopCause::MediaConsumerClosed),
+                        );
                         return;
                     }
                 }
             }
             Err(error) if udp_receive_is_idle(&error) => {
                 if udp_icmp_port_unreachable(&error) {
-                    if !reported_port_unreachable {
-                        reported_port_unreachable = true;
+                    port_unreachable += 1;
+                    if port_unreachable == 1 {
                         log_udp_error("video-receive-port-unreachable", local_port, &error);
                     }
                     thread::sleep(UDP_RECEIVE_POLL_INTERVAL);
@@ -7577,16 +9022,25 @@ fn run_nvst_udp_receiver(
             }
             Err(error) => {
                 log_udp_error("video-receive", local_port, &error);
-                forward_optional(&event_sender, receiver.stop());
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::socket("video-receive", &error)),
+                );
                 return;
             }
         }
         let now = Instant::now();
+        if inbound_datagrams != inbound_before {
+            last_inbound_at = Some(now);
+        }
         if let Some(report) = receiver.poll_receiver_report(now) {
             if let Err(error) = socket.send_to(&report, receiver.config.video_peer) {
                 if !udp_icmp_port_unreachable(&error) {
                     eprintln!("NVST receiver report send failed: {error}");
-                    forward_optional(&event_sender, receiver.stop());
+                    forward_optional(
+                        &event_sender,
+                        receiver.stop(NvstStopCause::socket("video-receiver-report-send", &error)),
+                    );
                     return;
                 }
             } else {
@@ -7595,11 +9049,13 @@ fn run_nvst_udp_receiver(
         }
         if now.duration_since(last_stats_log) >= Duration::from_secs(10) {
             last_stats_log = now;
+            let pings_sent = keepalive.pings_sent;
+            let keepalive_deferred = keepalive.deferred_total;
             opennow_streamer_protocol::log::log_async(
                 "INFO",
                 "nvst-video",
                 &format!(
-                    "{} local_port={local_port} peer_port={} inbound={inbound_datagrams} pings={pings_sent} rr={receiver_reports_sent} stun_ok={handled_stun} stun_invalid={invalid_stun} wrong_source={wrong_source}",
+                    "{} local_port={local_port} peer_port={} inbound={inbound_datagrams} pings={pings_sent} keepalive_deferred={keepalive_deferred} rr={receiver_reports_sent} stun_ok={handled_stun} stun_invalid={invalid_stun} wrong_source={wrong_source}",
                     receiver.stats_line(stats_origin),
                     receiver.config.video_peer.port()
                 ),
@@ -7609,14 +9065,33 @@ fn run_nvst_udp_receiver(
                 receiver.stats_line(stats_origin),
             );
         }
+        for event in receiver.poll_recovery(now) {
+            if !forward_receive_event(
+                &media_consumer,
+                &event_sender,
+                &feedback,
+                transport_origin,
+                now,
+                &mut video_delivery_gap,
+                event,
+            ) {
+                forward_optional(
+                    &event_sender,
+                    receiver.stop(NvstStopCause::MediaConsumerClosed),
+                );
+                return;
+            }
+        }
         let timeout = receiver.poll_timeout(now);
         if timeout.is_some() {
+            let pings_sent = keepalive.pings_sent;
             opennow_streamer_protocol::log::log_async(
                 "WARN",
                 "nvst-video",
                 &format!(
-                    "media-timeout local_port={local_port} peer_port={} inbound={inbound_datagrams} pings={pings_sent} stun_ok={handled_stun} wrong_source={wrong_source} {} firewall_status=unknown",
+                    "media-timeout local_port={local_port} peer_port={} inbound={inbound_datagrams} rx_idle_ms={} port_unreachable={port_unreachable} pings={pings_sent} stun_ok={handled_stun} wrong_source={wrong_source} {} firewall_status=unknown",
                     receiver.config.video_peer.port(),
+                    idle_ms(last_inbound_at, now),
                     receiver.stats_line(stats_origin)
                 ),
             );
@@ -7633,50 +9108,55 @@ fn run_nvst_udp_receiver(
         }
         let packets_stalled = timeout.is_some();
         forward_optional(&event_sender, timeout);
-        if !packets_stalled
-            && let Some(event) = receiver.poll_frame_progress(
-                now,
-                NvstFrameProgressPolicy {
-                    stall: receiver.config.timeout,
-                    keyframe_grace: receiver.config.timeout,
-                },
-            )
-        {
-            match event {
-                NvstFrameProgressEvent::KeyframeRequested {
+        if !packets_stalled {
+            forward_frame_progress(&mut receiver, &event_sender, now);
+        }
+    }
+}
+
+fn forward_frame_progress(
+    receiver: &mut NvstVideoReceiver,
+    event_sender: &Sender<NvstReceiveEvent>,
+    now: Instant,
+) {
+    if let Some(event) = receiver.poll_frame_progress(
+        now,
+        NvstFrameProgressPolicy {
+            stall: receiver.config.timeout,
+            keyframe_grace: receiver.config.timeout,
+        },
+    ) {
+        match event {
+            NvstFrameProgressEvent::KeyframeRequested {
+                idle_for,
+                last_assembled_frame_index,
+            } => {
+                opennow_streamer_protocol::log::log_async(
+                    "WARN",
+                    "nvst-video",
+                    &format!("produced-frame stall idle_for={idle_for:?}; requested a keyframe"),
+                );
+                let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
                     idle_for,
                     last_assembled_frame_index,
-                } => {
-                    opennow_streamer_protocol::log::log_async(
-                        "WARN",
-                        "nvst-video",
-                        &format!(
-                            "produced-frame stall idle_for={idle_for:?}; requested a keyframe local_port={local_port} {}",
-                            receiver.stats_line(stats_origin)
-                        ),
-                    );
-                    let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
-                        idle_for,
-                        last_assembled_frame_index,
-                        recovery_required: false,
-                    });
-                }
-                NvstFrameProgressEvent::RecoveryNeeded {
+                    recovery_required: false,
+                });
+            }
+            NvstFrameProgressEvent::RecoveryNeeded {
+                idle_for,
+                last_assembled_frame_index,
+            } => {
+                let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
                     idle_for,
                     last_assembled_frame_index,
-                } => {
-                    let _ = event_sender.send(NvstReceiveEvent::FrameProgressStall {
+                    recovery_required: true,
+                });
+                let _ = event_sender.send(NvstReceiveEvent::RecoveryNeeded(
+                    NvstRecovery::FrameProgress {
                         idle_for,
                         last_assembled_frame_index,
-                        recovery_required: true,
-                    });
-                    let _ = event_sender.send(NvstReceiveEvent::RecoveryNeeded(
-                        NvstRecovery::FrameProgress {
-                            idle_for,
-                            last_assembled_frame_index,
-                        },
-                    ));
-                }
+                    },
+                ));
             }
         }
     }
@@ -7749,6 +9229,68 @@ fn forward_receive_event(
 #[cfg(test)]
 mod tests {
     static PREFERRED_NVST_PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stop_causes_report_operation_and_os_code_without_endpoints() {
+        use super::NvstStopCause;
+
+        let error = std::io::Error::from_raw_os_error(10054);
+        let cause = NvstStopCause::socket("bundle-receive", &error);
+        assert_eq!(
+            cause.to_string(),
+            format!(
+                "cause=socket operation=bundle-receive kind={:?} os_code=10054",
+                error.kind()
+            )
+        );
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "203.0.113.9:5004 private",
+        );
+        let cause = NvstStopCause::socket("video-ping-send", &error).to_string();
+        assert_eq!(
+            cause,
+            "cause=socket operation=video-ping-send kind=ConnectionAborted os_code=none"
+        );
+        assert!(!cause.contains("203.0.113.9") && !cause.contains("private"));
+        assert_eq!(
+            NvstStopCause::webrtc(
+                "receive",
+                &str0m::RtcError::RemoteSdp("203.0.113.9 private".to_owned())
+            )
+            .to_string(),
+            "cause=webrtc operation=receive error=sdp"
+        );
+        assert_eq!(
+            NvstStopCause::InputDeliveryFailed.to_string(),
+            "cause=input-delivery-failed"
+        );
+    }
+
+    #[test]
+    fn bundle_liveness_snapshot_reports_idle_ages_per_direction() {
+        use super::BundleLiveness;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now() + Duration::from_secs(30);
+        assert_eq!(
+            BundleLiveness::default().snapshot(now),
+            "rx_idle_ms=none peer_rx_idle_ms=none tx_idle_ms=none sctp_rx_idle_ms=none ice_state=none port_unreachable=0 channels_closed=0"
+        );
+        let liveness = BundleLiveness {
+            last_inbound: Some(now - Duration::from_millis(2_100)),
+            last_peer_inbound: Some(now - Duration::from_millis(2_100)),
+            last_outbound: Some(now - Duration::from_millis(40)),
+            last_channel_data: Some(now - Duration::from_millis(9_500)),
+            ice_state: Some(str0m::IceConnectionState::Completed),
+            port_unreachable: 3,
+            channels_closed: 2,
+        };
+        assert_eq!(
+            liveness.snapshot(now),
+            "rx_idle_ms=2100 peer_rx_idle_ms=2100 tx_idle_ms=40 sctp_rx_idle_ms=9500 ice_state=Completed port_unreachable=3 channels_closed=2"
+        );
+    }
 
     #[test]
     fn stream_socket_receive_byte_counts_saturate_without_losing_updates() {
@@ -7872,6 +9414,9 @@ mod tests {
     mod budget_tests {
         include!("nvst_budget_tests.rs");
     }
+    mod server_control_tests {
+        include!("nvst_server_control_tests.rs");
+    }
     mod nack_tests {
         include!("nvst_nack_tests.rs");
     }
@@ -7888,32 +9433,39 @@ mod tests {
             let mut packet = vec![0; if input_type == 10 { 22 } else { 18 }];
             packet[..4].copy_from_slice(&input_type.to_le_bytes());
             let mut codec = NvstInputCodec::default();
+            let mut delivery = NvstInputDelivery::default();
             let ready = AtomicBool::new(true);
             let (events, received) = mpsc::channel();
             let mut writes = 0;
-            assert!(!send_nvst_captured_input(
+            assert!(send_nvst_captured_input(
                 &mut codec,
+                &mut delivery,
                 &packet,
                 1,
                 None,
                 &ready,
                 &events,
+                &AtomicBool::new(false),
                 |message| {
                     writes += 1;
                     assert_eq!(
                         message.route,
                         super::super::nvst_input::NvstInputRoute::ControlReliable
                     );
-                    false
+                    NvstInputWrite::Deferred
                 },
             ));
             assert_eq!(writes, 1);
-            assert!(!ready.load(Ordering::Acquire));
-            assert!(
-                matches!(received.try_recv().unwrap(), NvstReceiveEvent::InputUnavailable(reason)
-                if reason.contains("discrete input delivery failed"))
-            );
+            assert!(ready.load(Ordering::Acquire));
             assert!(received.try_recv().is_err());
+            let mut retry_writes = 0;
+            delivery
+                .flush(|_| {
+                    retry_writes += 1;
+                    NvstInputWrite::Sent
+                })
+                .unwrap();
+            assert_eq!(retry_writes, 1);
         }
     }
 
@@ -7927,14 +9479,16 @@ mod tests {
             let mut writes = 0;
             assert!(send_nvst_captured_input(
                 &mut NvstInputCodec::default(),
+                &mut NvstInputDelivery::default(),
                 &packet,
                 1,
                 None,
                 &ready,
                 &events,
+                &AtomicBool::new(false),
                 |_| {
                     writes += 1;
-                    false
+                    NvstInputWrite::Deferred
                 },
             ));
             assert_eq!(writes, 1);
@@ -7950,21 +9504,26 @@ mod tests {
         let ready = AtomicBool::new(true);
         let (events, received) = mpsc::channel();
         let (reply, result) = mpsc::sync_channel(1);
-        assert!(send_nvst_captured_input(
+        assert!(!send_nvst_captured_input(
             &mut NvstInputCodec::default(),
+            &mut NvstInputDelivery::default(),
             &packet,
             1,
             Some(reply),
             &ready,
             &events,
-            |_| false,
+            &AtomicBool::new(false),
+            |_| NvstInputWrite::Closed,
         ));
         assert!(matches!(
             result.try_recv().unwrap(),
-            Err(TransportError::InputNotReady)
+            Err(TransportError::Closed)
         ));
-        assert!(ready.load(Ordering::Acquire));
-        assert!(received.try_recv().is_err());
+        assert!(!ready.load(Ordering::Acquire));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            NvstReceiveEvent::InputUnavailable(_)
+        ));
     }
 
     #[test]
@@ -7974,21 +9533,173 @@ mod tests {
         let ready = AtomicBool::new(true);
         let (events, received) = mpsc::channel();
         let mut writes = 0;
+        let warning = AtomicBool::new(true);
         assert!(send_nvst_captured_input(
             &mut NvstInputCodec::default(),
+            &mut NvstInputDelivery::default(),
             &packet,
             1,
             None,
             &ready,
             &events,
+            &warning,
             |_| {
                 writes += 1;
-                true
+                NvstInputWrite::Sent
             },
         ));
         assert_eq!(writes, 1);
         assert!(ready.load(Ordering::Acquire));
+        assert!(!warning.load(Ordering::Acquire));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            NvstReceiveEvent::UserInput
+        ));
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn deferred_input_clears_idle_warning_only_when_it_is_written_and_only_once() {
+        let mut packet = vec![0; 18];
+        packet[..4].copy_from_slice(&4_u32.to_le_bytes());
+        let mut delivery = NvstInputDelivery::default();
+        let ready = AtomicBool::new(true);
+        let warning = AtomicBool::new(true);
+        let (events, received) = mpsc::channel();
+        let (reply, result) = mpsc::sync_channel(1);
+        assert!(send_nvst_captured_input(
+            &mut NvstInputCodec::default(),
+            &mut delivery,
+            &packet,
+            1,
+            Some(reply),
+            &ready,
+            &events,
+            &warning,
+            |_| NvstInputWrite::Deferred,
+        ));
+        assert!(result.try_recv().unwrap().is_ok());
+        assert!(warning.load(Ordering::Acquire));
+        assert!(received.try_recv().is_err());
+        delivery
+            .flush(|message| {
+                report_nvst_user_input(message, NvstInputWrite::Sent, &warning, &events);
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert!(!warning.load(Ordering::Acquire));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            NvstReceiveEvent::UserInput
+        ));
+        assert!(send_nvst_captured_input(
+            &mut NvstInputCodec::default(),
+            &mut delivery,
+            &packet,
+            2,
+            None,
+            &ready,
+            &events,
+            &warning,
+            |_| NvstInputWrite::Sent,
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn heartbeat_empty_gamepad_and_nonmeaningful_success_do_not_clear_idle_warning() {
+        let warning = AtomicBool::new(true);
+        let ready = AtomicBool::new(true);
+        let (events, received) = mpsc::channel();
+        let mut gamepad = vec![0; 38];
+        gamepad[..4].copy_from_slice(&12_u32.to_le_bytes());
+        let mut haptics = vec![0; 6];
+        haptics[..4].copy_from_slice(&13_u32.to_le_bytes());
+        let mut locks = vec![0; 5];
+        locks[..4].copy_from_slice(&19_u32.to_le_bytes());
+        for packet in [2_u32.to_le_bytes().to_vec(), gamepad, haptics, locks] {
+            assert!(send_nvst_captured_input(
+                &mut NvstInputCodec::default(),
+                &mut NvstInputDelivery::default(),
+                &packet,
+                1,
+                None,
+                &ready,
+                &events,
+                &warning,
+                |_| NvstInputWrite::Sent,
+            ));
+            assert!(warning.load(Ordering::Acquire));
+            assert!(received.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn exhausted_pending_input_requests_shutdown_even_with_a_synchronous_reply() {
+        let mut packet = vec![0; 18];
+        packet[..4].copy_from_slice(&4_u32.to_le_bytes());
+        let mut delivery = NvstInputDelivery::default();
+        let mut codec = NvstInputCodec::default();
+        let ready = AtomicBool::new(true);
+        let (events, received) = mpsc::channel();
+        for _ in 0..256 {
+            assert!(send_nvst_captured_input(
+                &mut codec,
+                &mut delivery,
+                &packet,
+                1,
+                None,
+                &ready,
+                &events,
+                &AtomicBool::new(false),
+                |_| NvstInputWrite::Deferred,
+            ));
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        assert!(!send_nvst_captured_input(
+            &mut codec,
+            &mut delivery,
+            &packet,
+            1,
+            Some(reply),
+            &ready,
+            &events,
+            &AtomicBool::new(false),
+            |_| NvstInputWrite::Deferred,
+        ));
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(TransportError::Closed)
+        ));
+        assert!(!ready.load(Ordering::Acquire));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            NvstReceiveEvent::InputUnavailable(_)
+        ));
+    }
+
+    #[test]
+    fn motion_does_not_hide_a_closed_input_transport() {
+        let mut motion = vec![0; 22];
+        motion[..4].copy_from_slice(&7_u32.to_le_bytes());
+        let ready = AtomicBool::new(true);
+        let (events, received) = mpsc::channel();
+        assert!(!send_nvst_captured_input(
+            &mut NvstInputCodec::default(),
+            &mut NvstInputDelivery::default(),
+            &motion,
+            1,
+            None,
+            &ready,
+            &events,
+            &AtomicBool::new(false),
+            |_| NvstInputWrite::Closed,
+        ));
+        assert!(!ready.load(Ordering::Acquire));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            NvstReceiveEvent::InputUnavailable(_)
+        ));
     }
 
     #[test]
@@ -7997,11 +9708,13 @@ mod tests {
         let (events, received) = mpsc::channel();
         assert!(!send_nvst_captured_input(
             &mut NvstInputCodec::default(),
+            &mut NvstInputDelivery::default(),
             &[4, 0, 0, 0],
             1,
             None,
             &ready,
             &events,
+            &AtomicBool::new(false),
             |_| panic!("malformed input must not reach the channel"),
         ));
         assert!(!ready.load(Ordering::Acquire));
@@ -8020,28 +9733,42 @@ mod tests {
         let expected = NvstInputCodec::default().encode(&packet, 1).unwrap();
         assert_eq!(expected.len(), 2);
         let mut codec = NvstInputCodec::default();
+        let mut delivery = NvstInputDelivery::default();
         let ready = AtomicBool::new(true);
         let (events, received) = mpsc::channel();
         let mut writes = 0;
-        assert!(!send_nvst_captured_input(
+        assert!(send_nvst_captured_input(
             &mut codec,
+            &mut delivery,
             &packet,
             1,
             None,
             &ready,
             &events,
+            &AtomicBool::new(false),
             |_| {
                 writes += 1;
-                writes == 1
+                if writes == 1 {
+                    NvstInputWrite::Sent
+                } else {
+                    NvstInputWrite::Deferred
+                }
             },
         ));
         assert_eq!(writes, 2);
-        assert!(!ready.load(Ordering::Acquire));
-        assert!(matches!(
-            received.try_recv().unwrap(),
-            NvstReceiveEvent::InputUnavailable(_)
-        ));
-        assert_eq!(codec.encode(&packet, 1).unwrap(), expected);
+        assert!(ready.load(Ordering::Acquire));
+        assert!(received.try_recv().is_err());
+        let mut retried = Vec::new();
+        delivery
+            .flush(|message| {
+                retried.push(message.clone());
+                NvstInputWrite::Sent
+            })
+            .unwrap();
+        assert_eq!(retried, expected[1..]);
+        let next = codec.encode(&packet, 1).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0], expected[1]);
     }
 
     #[test]
@@ -8063,11 +9790,13 @@ mod tests {
         let (events, received) = mpsc::channel();
         assert!(!send_nvst_captured_input(
             &mut codec,
+            &mut NvstInputDelivery::default(),
             &packet,
             1,
             None,
             &ready,
             &events,
+            &AtomicBool::new(false),
             |_| panic!("invalid batch must not reach the channel"),
         ));
         assert!(!ready.load(Ordering::Acquire));
@@ -8082,7 +9811,7 @@ mod tests {
     fn startup_keyframe_control_request_does_not_wait_for_video_ssrc() {
         let feedback = NvstFeedbackState::default();
         let now = Instant::now();
-        let previous = now - KEYFRAME_REQUEST_COOLDOWN;
+        let previous = now - IDR_RETRY_INTERVAL;
         feedback.request_keyframe();
         assert_eq!(feedback.stream_snapshot(), None);
         assert_eq!(
@@ -8119,7 +9848,7 @@ mod tests {
         let now = Instant::now();
         assert!(!feedback.keyframe_request_pending());
         assert_eq!(
-            feedback.keyframe_request_routes(now, now - KEYFRAME_REQUEST_COOLDOWN, true, true,),
+            feedback.keyframe_request_routes(now, now - IDR_RETRY_INTERVAL, true, true,),
             (false, false)
         );
     }
@@ -8130,7 +9859,7 @@ mod tests {
         let now = Instant::now();
         feedback.publish_stream(7, 10, 90_000, now);
         feedback.request_keyframe();
-        let previous = now - KEYFRAME_REQUEST_COOLDOWN;
+        let previous = now - IDR_RETRY_INTERVAL;
         assert_eq!(
             feedback.keyframe_request_routes(
                 now,
@@ -8388,7 +10117,7 @@ mod tests {
         feedback.request_keyframe();
         feedback.publish_stream(7, 10, 90_000, now);
         assert_eq!(
-            feedback.keyframe_request_routes(now, now - KEYFRAME_REQUEST_COOLDOWN, true, true),
+            feedback.keyframe_request_routes(now, now - IDR_RETRY_INTERVAL, true, true),
             (true, true)
         );
         // Queue success is not completion. The same cooldown applies if the
@@ -8400,14 +10129,14 @@ mod tests {
         );
         assert_eq!(
             feedback.keyframe_request_routes(
-                now + KEYFRAME_REQUEST_COOLDOWN - Duration::from_millis(1),
+                now + IDR_RETRY_INTERVAL - Duration::from_millis(1),
                 now,
                 true,
                 true
             ),
             (false, false)
         );
-        let retry_at = now + KEYFRAME_REQUEST_COOLDOWN;
+        let retry_at = now + IDR_RETRY_INTERVAL;
         assert_eq!(
             feedback.keyframe_request_routes(retry_at, now, true, true),
             (true, true)
@@ -8417,6 +10146,7 @@ mod tests {
             timestamp: 90_000,
             frame_index: 42,
             first_stream_packet_index: 10,
+            frame_type: None,
             keyframe: false,
             contiguous: true,
             bytes: vec![0, 0, 0, 1, 0x41],
@@ -8456,6 +10186,7 @@ mod tests {
                 timestamp: 90_000,
                 frame_index: 2_417,
                 first_stream_packet_index: 90,
+                frame_type: None,
                 keyframe: false,
                 contiguous: true,
                 bytes: vec![0x12, 0],
@@ -8499,6 +10230,7 @@ mod tests {
                         timestamp: frame_index * 3_000,
                         frame_index,
                         first_stream_packet_index: frame_index,
+                        frame_type: None,
                         keyframe: frame_index == 1,
                         contiguous: true,
                         bytes: vec![0, 0, 0, 1, 0x26],
@@ -8531,6 +10263,7 @@ mod tests {
                 timestamp: frame_index * 3_000,
                 frame_index,
                 first_stream_packet_index: frame_index,
+                frame_type: None,
                 keyframe: true,
                 contiguous: true,
                 bytes: vec![0, 0, 0, 1, 0x26],
@@ -8612,6 +10345,37 @@ mod tests {
 
     fn config() -> NvstVideoConfig {
         NvstVideoConfig::from_legacy_handoff(&legacy_handoff(), None).expect("valid config")
+    }
+
+    #[test]
+    fn recovery_policy_handoff_is_optional_typed_and_preserved() {
+        assert_eq!(
+            config().recovery_policy,
+            crate::NvstRecoveryPolicy::default()
+        );
+        let mut handoff = legacy_handoff();
+        handoff["recoveryPolicy"] = json!({"refPicInvalidation":false,"streamRecoveryType":2,"framesWithInvalidRefThreshold":4});
+        let config = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
+        assert_eq!(config.recovery_policy.ref_pic_invalidation, Some(false));
+        assert_eq!(config.recovery_policy.stream_recovery_type, Some(2));
+        handoff["recoveryPolicy"] = json!({"refPicInvalidation":"1"});
+        assert!(NvstVideoConfig::from_legacy_handoff(&handoff, None).is_err());
+    }
+
+    #[test]
+    fn readiness_requires_dtls_or_authenticated_peer_media() {
+        let feedback = NvstFeedbackState::default();
+        assert!(!feedback.authenticated_transport_ready());
+        feedback.record_socket_receive(StreamSocket::Video, false, true, 10);
+        feedback.record_socket_receive(StreamSocket::Video, true, false, 10);
+        assert!(!feedback.authenticated_transport_ready());
+        feedback.record_socket_receive(StreamSocket::Video, true, true, 10);
+        assert!(feedback.authenticated_transport_ready());
+        let feedback = NvstFeedbackState::default();
+        feedback
+            .authenticated_transport_ready
+            .store(true, Ordering::Release);
+        assert!(feedback.authenticated_transport_ready());
     }
 
     #[test]
@@ -9348,6 +11112,387 @@ mod tests {
             std::io::ErrorKind::TimedOut,
             "timeout",
         )));
+    }
+
+    fn spawn_video_with_keepalive_fault(
+        socket: UdpSocket,
+        config: NvstVideoConfig,
+        media_consumer: MediaConsumer,
+        event_sender: Sender<NvstReceiveEvent>,
+        send_keepalive: impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>
+        + Send
+        + 'static,
+    ) -> NvstUdpReceiverSession {
+        socket
+            .set_read_timeout(Some(UDP_RECEIVE_POLL_INTERVAL))
+            .unwrap();
+        let (commands, receiver) = mpsc::channel();
+        let input_ready = Arc::new(AtomicBool::new(false));
+        let microphone = Arc::new(Mutex::new(MicrophoneQueue::new(false)));
+        let outputs = NvstReceiverOutputs {
+            media_consumer,
+            event_sender,
+            input_ready: input_ready.clone(),
+            microphone: microphone.clone(),
+        };
+        let join = thread::spawn(move || {
+            run_nvst_video_receiver(
+                socket,
+                config,
+                receiver,
+                outputs,
+                Instant::now(),
+                send_keepalive,
+            );
+        });
+        NvstUdpReceiverSession {
+            commands,
+            join: Some(join),
+            input_ready,
+            microphone,
+        }
+    }
+
+    #[test]
+    fn video_keepalive_single_resource_failure_preserves_receive_and_cadence() {
+        for (error, authenticated_ping) in [
+            (std::io::Error::from_raw_os_error(10055), true),
+            (std::io::Error::from(std::io::ErrorKind::Interrupted), true),
+            (std::io::Error::from(std::io::ErrorKind::WouldBlock), true),
+            (std::io::Error::from_raw_os_error(10055), false),
+            (std::io::Error::from(std::io::ErrorKind::Interrupted), false),
+            (std::io::Error::from(std::io::ErrorKind::WouldBlock), false),
+        ] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let client_address = client.local_addr().unwrap();
+            let mut config = config();
+            config.video_peer = server.local_addr().unwrap();
+            config.stun_credentials = authenticated_ping.then(stun_credentials);
+            let ping_payload = config.ping_payload.clone();
+            let packet = protect_for_test(
+                &test_srtp(&config),
+                build_plaintext_rtp(
+                    1,
+                    FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                    42,
+                    &[0, 0, 1, 0x65],
+                ),
+                0,
+            );
+            server.send_to(&packet, client_address).unwrap();
+            let (media_consumer, media_receiver) = mpsc::sync_channel(1);
+            let (event_sender, event_receiver) = mpsc::channel();
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            let worker_attempts = attempts.clone();
+            let mut first_error = Some(error);
+            let session = spawn_video_with_keepalive_fault(
+                client,
+                config,
+                media_consumer,
+                event_sender,
+                move |socket, packet, peer| {
+                    worker_attempts.lock().unwrap().push(Instant::now());
+                    if let Some(error) = first_error.take() {
+                        Err(error)
+                    } else {
+                        socket.send_to(packet, peer)
+                    }
+                },
+            );
+            let frame = media_receiver.recv_timeout(Duration::from_secs(2));
+            assert!(
+                frame.is_ok(),
+                "a failed keepalive must not discard queued video: {frame:?}; events={:?}",
+                event_receiver.try_iter().collect::<Vec<_>>()
+            );
+            assert_eq!(frame.unwrap().frame_index, Some(42));
+            let mut datagram = [0; 512];
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (length, source) = loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "next scheduled keepalive succeeds"
+                );
+                let received = server
+                    .recv_from(&mut datagram)
+                    .expect("next scheduled keepalive succeeds");
+                if (authenticated_ping && looks_like_stun(&datagram[..received.0]))
+                    || (!authenticated_ping && datagram[..received.0] == ping_payload)
+                {
+                    break received;
+                }
+            };
+            assert_eq!(source, client_address);
+            if authenticated_ping {
+                assert!(valid_stun_fingerprint(&datagram[..length]));
+            } else {
+                assert_eq!(datagram[..length], ping_payload);
+            }
+            session.stop();
+            let attempts = attempts.lock().unwrap();
+            assert!(attempts.len() >= 2);
+            assert!(
+                attempts[1].duration_since(attempts[0])
+                    >= PING_INTERVAL_BEFORE_CONNECTION - UDP_RECEIVE_POLL_INTERVAL
+            );
+        }
+    }
+
+    #[test]
+    fn video_keepalive_persistent_resource_failure_stops_despite_inbound_video() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_address = client.local_addr().unwrap();
+        let mut config = config();
+        config.video_peer = server.local_addr().unwrap();
+        config.stun_credentials = Some(stun_credentials());
+        config.timeout = MIN_TIMEOUT;
+        let budget = config.timeout;
+        let srtp = test_srtp(&config);
+        let binding = build_authenticated_stun_packet(
+            STUN_BINDING_REQUEST,
+            &[0x11; 12],
+            stun_credentials().local_password.as_bytes(),
+            &[(STUN_ATTR_USERNAME, b"loc1:remote01".to_vec())],
+        );
+        server.send_to(&binding, client_address).unwrap();
+        let (media_consumer, media_receiver) = mpsc::sync_channel(64);
+        let (event_sender, event_receiver) = mpsc::channel();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let worker_attempts = attempts.clone();
+        let mut sequence = 1;
+        let session = spawn_video_with_keepalive_fault(
+            client,
+            config,
+            media_consumer,
+            event_sender,
+            move |_, _, _| {
+                let packet = protect_for_test(
+                    &srtp,
+                    build_plaintext_rtp(
+                        sequence,
+                        FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                        u32::from(sequence),
+                        &[0, 0, 1, 0x65],
+                    ),
+                    0,
+                );
+                server.send_to(&packet, client_address).unwrap();
+                sequence += 1;
+                worker_attempts.lock().unwrap().push(Instant::now());
+                Err(std::io::Error::from_raw_os_error(10055))
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        thread::sleep(budget + PING_INTERVAL_AFTER_CONNECTION);
+        let mut frames = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "persistent failures must terminate"
+            );
+            if let Ok(event) = event_receiver.recv_timeout(PING_INTERVAL_BEFORE_CONNECTION) {
+                assert!(
+                    matches!(
+                        event,
+                        NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+                            NvstStopCause::Socket {
+                                operation: "video-natt-send",
+                                os_code: Some(10055),
+                                ..
+                            }
+                        ))
+                    ),
+                    "unexpected event: {event:?}"
+                );
+                break;
+            }
+            for frame in media_receiver.try_iter() {
+                frames += 1;
+                assert_eq!(frame.frame_index, Some(frames));
+            }
+        }
+        session.stop();
+        for frame in media_receiver.try_iter() {
+            frames += 1;
+            assert_eq!(frame.frame_index, Some(frames));
+        }
+        let attempts = attempts.lock().unwrap();
+        assert!(
+            frames > 0,
+            "receive must continue during deferred keepalives"
+        );
+        assert!(attempts.len() > 1);
+        assert!(attempts.last().unwrap().duration_since(attempts[0]) >= budget);
+        assert!(
+            attempts
+                .windows(2)
+                .all(|pair| pair[1].duration_since(pair[0])
+                    >= PING_INTERVAL_AFTER_CONNECTION - UDP_RECEIVE_POLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn video_keepalive_permanent_send_failures_remain_terminal() {
+        for error in [
+            std::io::Error::from_raw_os_error(10051),
+            std::io::Error::from_raw_os_error(10065),
+            std::io::Error::from_raw_os_error(10022),
+            std::io::Error::from_raw_os_error(10038),
+            std::io::Error::from_raw_os_error(1),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+            std::io::Error::from(std::io::ErrorKind::TimedOut),
+        ] {
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut config = config();
+            config.stun_credentials = Some(stun_credentials());
+            let code = error.raw_os_error();
+            let kind = error.kind();
+            let (media_consumer, _media_receiver) = mpsc::sync_channel(1);
+            let (event_sender, event_receiver) = mpsc::channel();
+            let mut error = Some(error);
+            let session = spawn_video_with_keepalive_fault(
+                client,
+                config,
+                media_consumer,
+                event_sender,
+                move |_, _, _| Err(error.take().expect("permanent failure must not retry")),
+            );
+            let event = event_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            session.stop();
+            assert!(
+                matches!(event, NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(NvstStopCause::Socket { operation: "video-natt-send", kind: actual_kind, os_code, })) if actual_kind == kind && os_code == code)
+            );
+        }
+    }
+
+    #[test]
+    fn video_keepalive_records_only_successful_sends_and_resets_failure_budget() {
+        let origin = Instant::now();
+        let budget = MIN_TIMEOUT;
+        let mut state = VideoKeepaliveState::default();
+        for (index, error) in [
+            std::io::Error::from_raw_os_error(10055),
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+            std::io::Error::from(std::io::ErrorKind::WouldBlock),
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state
+                .record_send(
+                    Err(error),
+                    Some([index as u8; 12]),
+                    origin,
+                    budget,
+                    "video-natt-send",
+                    0,
+                )
+                .unwrap();
+            assert_eq!(state.pings_sent, 0);
+            assert!(state.ping_tracker.pending.is_empty());
+        }
+        assert_eq!(state.first_failure, Some(origin));
+        assert_eq!(state.failed_attempts, 4);
+        assert_eq!(state.deferred_total, 3);
+        let sent_at = origin + budget - Duration::from_millis(1);
+        state
+            .record_send(
+                Ok(128),
+                Some([9; 12]),
+                sent_at,
+                budget,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, None);
+        assert_eq!(state.failed_attempts, 0);
+        assert_eq!(state.pings_sent, 1);
+        assert_eq!(
+            state
+                .ping_tracker
+                .pending
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![([9; 12], sent_at)]
+        );
+        let new_failure = origin + budget;
+        state
+            .record_send(
+                Err(std::io::Error::from_raw_os_error(10055)),
+                Some([10; 12]),
+                new_failure,
+                budget,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, Some(new_failure));
+        assert!(
+            state
+                .record_send(
+                    Err(std::io::Error::from_raw_os_error(10055)),
+                    Some([11; 12]),
+                    new_failure + budget,
+                    budget,
+                    "video-natt-send",
+                    0
+                )
+                .is_err()
+        );
+        assert_eq!(state.pings_sent, 1);
+        assert_eq!(state.ping_tracker.pending.len(), 1);
+    }
+
+    #[test]
+    fn video_keepalive_icmp_errors_do_not_create_tracking_or_extend_resource_deadline() {
+        let origin = Instant::now();
+        let mut state = VideoKeepaliveState::default();
+        state
+            .record_send(
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                Some([1; 12]),
+                origin,
+                MIN_TIMEOUT,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert_eq!(state.first_failure, None);
+        assert_eq!(state.failed_attempts, 0);
+        assert_eq!(state.pings_sent, 0);
+        assert!(state.ping_tracker.pending.is_empty());
+        state
+            .record_send(
+                Err(std::io::Error::from_raw_os_error(10055)),
+                Some([2; 12]),
+                origin,
+                MIN_TIMEOUT,
+                "video-natt-send",
+                0,
+            )
+            .unwrap();
+        assert!(
+            state
+                .record_send(
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    Some([3; 12]),
+                    origin + MIN_TIMEOUT,
+                    MIN_TIMEOUT,
+                    "video-natt-send",
+                    0
+                )
+                .is_err()
+        );
+        assert!(state.ping_tracker.pending.is_empty());
     }
 
     #[cfg(windows)]
@@ -11581,8 +13726,16 @@ mod tests {
             Some(NvstReceiveEvent::Lifecycle(NvstReceiverState::Running))
         );
         assert_eq!(
-            receiver.stop(),
-            Some(NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped))
+            receiver.stop(NvstStopCause::Requested),
+            Some(NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+                NvstStopCause::Requested
+            )))
+        );
+        assert_eq!(receiver.stop(NvstStopCause::MediaConsumerClosed), None);
+        assert_eq!(
+            receiver.state(),
+            NvstReceiverState::Stopped(NvstStopCause::Requested),
+            "the first stop cause must survive later teardown paths"
         );
         assert!(matches!(
             receiver
@@ -12039,6 +14192,86 @@ mod tests {
         bundle_session.stop();
     }
 
+    fn unified_bundle_frame(unified_socket: bool) -> Option<u32> {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bundle = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bundle_address = bundle.local_addr().unwrap();
+        let mut remote = create_nvst_bundle_rtc(&server).unwrap();
+        let mut config = config();
+        config.client_udp_port = bundle_address.port();
+        config.mjolnir_udp_port = None;
+        config.unified_socket = unified_socket;
+        config.video_peer = server.local_addr().unwrap();
+        config.remote_dtls_fingerprint =
+            Some(nvst_local_bundle_identity(&mut remote).dtls_fingerprint);
+        config.stun_credentials = Some(stun_credentials());
+        let packet = protect_for_test(
+            &test_srtp(&config),
+            build_plaintext_rtp(
+                1,
+                FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA,
+                42,
+                &[0, 0, 1, 0x65],
+            ),
+            0,
+        );
+        let (media_consumer, media_receiver) = mpsc::sync_channel(1);
+        let (event_sender, _event_receiver) = mpsc::channel();
+        let bundle_session = spawn_nvst_udp_receiver_with_socket(
+            config,
+            media_consumer,
+            event_sender,
+            Some(bundle),
+            None,
+            Arc::new(HidRuntime::new()),
+            None,
+        )
+        .unwrap();
+        server.send_to(&packet, bundle_address).unwrap();
+        let frame = media_receiver
+            .recv_timeout(Duration::from_millis(500))
+            .ok()
+            .and_then(|frame| frame.frame_index);
+        bundle_session.stop();
+        frame
+    }
+
+    #[test]
+    fn unified_socket_bundle_demuxes_raw_mjolnir_video() {
+        assert_eq!(unified_bundle_frame(true), Some(42));
+        assert_eq!(unified_bundle_frame(false), None);
+    }
+
+    #[test]
+    fn unified_socket_handoff_rejects_a_dedicated_video_socket() {
+        let mut handoff = legacy_handoff();
+        handoff["unifiedSocket"] = json!(true);
+        handoff["mjolnirUdpPort"] = json!(49005);
+        assert!(matches!(
+            NvstVideoConfig::from_legacy_handoff(&handoff, None),
+            Err(NvstConfigError::OutOfRange {
+                field: "unifiedSocket"
+            })
+        ));
+        handoff["mjolnirUdpPort"] = Value::Null;
+        let config = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
+        assert!(config.unified_socket);
+        assert_eq!(config.mjolnir_udp_port(), None);
+        assert!(config.carries_mjolnir_video());
+        handoff["unifiedSocket"] = json!(false);
+        let bundle_only = NvstVideoConfig::from_legacy_handoff(&handoff, None).unwrap();
+        assert!(!bundle_only.carries_mjolnir_video());
+        handoff["unifiedSocket"] = json!(true);
+        handoff["unifiedSocket"] = json!("yes");
+        assert!(matches!(
+            NvstVideoConfig::from_legacy_handoff(&handoff, None),
+            Err(NvstConfigError::InvalidFieldType {
+                field: "unifiedSocket",
+                ..
+            })
+        ));
+    }
+
     fn play_gate_loopback(accept_play: bool) {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
         server
@@ -12078,6 +14311,8 @@ mod tests {
         config.video_peer = server_addr;
         config.remote_dtls_fingerprint = Some(server_identity.dtls_fingerprint);
         config.stun_credentials = Some(credentials);
+        let feedback = config.feedback();
+        assert!(!feedback.authenticated_transport_ready());
         let (media_consumer, _media_receiver) = mpsc::sync_channel(1);
         let (event_sender, event_receiver) = mpsc::channel();
         let (play_sender, play_receiver) = mpsc::sync_channel(1);
@@ -12148,6 +14383,14 @@ mod tests {
             }
         }
         assert!(version_sent, "SCTP version exchange must precede PLAY");
+        assert!(
+            feedback.authenticated_transport_ready(),
+            "DTLS readiness must precede PLAY"
+        );
+        assert!(
+            feedback.video_timeout_origin(Instant::now()).is_none(),
+            "DTLS readiness must not start the video watchdog before PLAY"
+        );
         let until = Instant::now() + Duration::from_millis(300);
         while Instant::now() < until {
             let now = Instant::now();
@@ -12221,6 +14464,10 @@ mod tests {
             }
             assert!(input_ready, "accepted PLAY must publish input readiness");
             assert!(
+                feedback.video_timeout_origin(Instant::now()).is_some(),
+                "accepted PLAY must start the shared video watchdog clock"
+            );
+            assert!(
                 !app_messages.is_empty(),
                 "accepted PLAY must send activation"
             );
@@ -12232,7 +14479,9 @@ mod tests {
                 if let Ok(event) = event_receiver.recv_timeout(Duration::from_millis(50)) {
                     stopped |= matches!(
                         event,
-                        NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped)
+                        NvstReceiveEvent::Lifecycle(NvstReceiverState::Stopped(
+                            NvstStopCause::UpstreamGateClosed
+                        ))
                     );
                     assert!(!matches!(event, NvstReceiveEvent::InputReady(_)));
                     if stopped {
@@ -12388,6 +14637,7 @@ mod tests {
                 timestamp: frame_index,
                 frame_index,
                 first_stream_packet_index: frame_index,
+                frame_type: None,
                 keyframe: false,
                 contiguous: true,
                 bytes: vec![frame_index as u8],

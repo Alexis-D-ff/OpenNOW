@@ -39,24 +39,10 @@ FocusScope {
             return false
         return ShellStore.selectedLaunchDecision.status === "ready"
     }
-    readonly property bool hasRtx: {
-        const game = root.game
-        if (!game)
-            return false
-        const parts = [String(game.title || "")]
-        const lists = [game.genres, game.nvidiaTech, game.featureLabels]
-        for (let i = 0; i < lists.length; ++i) {
-            const list = lists[i] || []
-            for (let j = 0; j < list.length; ++j)
-                parts.push(String(list[j]))
-        }
-        const skuTags = game.catalogSkuStrings && game.catalogSkuStrings.SKU_BASED_TAG
-        if (skuTags) {
-            for (let k = 0; k < skuTags.length; ++k)
-                parts.push(String(skuTags[k]))
-        }
-        return parts.join(" ").toLowerCase().indexOf("rtx") >= 0
-    }
+    readonly property var features: DesktopTokens.gameFeatures(root.game)
+    property bool dlssExpanded: false
+    DesktopGameDlss { id: dlssInfo; game: root.game }
+    readonly property bool lockedByMembership: ShellStore.gameLockedByMembership(root.game)
     readonly property string lastPlayedText: {
         const game = root.game
         if (!game)
@@ -163,8 +149,14 @@ FocusScope {
             else if (control)
                 add(control.replace(/_/g, " "))
         }
-        if (root.hasRtx)
+        if (root.features.indexOf("rtx") >= 0)
             add("RTX")
+        if (root.features.indexOf("hdr") >= 0)
+            add(qsTr("HDR"))
+        if (root.features.indexOf("reflex") >= 0)
+            add(qsTr("REFLEX"))
+        if (root.features.indexOf("dlss") >= 0)
+            add("DLSS")
         if (game.membershipTierLabel)
             add(String(game.membershipTierLabel))
         return labels
@@ -212,8 +204,8 @@ FocusScope {
     readonly property var summaryCards: [
         {glyph:"monitor", title:resolutionText + " · " + fpsText, detail:codecText + " · " + String(streamSettings.colorQuality || "8bit_420").replace("_", " ")},
         {glyph:"globe", title:regionLabel(), detail:qsTr("Region selected at launch")},
-        {glyph:"clock", title:membershipText || qsTr("Membership"), detail:ShellStore.subscription && ShellStore.subscription.remainingHours !== undefined
-            ? qsTr("%1 h remaining").arg(Math.max(0, Number(ShellStore.subscription.remainingHours)).toFixed(1)) : qsTr("Entitlements checked at launch")}
+        {glyph:"clock", title:membershipText || qsTr("Membership"), detail:ShellStore.remainingPlaytimeHours !== null
+            ? qsTr("%1 h remaining").arg(ShellStore.remainingPlaytimeHours.toFixed(1)) : qsTr("Entitlements checked at launch")}
     ]
     function regionLabel() {
         const value = String(streamSettings.region || "")
@@ -258,6 +250,7 @@ FocusScope {
                 id: detailsColumn
                 width: parent.width
                 Item {
+                    objectName: "gameDetailsHero"
                     width: parent.width
                     height: Math.max(headerInfo.implicitHeight + DesktopTokens.px(48),
                         Math.min(DesktopTokens.px(280), root.maximumDialogHeight * 0.38))
@@ -296,6 +289,12 @@ FocusScope {
                                 color: Theme.textMuted; font.family: Theme.bodyFont; font.pixelSize: DesktopTokens.captionSize
                             }
                         }
+                        DesktopGameDlssChips {
+                            width: parent.width
+                            info: dlssInfo
+                            expanded: root.dlssExpanded
+                            onToggleRequested: root.dlssExpanded = !root.dlssExpanded
+                        }
                     }
                 }
                 Item {
@@ -307,22 +306,53 @@ FocusScope {
                         x: DesktopTokens.px(24)
                         width: parent.width - DesktopTokens.px(48)
                         spacing: DesktopTokens.px(20)
+                        DesktopGameDlssPanel {
+                            width: parent.width
+                            info: dlssInfo
+                            visible: root.dlssExpanded && (dlssInfo.listed || dlssInfo.notListed)
+                        }
                         Column {
                             objectName: "gameDetailsReadiness"
                             width: parent.width
                             spacing: DesktopTokens.px(8)
+                            Row {
+                                id: membershipNotice
+                                objectName: "gameDetailsMembershipNotice"
+                                width: parent.width
+                                visible: root.lockedByMembership
+                                spacing: DesktopTokens.px(8)
+                                Image {
+                                    y: DesktopTokens.px(2)
+                                    width: DesktopTokens.px(14)
+                                    height: width
+                                    source: "qrc:/qt/qml/OpenNOW/res/icons/desktop-lock.svg"
+                                    sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
+                                }
+                                Text {
+                                    width: parent.width - DesktopTokens.px(22)
+                                    text: qsTr("%1 needs a paid GeForce NOW membership. Your Free plan can't start it.")
+                                        .arg(String(root.game && root.game.title || qsTr("This game")))
+                                    wrapMode: Text.WordWrap
+                                    color: Theme.lightMode ? Theme.label : DesktopTokens.amber
+                                    font.family: Theme.bodyFont
+                                    font.pixelSize: DesktopTokens.captionSize
+                                    font.weight: Font.Bold
+                                }
+                            }
                             Text {
                                 id: readinessNoticeLabel
                                 objectName: "catalogReadinessNotice"
                                 width: parent.width
                                 text: I18n.source(ShellStore.cloudMutationMessage || ShellStore.selectedLaunchDecision.message || ShellStore.readinessNotice(root.game), I18n.revision)
-                                visible: text !== ""
+                                readonly property bool shown: text !== "" && !(root.lockedByMembership && !ShellStore.cloudMutationMessage
+                                    && ShellStore.selectedLaunchDecision.status === "subscription_required")
+                                visible: shown
                                 wrapMode: Text.WordWrap
                                 color: ShellStore.cloudMutationState === "unconfirmed" ? (Theme.lightMode ? Qt.darker(DesktopTokens.danger, 2) : DesktopTokens.danger) : Theme.textMuted
                                 font.family: Theme.bodyFont
                                 font.pixelSize: DesktopTokens.captionSize
                             }
-                            visible: storeVariants.count > 1 || readinessNoticeLabel.text !== ""
+                            visible: storeVariants.count > 1 || readinessNoticeLabel.shown || root.lockedByMembership
                             Text {
                                 text: qsTr("PLATFORM")
                                 visible: storeVariants.count > 1
@@ -353,8 +383,8 @@ FocusScope {
                                         autoExclusive: true
                                         checked: root.game ? index === Number(root.game.selectedVariantIndex || 0) : false
                                         primary: checked
-                                        Accessible.description: ["MANUAL", "PLATFORM_SYNC"].indexOf(modelData.libraryStatus) >= 0
-                                            ? qsTr("Owned") : modelData.libraryStatus === "NOT_OWNED" ? qsTr("Not owned") : qsTr("Ownership unconfirmed")
+                                        readonly property string ownership: ConsoleStores.ownership(modelData)
+                                        Accessible.description: ConsoleStores.ownershipLabel(modelData)
                                         onClicked: root.variantSelected(index)
                                         Keys.onReturnPressed: root.variantSelected(index)
                                         Keys.onEnterPressed: root.variantSelected(index)
@@ -384,6 +414,40 @@ FocusScope {
                                                 text: platformButton.text
                                                 font: platformButton.font
                                                 color: platformButton.checked ? "#0A0D14" : Theme.label
+                                            }
+                                            Rectangle {
+                                                objectName: "desktopStoreOwnership" + platformButton.index
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                visible: platformButton.ownership !== "unknown"
+                                                width: ownershipTag.implicitWidth + DesktopTokens.px(platformButton.ownership === "owned" ? 22 : 14)
+                                                height: DesktopTokens.px(18)
+                                                radius: height / 2
+                                                color: platformButton.ownership === "owned" ? Qt.rgba(0.114, 0.725, 0.329, 0.16) : "transparent"
+                                                border.width: 1
+                                                border.color: platformButton.ownership === "owned" ? Qt.rgba(0.114, 0.725, 0.329, 0.45)
+                                                    : platformButton.checked ? "#330A0D14" : Theme.seam
+                                                Rectangle {
+                                                    visible: platformButton.ownership === "owned"
+                                                    x: DesktopTokens.px(7)
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: DesktopTokens.px(5)
+                                                    height: width
+                                                    radius: width / 2
+                                                    color: DesktopTokens.green
+                                                }
+                                                Text {
+                                                    id: ownershipTag
+                                                    x: platformButton.ownership === "owned" ? DesktopTokens.px(15) : DesktopTokens.px(7)
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: platformButton.ownership === "owned" ? qsTr("OWNED") : qsTr("NOT OWNED")
+                                                    color: platformButton.ownership === "owned"
+                                                        ? (platformButton.checked || Theme.lightMode ? "#126B4E" : DesktopTokens.green)
+                                                        : platformButton.checked ? "#990A0D14" : Theme.textMuted
+                                                    font.family: Theme.monoFont
+                                                    font.pixelSize: DesktopTokens.tinySize
+                                                    font.weight: Font.Bold
+                                                    font.letterSpacing: 0.6
+                                                }
                                             }
                                         }
                                     }

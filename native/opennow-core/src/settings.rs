@@ -24,6 +24,16 @@ const SHORTCUT_KEYS: [&str; 9] = [
     "shortcutSaveClip",
 ];
 const RESERVED_SHORTCUTS: [&str; 2] = ["Ctrl+G", "Shift+F3"];
+const HDR_NOTICE_SHOWN: &str = "hdrNoticeShownGameIds";
+const MAXIMUM_HDR_NOTICE_SHOWN: usize = 200;
+const MAXIMUM_CONTROLLER_PROFILES: usize = 32;
+const MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS: usize = 160;
+const MAXIMUM_CONTROLLER_PROFILE_NAME_CHARS: usize = 80;
+const CONTROLLER_PROFILE_TUNING: [(&str, i64); 3] = [
+    ("leftStickDeadzone", 50),
+    ("rightStickDeadzone", 50),
+    ("vibrationIntensity", 100),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LoadPolicy {
@@ -71,6 +81,16 @@ impl SettingsStore {
             });
             match persisted {
                 Some(persisted) => {
+                    if !persisted.contains_key("webrtcCompatibilityMode")
+                        && persisted.get("allianceWebrtcCompatibility") == Some(&json!(true))
+                    {
+                        values.insert("webrtcCompatibilityMode".to_owned(), json!("on"));
+                    }
+                    if !persisted.contains_key("startAsLastUsedAccount")
+                        && persisted.get("consoleProfilePickerOnLaunch") == Some(&json!(false))
+                    {
+                        values.insert("startAsLastUsedAccount".to_owned(), json!(true));
+                    }
                     migrate_onboarding = policy == LoadPolicy::ReadWrite
                         && !persisted.contains_key("onboardingCompleted");
                     if migrate_onboarding {
@@ -220,6 +240,12 @@ impl SettingsStore {
             normalize_proxy_url(raw)?;
         }
         let previous_values = self.values.clone();
+        if key == "allianceWebrtcCompatibility" {
+            self.values.insert(
+                "webrtcCompatibilityMode".to_owned(),
+                json!(if value == true { "on" } else { "off" }),
+            );
+        }
         self.values.insert(key.to_owned(), value);
         self.normalize();
         if key == "microphoneMode" && self.values.get(key) == Some(&json!("voice-activity")) {
@@ -355,6 +381,7 @@ impl SettingsStore {
 
     fn normalize(&mut self) {
         normalize_types(&mut self.values);
+        normalize_recent_ids(&mut self.values, HDR_NOTICE_SHOWN, MAXIMUM_HDR_NOTICE_SHOWN);
         if self.values["audioOutputDevice"]
             .as_str()
             .is_some_and(|device| device.len() > 1024 || device.contains('\0'))
@@ -436,6 +463,16 @@ impl SettingsStore {
         );
         normalize_choice(
             &mut self.values,
+            "webrtcCompatibilityMode",
+            &["auto", "on", "off"],
+            "auto",
+        );
+        self.values.insert(
+            "allianceWebrtcCompatibility".to_owned(),
+            json!(self.values["webrtcCompatibilityMode"] == "on"),
+        );
+        normalize_choice(
+            &mut self.values,
             "codec",
             &["auto", "av1", "h264", "h265"],
             "auto",
@@ -469,6 +506,9 @@ impl SettingsStore {
             }
         }
         normalize_choice(&mut self.values, "frameGeneration", &["off", "2x"], "off");
+        let dlss_overrides = crate::dlss::normalize(&self.values[crate::dlss::SETTING]);
+        self.values
+            .insert(crate::dlss::SETTING.to_owned(), dlss_overrides);
         normalize_choice(
             &mut self.values,
             "upscaling",
@@ -484,6 +524,18 @@ impl SettingsStore {
                 &["auto", "hardware", "software"],
                 "auto",
             );
+        }
+        normalize_choice(
+            &mut self.values,
+            "automaticBugReports",
+            &["unset", "enabled", "disabled"],
+            "unset",
+        );
+        if self.values["errorReportingConsent"] == "denied"
+            && self.values["automaticBugReports"] == "unset"
+        {
+            self.values
+                .insert("automaticBugReports".to_owned(), json!("disabled"));
         }
         normalize_choice(
             &mut self.values,
@@ -565,6 +617,8 @@ impl SettingsStore {
         clamp_number(&mut self.values, "statsOverlayScale", 0.85, 1.5, 1.0);
         clamp_number(&mut self.values, "statsOverlayOpacity", 40.0, 100.0, 85.0);
         normalize_optional_integer(&mut self.values, "recordingBitrateMbps", 1, 12);
+        normalize_optional_integer(&mut self.values, "windowX", -32768, 32767);
+        normalize_optional_integer(&mut self.values, "windowY", -32768, 32767);
         normalize_bounded_strings(&mut self.values);
         normalize_nested_settings(&mut self.values);
     }
@@ -842,6 +896,24 @@ fn normalize_types(values: &mut Map<String, Value>) {
     }
 }
 
+fn normalize_recent_ids(values: &mut Map<String, Value>, key: &str, limit: usize) {
+    let mut ids = Vec::new();
+    for id in values[key].as_array().into_iter().flatten().rev() {
+        if ids.len() == limit {
+            break;
+        }
+        if id
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+            && !ids.contains(id)
+        {
+            ids.push(id.clone());
+        }
+    }
+    ids.reverse();
+    values.insert(key.to_owned(), Value::Array(ids));
+}
+
 fn normalize_optional_integer(
     values: &mut Map<String, Value>,
     key: &str,
@@ -946,6 +1018,58 @@ fn normalize_bounded_strings(values: &mut Map<String, Value>) {
         .take(500)
         .collect();
     values.insert("homeTileSizes".to_owned(), Value::Object(tile_sizes));
+
+    values.insert(
+        "controllerProfiles".to_owned(),
+        Value::Object(normalize_controller_profiles(&values["controllerProfiles"])),
+    );
+}
+
+fn normalize_controller_profiles(value: &Value) -> Map<String, Value> {
+    let mut profiles: Vec<(String, Map<String, Value>, i64)> = value
+        .as_object()
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter_map(|(key, profile)| {
+            let key = key.trim();
+            if key.is_empty() || key.chars().count() > MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS {
+                return None;
+            }
+            let profile = profile.as_object()?;
+            let mut normalized = Map::new();
+            for (field, maximum) in CONTROLLER_PROFILE_TUNING {
+                if let Some(value) = profile.get(field).and_then(Value::as_i64) {
+                    normalized.insert(field.to_owned(), json!(value.clamp(0, maximum)));
+                }
+            }
+            if normalized.is_empty() {
+                return None;
+            }
+            if let Some(name) = profile.get("name").and_then(Value::as_str) {
+                let name: String = name
+                    .trim()
+                    .chars()
+                    .take(MAXIMUM_CONTROLLER_PROFILE_NAME_CHARS)
+                    .collect();
+                if !name.is_empty() {
+                    normalized.insert("name".to_owned(), Value::String(name));
+                }
+            }
+            let last_seen = profile
+                .get("lastSeen")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0);
+            normalized.insert("lastSeen".to_owned(), json!(last_seen));
+            Some((key.to_owned(), normalized, last_seen))
+        })
+        .collect();
+    profiles.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    profiles
+        .into_iter()
+        .take(MAXIMUM_CONTROLLER_PROFILES)
+        .map(|(key, profile, _)| (key, Value::Object(profile)))
+        .collect()
 }
 
 fn normalize_nested_settings(values: &mut Map<String, Value>) {
@@ -1056,11 +1180,12 @@ fn defaults() -> Map<String, Value> {
         "nativeVideoBackend":"auto", "nativeStreamerExecutablePath":"", "audioOutputDevice":"",
         "windowsGpuDeviceId":"",
         "nativeCloudGsyncMode":"auto", "nativeD3dFullscreenMode":"auto",
-        "nativeExternalRenderer":false, "transportMode":"nvst", "showNativeStreamerStats":false,
+        "nativeExternalRenderer":false, "transportMode":"nvst", "allianceWebrtcCompatibility":false, "webrtcCompatibilityMode":"auto", "showNativeStreamerStats":false,
         "codec":"auto", "fallbackCodec":"auto", "decoderPreference":"auto",
         "encoderPreference":"auto", "colorQuality":"8bit_420", "enableHdr":false, "region":"", "regionProviderIdpId":"", "providerRegions":{},
         "suppressTenBitWarning":false,
         "sessionProxyEnabled":false, "sessionProxyUrl":"", "clipboardPaste":false, "networkTest":false,
+        "suppressAwdlWhileStreaming":false,
         "enableGyroscopeControls":false, "steamControllerCompatibilityMode":false,
         "nativeCursorOverlay":true, "mouseSensitivity":1, "mouseAcceleration":1,
         "shortcutToggleStats":"Ctrl+N", "shortcutTogglePointerLock":"F8",
@@ -1081,18 +1206,18 @@ fn defaults() -> Map<String, Value> {
         "statsShowVideo":true, "statsShowClock":true, "statsShowGraphs":true,
         "appAccentColor":"green", "appTheme":"auto", "appLanguage":"system", "themePack":"nocturne", "translucentUI":false,
         "showTileLabels":true,
-        "controllerMode":true, "controllerModePromptDismissed":false,
+        "controllerMode":true, "controllerModePromptDismissed":false, "forwardFlightControls":true,
         "controllerLeftStickDeadzone":5, "controllerRightStickDeadzone":5,
-        "controllerVibrationIntensity":100,
-        "reducedMotion":false,
-        "launchInConsoleMode":false, "consoleProfilePickerOnLaunch":true,
+        "controllerVibrationIntensity":100, "controllerProfiles":{},
+        "reducedMotion":false, "uiSoundsEnabled":true, "confirmQuitWhenIdle":true,
+        "launchInConsoleMode":false, "startAsLastUsedAccount":false,
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
         "desktopBackgroundImage":"", "desktopBackgroundOpacity":30,
         "switchToConsoleOnPad":false, "leaveConsoleOnPointer":true,
-        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
+        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "hdrNoticeShownGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
         "showSessionReport":true, "showSessionTimeRemainingInStatsOverlay":false,
         "sessionClockShowEveryMinutes":60, "sessionClockShowDurationSeconds":30,
-        "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",
+        "windowX":null, "windowY":null, "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",
         "gameLanguage":"en_US", "enablePersistingInGameSettings":true, "enableL4S":false,
         "identifyAsSteamDeck":false, "steamBigPictureMode":false,
         "enableCloudGsync":false, "discordRichPresence":false,
@@ -1101,10 +1226,17 @@ fn defaults() -> Map<String, Value> {
         "allowEscapeToExitFullscreen":false, "lastSeenReleaseHighlightsVersion":"",
         "videoShader":{"enabled":false,"sharpen":40,"saturation":100,"contrast":100,"brightness":100,"vibrance":0,"filmGrain":0},
         "frameInterpolation":{"enabled":false,"factor":2,"quality":480},
-        "errorReportingConsent":"unset", "telemetryInstallId":""
+        "errorReportingConsent":"unset", "automaticBugReports":"unset", "telemetryInstallId":""
     })
     .as_object()
     .cloned()
+    .map(|mut values| {
+        values.insert(
+            crate::dlss::SETTING.to_owned(),
+            crate::dlss::default_overrides(),
+        );
+        values
+    })
     .expect("settings defaults are an object")
 }
 
@@ -1112,6 +1244,24 @@ fn defaults() -> Map<String, Value> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn hdr_notice_history_keeps_the_newest_two_hundred_distinct_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(store.all()[HDR_NOTICE_SHOWN], json!([]));
+        let mut ids: Vec<Value> = (0..205).map(|id| json!(id.to_string())).collect();
+        ids.extend([json!("7"), json!(""), json!(42), json!("x".repeat(257))]);
+        store.set(HDR_NOTICE_SHOWN, Value::Array(ids)).unwrap();
+        let kept = store.all()[HDR_NOTICE_SHOWN].as_array().unwrap().clone();
+        assert_eq!(kept.len(), MAXIMUM_HDR_NOTICE_SHOWN);
+        assert_eq!(kept.first(), Some(&json!("5")));
+        assert_eq!(kept.last(), Some(&json!("7")));
+        assert!(!kept.contains(&json!("4")));
+        assert_eq!(kept.iter().filter(|id| **id == "7").count(), 1);
+        let reloaded = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(reloaded.all()[HDR_NOTICE_SHOWN], Value::Array(kept));
+    }
 
     #[test]
     fn settings_backup_recovers_missing_and_corrupt_primary_without_bootstrap_writes() {
@@ -1155,6 +1305,20 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn window_position_persists_across_monitors_and_rejects_non_integers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(store.all()["windowX"], Value::Null);
+        assert_eq!(store.all()["windowY"], Value::Null);
+        assert_eq!(store.set("windowX", json!(-1920)).unwrap(), json!(-1920));
+        assert_eq!(store.set("windowY", json!(99999)).unwrap(), json!(32767));
+        let reloaded = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(reloaded.all()["windowX"], json!(-1920));
+        assert_eq!(reloaded.all()["windowY"], json!(32767));
+        assert_eq!(store.set("windowX", json!("left")).unwrap(), Value::Null);
     }
 
     #[test]
@@ -1265,6 +1429,68 @@ mod tests {
         let mut url = url::Url::parse("https://fixture.invalid/").unwrap();
         crate::language::append_session_preferences(&mut url, &settings);
         assert_eq!(url.query(), Some("keyboardLayout=en-US&languageCode=en_US"));
+    }
+
+    #[test]
+    fn alliance_webrtc_setting_is_default_off_boolean_and_independent_of_legacy_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+        assert_eq!(store.all()["allianceWebrtcCompatibility"], false);
+        store.set("transportMode", json!("webrtc")).unwrap();
+        assert_eq!(store.all()["transportMode"], "nvst");
+        assert_eq!(store.all()["allianceWebrtcCompatibility"], false);
+        assert_eq!(
+            store
+                .set("allianceWebrtcCompatibility", json!("true"))
+                .unwrap(),
+            false
+        );
+        store
+            .set("allianceWebrtcCompatibility", json!(true))
+            .unwrap();
+        let restored = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+        assert_eq!(restored.all()["allianceWebrtcCompatibility"], true);
+        assert_eq!(restored.all()["transportMode"], "nvst");
+    }
+
+    #[test]
+    fn automatic_webrtc_mode_preserves_manual_overrides_and_migrates_old_opt_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+        assert_eq!(store.all()["webrtcCompatibilityMode"], "auto");
+        for mode in ["off", "on", "auto"] {
+            assert_eq!(
+                store.set("webrtcCompatibilityMode", json!(mode)).unwrap(),
+                mode
+            );
+            let restored = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+            assert_eq!(restored.all()["webrtcCompatibilityMode"], mode);
+            assert_eq!(restored.all()["allianceWebrtcCompatibility"], mode == "on");
+        }
+        for invalid in [json!(true), json!("unexpected"), Value::Null] {
+            assert_eq!(
+                store.set("webrtcCompatibilityMode", invalid).unwrap(),
+                "auto"
+            );
+        }
+        for (legacy, expected) in [(true, "on"), (false, "auto")] {
+            std::fs::write(
+                directory.path().join("settings.json"),
+                json!({
+                    "allianceWebrtcCompatibility":legacy,"onboardingCompleted":true,
+                    "qtConsoleModePolicyVersion":1
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut restored = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+            assert_eq!(restored.all()["webrtcCompatibilityMode"], expected);
+            restored
+                .set("webrtcCompatibilityMode", json!("off"))
+                .unwrap();
+            let again = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+            assert_eq!(again.all()["webrtcCompatibilityMode"], "off");
+        }
     }
 
     #[test]
@@ -1441,6 +1667,66 @@ mod tests {
             );
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn awdl_suppression_is_opt_in_boolean_and_persisted() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-awdl-setting-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["suppressAwdlWhileStreaming"], json!(false));
+        assert_eq!(
+            store
+                .set("suppressAwdlWhileStreaming", json!(true))
+                .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            SettingsStore::load(Some(directory.clone())).unwrap().all()["suppressAwdlWhileStreaming"],
+            json!(true)
+        );
+        for invalid in [json!("true"), json!(1), json!(null), json!([]), json!({})] {
+            assert_eq!(
+                store.set("suppressAwdlWhileStreaming", invalid).unwrap(),
+                json!(false)
+            );
+        }
+        store
+            .set("suppressAwdlWhileStreaming", json!(true))
+            .unwrap();
+        store.reset().unwrap();
+        assert_eq!(store.all()["suppressAwdlWhileStreaming"], json!(false));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn flight_control_forwarding_defaults_on_and_persists_boolean_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_path_buf())).unwrap();
+        assert_eq!(store.all()["forwardFlightControls"], json!(true));
+        assert_eq!(
+            store.set("forwardFlightControls", json!(false)).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            SettingsStore::load(Some(directory.path().to_path_buf()))
+                .unwrap()
+                .all()["forwardFlightControls"],
+            json!(false)
+        );
+        for invalid in [json!("false"), json!(0), json!(null), json!([]), json!({})] {
+            assert_eq!(
+                store.set("forwardFlightControls", invalid).unwrap(),
+                json!(true)
+            );
+        }
+        store.set("forwardFlightControls", json!(false)).unwrap();
+        store.reset().unwrap();
+        assert_eq!(store.all()["forwardFlightControls"], json!(true));
     }
 
     #[test]
@@ -1723,6 +2009,56 @@ mod tests {
     }
 
     #[test]
+    fn automatic_bug_report_choice_starts_unset_and_rejects_unknown_values() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-bug-report-choice-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["automaticBugReports"], json!("unset"));
+        assert_eq!(
+            store.set("automaticBugReports", json!("disabled")).unwrap(),
+            json!("disabled")
+        );
+        assert_eq!(
+            SettingsStore::load(Some(directory.clone())).unwrap().all()["automaticBugReports"],
+            json!("disabled")
+        );
+        assert_eq!(
+            store.set("automaticBugReports", json!("always")).unwrap(),
+            json!("unset")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn denied_crash_reports_migrate_to_disabled_usage_and_bug_reports() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        for (legacy, choice, expected) in [
+            ("denied", "unset", "disabled"),
+            ("denied", "enabled", "enabled"),
+            ("granted", "unset", "unset"),
+        ] {
+            let directory = env::temp_dir().join(format!(
+                "opennow-consent-migration-{unique}-{legacy}-{choice}"
+            ));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("settings.json"),
+                json!({"errorReportingConsent":legacy, "automaticBugReports":choice}).to_string(),
+            )
+            .unwrap();
+            let store = SettingsStore::load(Some(directory.clone())).unwrap();
+            assert_eq!(store.all()["automaticBugReports"], json!(expected));
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
     fn audio_output_device_is_persisted_and_validated() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1873,6 +2209,55 @@ mod tests {
         store.set("steamBigPictureMode", json!(true)).unwrap();
         store.reset().unwrap();
         assert_eq!(store.all()["steamBigPictureMode"], false);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn start_as_last_used_account_persists_and_migrates_the_console_picker_toggle() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-account-picker-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["startAsLastUsedAccount"], false);
+        assert!(store.all().get("consoleProfilePickerOnLaunch").is_none());
+        store.set("startAsLastUsedAccount", json!(true)).unwrap();
+        let loaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(loaded.all()["startAsLastUsedAccount"], true);
+        fs::remove_dir_all(&directory).unwrap();
+
+        for (legacy, expected) in [(false, true), (true, false)] {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("settings.json"),
+                json!({"onboardingCompleted":true,"consoleProfilePickerOnLaunch":legacy})
+                    .to_string(),
+            )
+            .unwrap();
+            let migrated = SettingsStore::load(Some(directory.clone())).unwrap();
+            assert_eq!(migrated.all()["startAsLastUsedAccount"], expected);
+            fs::remove_dir_all(&directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn ui_sounds_default_enabled_and_persist_independently() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-ui-sounds-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["uiSoundsEnabled"], true);
+        store.set("uiSoundsEnabled", json!(false)).unwrap();
+        store.set("reducedMotion", json!(true)).unwrap();
+        store.set("launchInConsoleMode", json!(true)).unwrap();
+        let mut loaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(loaded.all()["uiSoundsEnabled"], false);
+        assert_eq!(loaded.all()["reducedMotion"], true);
+        loaded.reset().unwrap();
+        assert_eq!(loaded.all()["uiSoundsEnabled"], true);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2435,6 +2820,11 @@ mod tests {
         assert_eq!(store.all()["transportMode"], json!("nvst"));
         assert_eq!(store.all()["desktopRailCollapsed"], json!(true));
         assert_eq!(store.all()["desktopSidebarHover"], json!(true));
+        assert_eq!(store.all()["confirmQuitWhenIdle"], json!(true));
+        assert_eq!(
+            store.set("confirmQuitWhenIdle", json!(false)).unwrap(),
+            json!(false)
+        );
         assert_eq!(store.all()["desktopBackground"], json!("art"));
         assert_eq!(
             store.set("desktopBackground", json!("gradient")).unwrap(),
@@ -2481,6 +2871,7 @@ mod tests {
         assert_eq!(store.set("desktopUiScale", json!(0)).unwrap(), json!(0.85));
         let preferences = SettingsStore::load(Some(directory.clone())).unwrap();
         assert_eq!(preferences.all()["desktopSidebarHover"], json!(false));
+        assert_eq!(preferences.all()["confirmQuitWhenIdle"], json!(false));
         assert_eq!(preferences.all()["statsShowFps"], json!(false));
         assert_eq!(preferences.all()["statsShowRegion"], json!(false));
         assert_eq!(preferences.all()["statsOverlayScale"], json!(1.5));
@@ -2864,6 +3255,122 @@ mod tests {
                 json!(12)
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn controller_profiles_keep_optional_fields_and_fall_back_to_globals() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profiles-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["controllerProfiles"], json!({}));
+        store.set("controllerLeftStickDeadzone", json!(9)).unwrap();
+        let saved = store
+            .set(
+                "controllerProfiles",
+                json!({
+                    "serial:054c:0ce6:abc": {"name": "  DualSense  ", "leftStickDeadzone": 12, "lastSeen": 20},
+                    "guid:030000005e040000e002000000006800": {"vibrationIntensity": 140, "rightStickDeadzone": -3},
+                    "guid:only-a-name": {"name": "No tuning"},
+                    "": {"leftStickDeadzone": 1},
+                    "guid:bad": "not an object",
+                    "guid:wrong-type": {"leftStickDeadzone": "high", "vibrationIntensity": 0.5}
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            json!({
+                "serial:054c:0ce6:abc": {"name": "DualSense", "leftStickDeadzone": 12, "lastSeen": 20},
+                "guid:030000005e040000e002000000006800": {"vibrationIntensity": 100, "rightStickDeadzone": 0, "lastSeen": 0}
+            })
+        );
+        let profile = &saved["serial:054c:0ce6:abc"];
+        assert!(profile.get("rightStickDeadzone").is_none());
+        assert!(profile.get("vibrationIntensity").is_none());
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(9));
+        assert_eq!(store.all()["controllerRightStickDeadzone"], json!(5));
+        assert_eq!(store.all()["controllerVibrationIntensity"], json!(100));
+        let reloaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(reloaded.all()["controllerProfiles"], saved);
+        for invalid in [json!(null), json!([]), json!("profiles"), json!(7)] {
+            assert_eq!(store.set("controllerProfiles", invalid).unwrap(), json!({}));
+        }
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(9));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn controller_profiles_are_bounded_by_most_recent_use() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profile-cap-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        let profiles: Map<String, Value> = (0..40)
+            .map(|index| {
+                (
+                    format!("guid:{index:02}"),
+                    json!({"leftStickDeadzone": 10, "lastSeen": index}),
+                )
+            })
+            .collect();
+        let long_key = "k".repeat(MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS + 1);
+        let mut with_long_key = profiles.clone();
+        with_long_key.insert(
+            long_key.clone(),
+            json!({"leftStickDeadzone": 1, "lastSeen": 99}),
+        );
+        let saved = store
+            .set("controllerProfiles", Value::Object(with_long_key))
+            .unwrap();
+        let saved = saved.as_object().unwrap();
+        assert_eq!(saved.len(), MAXIMUM_CONTROLLER_PROFILES);
+        assert!(!saved.contains_key(&long_key));
+        assert!(saved.contains_key("guid:39"));
+        assert!(saved.contains_key("guid:08"));
+        assert!(!saved.contains_key("guid:07"));
+        let mut persisted: Value =
+            serde_json::from_slice(&fs::read(directory.join("settings.json")).unwrap()).unwrap();
+        persisted["controllerProfiles"] = Value::Object(profiles);
+        fs::write(
+            directory.join("settings.json"),
+            serde_json::to_vec(&persisted).unwrap(),
+        )
+        .unwrap();
+        let loaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(
+            loaded.all()["controllerProfiles"]
+                .as_object()
+                .unwrap()
+                .len(),
+            MAXIMUM_CONTROLLER_PROFILES
+        );
+        assert_eq!(store.reset().unwrap()["controllerProfiles"], json!({}));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_saved_before_controller_profiles_load_with_empty_profiles() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-controller-profile-legacy-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("settings.json"),
+            br#"{"controllerLeftStickDeadzone":17,"controllerVibrationIntensity":40}"#,
+        )
+        .unwrap();
+        let store = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(store.all()["controllerLeftStickDeadzone"], json!(17));
+        assert_eq!(store.all()["controllerVibrationIntensity"], json!(40));
+        assert_eq!(store.all()["controllerProfiles"], json!({}));
         fs::remove_dir_all(directory).unwrap();
     }
 

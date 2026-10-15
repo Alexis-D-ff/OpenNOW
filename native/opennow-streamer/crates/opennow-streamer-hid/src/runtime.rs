@@ -118,6 +118,7 @@ pub struct SessionBinding {
 
 #[derive(Debug, Default)]
 pub struct HidRuntime {
+    pub generic: crate::generic_runtime::GenericRuntime,
     state: Mutex<RuntimeState>,
     incarnation_source: AtomicU64,
     inventory_epoch: AtomicU64,
@@ -133,6 +134,7 @@ pub struct InventoryUpdate {
 impl HidRuntime {
     pub fn new() -> Self {
         Self {
+            generic: crate::generic_runtime::GenericRuntime::new(),
             state: Mutex::new(RuntimeState::default()),
             incarnation_source: AtomicU64::new(1),
             inventory_epoch: AtomicU64::new(0),
@@ -189,6 +191,9 @@ impl HidRuntime {
 
     pub fn open_endpoint(&self) -> EndpointToken {
         let mut state = self.lock();
+        if let Some(generation) = state.binding {
+            self.generic.unbind_session(generation);
+        }
         let token = self.endpoint_source.fetch_add(1, Ordering::AcqRel);
         for lane in state.lanes.iter_mut() {
             lane.reset();
@@ -204,6 +209,9 @@ impl HidRuntime {
         if state.endpoint != Some(token.0) {
             return;
         }
+        if let Some(generation) = state.binding {
+            self.generic.unbind_session(generation);
+        }
         state.endpoint = None;
         for lane in state.lanes.iter_mut() {
             lane.reset();
@@ -216,6 +224,7 @@ impl HidRuntime {
     pub fn bind_session(&self, generation: u64) -> Option<SessionBinding> {
         let mut state = self.lock();
         state.endpoint?;
+        self.generic.bind_session(generation);
         for lane in state.lanes.iter_mut() {
             lane.reset();
         }
@@ -230,6 +239,7 @@ impl HidRuntime {
         if state.binding.is_some_and(|bound| bound != generation) {
             return;
         }
+        self.generic.unbind_session(generation);
         for lane in state.lanes.iter_mut() {
             lane.reset();
         }
@@ -270,6 +280,7 @@ impl HidRuntime {
 
     pub fn set_active(&self, active: bool) {
         let mut state = self.lock();
+        self.generic.set_capture(active);
         if state.capture_active == active {
             return;
         }

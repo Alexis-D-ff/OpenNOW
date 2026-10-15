@@ -30,6 +30,36 @@ handshake. The Qt client and relocated package probes reject cores that omit it,
 including older protocol-5 binaries, before sending any product requests. This
 additive capability leaves the JSON envelope and native streaming ABI unchanged.
 
+## Saved accounts (`auth.accountPicker.v1`)
+
+The "Who's playing?" picker requires the `auth.accountPicker.v1` capability. The
+Qt client rejects cores that omit it during `core.hello`, before any product
+request. The capability is additive: the protocol version, the envelope and the
+native streaming ABI are unchanged.
+
+`auth.accounts.list` returns `{accounts, activeUserId, generation}`. Each account
+contains only public identity fields; tokens never cross the boundary:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `userId`, `displayName` | string | Saved identity. |
+| `email`, `avatarUrl` | string or null | From the last sign-in or token refresh. |
+| `membershipTier` | string | `FREE`, `PERFORMANCE` or `ULTIMATE` today. Shells must render other values without failing. |
+| `providerCode` | string | Login provider code. `NVIDIA` is NVIDIA; any other code is an alliance partner. |
+| `providerName` | string | Display name for the provider. The core owns the code-to-name mapping (`gfn::provider_display_name`): the name saved at sign-in, then the discovered provider name for that code, then the code itself. `BPC` is always `bro.game`. |
+| `providerIdpId` | string, optional | Provider IdP for "Sign in again". Absent for accounts saved before this field existed until their next sign-in or refresh. |
+| `alliance` | bool | `providerCode != "NVIDIA"`. |
+| `hasPin` | bool | A local profile PIN guards `auth.accounts.switch`. |
+| `needsSignIn` | bool | The last restore or switch for this account ended with refresh outcome `expired` after the provider answered (not after a network failure). Cleared when the account signs in or refreshes again. |
+
+`auth.accounts.switch` never ends a running cloud session; the seat keeps its
+original owner. The Qt shell ends the session through its end-session
+confirmation and waits for `session.stop` before it sends the switch.
+
+The `startAsLastUsedAccount` setting (bool, default `false`) skips the launch
+picker when two or more accounts are saved. Loading settings migrates the
+retired `consoleProfilePickerOnLaunch: false` to `startAsLastUsedAccount: true`.
+
 ## Cloud library actions and launch decisions
 
 `catalog.launch.inspect({appId, variantId})` always resolves the exact parent and
@@ -66,6 +96,17 @@ the subscription `addons` entry whose `type` is `STORAGE` and whose `subType` is
 requirements, recorded store subscriptions, membership tier, and
 `isGamePlayAllowed` apply from the same account metadata the ordinary launch path
 uses.
+
+Cloud DLSS overrides follow the official client. The `dlssOverrides` setting stores
+the exact `requestedStreamingFeatures.dlssOverrides` wire object (`srMode`, `srModel`,
+`srScale`, `rrModel`, `fgMode`, `fgModel`, `fgMultiplier`), where `0` leaves a feature
+to the game. The core clamps unknown enum values to `0`, leaves a mode to the game
+when its model is, fixes `srScale` for every SR mode except Custom (33–100), and sends
+`fgMultiplier` only for Dynamic frame generation. Every create request carries the
+object. `subscription.dlssOverrides` reports `entitled` and `upsell` for
+`superResolution`, `frameGeneration`, and `rayReconstruction` from the MES
+`SUPPORTED_DLSS_OVERRIDE_*` features and `SUPPORT_DLSS_OVERRIDE_*` upsells, plus the
+entitled `frameGenerationMultipliers` from `SUPPORTED_DLSS_FG_MULTIPLIERS`.
 
 A platform client that the ordinary catalog resolution also returns is judged by
 that resolution's metadata, so catalog `playabilityState` and patch state are
@@ -245,6 +286,28 @@ released on every pre-ID error; after allocation the exact seat remains reserved
 handoff or compensation completes. Cleanup records are read through a 16-KiB limit plus
 one overflow-detection byte before parsing, including for corrupt or oversized files.
 
+The `session.terminalCleanup.v1` capability adds `session.ended`. The Qt client
+requires this capability during the handshake so an older packaged core cannot
+silently retain an ended seat. The JSON protocol version remains 5.
+
+After an authoritative, non-resumable `nvst-server` termination, the shell sends
+`session.ended` with `{sessionId, ownerScope: {userId, providerIdpId}}`
+from the ended session. This local acknowledgement makes no network request and
+requires no valid authentication token. It releases only the exact accepted seat
+whose account and provider match. An extra `ownerScope.generation` is ignored:
+control reconciliation can change the core generation before the shell consumes
+its response, but it does not change the remote seat's identity.
+Pending allocation handoffs and cleanup records are not released.
+A matching pending handoff returns
+`session_update_busy` so the shell retries after handoff. The response is
+`{sessionId, cleared}`; duplicate or stale notifications return `cleared: false`
+without changing another seat.
+No `session.changed` event is emitted, so a late acknowledgement cannot clear a
+replacement session in the shell. The shell blocks another launch until the
+acknowledgement arrives and retries after transient RPC failure or core restart.
+Late session snapshots cannot revive the natively terminated seat.
+Transport EOF and other failures with unknown resumability do not send this request.
+
 Raw CloudMatch status 7 is `phase: "finished"`, with a `termination` object containing
 `source: "cloudmatch-session-status"`, `status: 7`, and `resumable: false`. This proves
 the seat is terminal, not whether the game exited successfully; no vendor reason is
@@ -260,9 +323,29 @@ Negotiated profiles retain normalized `bitDepth` (8 or 10), CloudMatch `chromaFo
 `unreported` distinguish present values from omissions. Same-seat partial updates retain
 previously known components; explicit finalized invalid values are not replaced with
 saved preferences. Incomplete or unsupported accepted color is rejected before native
-attachment. The native ABI and protocol version are unchanged; transport terminal
+attachment. Transport terminal
 events add `termination: {source: "nvst-transport", code, resumable: null}`, preserving
 unknown cloud-session disposition rather than assigning a normal-exit reason to EOF.
+
+Native ABI 13 adds `session-timer` events through the existing JSON event callback,
+with `startId`, `timerType`, `secondsLeft` and `active`. Idle-warning type 4 shows
+stream chrome without stopping media; type 5 or successfully delivered gameplay
+input clears it. Server termination events preserve `wireCode` separately from
+optional application `reason` and `extendedCode` in `termination`, use source
+`nvst-server`, and carry a boolean `resumable` only for verified classifications.
+Nonresumable server termination prevents automatic restart and resume. Unknown
+classification remains null and is reconciled against CloudMatch. The JSON protocol
+version is unchanged; the native library and Qt shell must be rebuilt together.
+Expected, authoritative server endings do not create stream-error incidents or
+session-error telemetry. Resumable, unknown, and local transport/decode failures
+retain their existing reporting.
+
+Deferred input also preserves the ordering of one bounded, cancellation-aware paste
+batch. Accepted prefixes are not replayed, later discrete input waits behind text,
+and cancellation removes only unsent text. Rejected paste admission emits
+`text-input-error` with `startId` and a fixed `reason`, through the existing ABI 13
+JSON callback. It is a nonterminal retry notice, not a stream failure; Qt discards
+stale generations and shows feedback over the current video item.
 
 After a decoder-stall recovery attempt, the native engine allows one further video-timeout
 interval for decoded output to resume. Output progress or a decoder-epoch change clears
@@ -414,6 +497,7 @@ and artwork only near the viewport, using the section's local category ID
 - `session.create`
 - `session.poll`
 - `session.stop`
+- `session.ended`
 - `session.active.get`
 - `session.remote.list`, `session.claim`, `session.ad.report`
 - `streamer.detect`
@@ -432,7 +516,129 @@ and artwork only near the viewport, using the section's local category ID
 - `updater.highlights.get`, `updater.highlights.ack`
 - `social.capabilities.get`
 - `discord.activity.sync`, `discord.activity.clear`
-- `telemetry.sync`, `feedback.submit`, `bug_report.submit`
+- `feedback.submit`, `bug_report.submit`, `bug_report.incident`, `analytics.track`
+
+### Usage & bug reports (`automaticBugReports.v2`)
+
+`automaticBugReports.v2` replaces `automaticBugReports.v1` and removes
+`telemetry.sync` and the `optInTelemetry` capability. The core owns every
+network call: reports go to `POST {base}/v1/reports` and usage events to
+`POST {base}/v1/events`, where `base` is `https://opennow-reports-production.up.railway.app` unless the
+`OPENNOW_REPORTS_API` environment variable names another `http(s)` origin when
+the core starts.
+
+One setting, `automaticBugReports` (`unset`, `enabled`, `disabled`), labelled
+"Usage & bug reports", gates automatic reports and usage events. `unset` means
+the notice has not been answered and is treated as enabled while OpenNOW is
+experimental. Loading settings migrates the legacy `errorReportingConsent`:
+`denied` together with `unset` becomes `disabled`; the legacy key is otherwise
+inert. `settings.set` for `automaticBugReports` accepts an optional `source`
+(`signin_notice`, `first_run_sheet`, or `settings`, default `settings`). Every
+`enabled` or `disabled` write queues one anonymous `consent_changed` event
+(`account` is `null`) even when the new value is `disabled`. A `disabled` write
+first deletes the queued events, the event spool, and pending reports; the core
+does the same at startup when the setting is already `disabled`.
+
+#### Reports
+
+Every report is multipart form data with a `report` part (JSON, at most 64 KB)
+and an optional `log` file part (`application/gzip`, at most 5 MB compressed)
+holding the redacted diagnostics export:
+
+```json
+{"schemaVersion":1, "automatic":true, "installId":"32 hex",
+ "account":{"userId":"…", "providerIdpId":"…", "providerCode":"NVIDIA",
+   "providerName":"NVIDIA", "alliancePartner":false, "reporter":"Zortos",
+   "reporterBasis":"username", "membershipTier":"ULTIMATE"},
+ "trigger":{"kind":"frame_drops", "code":"sustained_frame_drops", "message":"…",
+   "metrics":{"droppedFrames":412, "windowSeconds":60}},
+ "activity":{"currentGame":{"title":"Cyberpunk 2077", "appId":"100"},
+   "recentGames":[{"title":"…", "appId":"…"}]},
+ "app":{"version":"1.0.3", "os":"windows", "arch":"x86_64", "gpu":"NVIDIA RTX 4070",
+   "decoderBackend":"d3d11", "channel":"stable"}}
+```
+
+Automatic reports carry `trigger`; manual reports set `automatic:false` and carry
+`manual:{title, description}` instead. `account` is `null` when no account is
+signed in. `reporterBasis` is `username`, `email`, or `none`. `gpu` and
+`decoderBackend` come from the latest runtime capabilities the shell sent and may
+be `null`.
+
+The core triggers an automatic report when `session.create`, `session.poll`,
+`session.claim`, `streamer.prepare`, `streamer.start`, or `catalog.library.list`
+fails with a code that is not a user action or account state (for example
+`cancelled`, `stale_account`, or `session_conflict` are ignored).
+`session.create` also records the launched title in the diagnostics log and the
+recent-games list attached to every report.
+
+The Qt shell reports in-process media problems with `bug_report.incident`:
+`kind` is `stream_error` or `frame_drops`, `code` is a lowercase identifier,
+`message` is redacted and bounded, and `metrics` copies only the numeric fields
+`droppedFrames`, `windowSeconds`, `framesPerSecond`, `packetLossPercent`,
+`pingMs`, and `decodeTimeMs`. The result is `{accepted:true}` or
+`{accepted:false, reason}` (`disabled`, `signed_out`, `already_reported`).
+Each kind and code pair is reported once per core run, at most five reports per
+run, at least 30 seconds apart. Only a signed-in account triggers automatic
+reports.
+
+Accepted automatic reports upload in the background and publish
+`bug_report.changed` events with `state` `sending`, then `sent` (with
+`reportId` and `issueStatus`, for example `investigating`) or `failed` (with
+`message` and `queued`), plus `kind`, `code`, and the current `game` title.
+
+`bug_report.submit` takes `{title (8–120 characters), description (40–12,000),
+includeDiagnostics}` and returns `{submitted:true, reportId, issueStatus}`.
+`feedback.submit` takes `{category: bug|idea|other, message (8–4,000),
+includeSystemInfo}` and sends a manual report titled `Feedback: <category>`
+without an account; without `includeSystemInfo` it omits the game activity, GPU,
+and decoder backend. Both return `{submitted:false, queued:true}` when the upload
+was queued for retry.
+
+A network failure, or an error response whose `error.retryable` is true (or a
+408, 429, or 5xx without that field), writes the report and its compressed log
+to `<data_dir>/reports/pending/`. The core keeps at most five pending reports, no
+older than seven days, and retries them oldest first after the first sign-in of
+the next run, stopping at the first retryable failure. A non-retryable error
+drops the report.
+
+#### Usage events
+
+`analytics.track` takes `{event, props, uiSurface?}`. `uiSurface` is `desktop`
+or `console`; the core remembers it for events it emits itself. The shell may
+send these events, and the core keeps only the listed properties that pass
+validation (unknown events are `invalid_params`; invalid properties are dropped):
+
+| Event | Properties |
+| --- | --- |
+| `session_started` | `game_id`, `game_title`, `codec` (`h264`/`h265`/`av1`), `resolution` (`<w>x<h>`), `fps_target`, `hdr`, `decoder_backend`, `first_frame_ms`, `queue_wait_s` |
+| `session_ended` | `game_id`, `game_title`, `duration_s`, `outcome`, `error_code`, `recoveries`, `video_drop_count`, `avg_fps`, `avg_ping_ms`, `avg_packet_loss_pct`, `decoder_errors` |
+| `session_error` | `stage` (`create`, `poll`, `claim`, `prepare`, `start`, `stream`, `presentation`), `code`, `game_id` |
+| `frame_drops_detected` | `dropped`, `window_s`, `game_id`, `decoder_backend` |
+
+`outcome` is `clean` when the user ends a session that presented video, `user_stopped`
+when the user ends it before the first frame, `remote_ended` when the cloud
+session ends, and `error` when the stream had failed. Codes are
+`[a-z0-9_]{1,64}`; identifiers are `[A-Za-z0-9_.:-]{1,64}`; numbers are finite
+and non-negative.
+
+`{event:"app_opened", runtimeCapabilities}` is the one exception: the shell sends
+it once the native runtime handshake finishes, and the core sends `app_opened`
+once per run with `gpu_vendor` and `package_kind` derived from those
+capabilities and the installation. The core also emits `signed_in`
+(`auth.device.complete` with `restored:false`; a restored or switched account
+with `restored:true`), `game_launch_requested` (`session.create`, from its
+`appId`, `title`, `store`, and `zone`), `session_error` and `library_load_failed`
+for the failures that trigger automatic reports, `bug_report_sent` after a
+report is accepted, and `consent_changed`. Each event gets `app_version`, `os`,
+`arch`, `ui_surface`, and `channel`.
+
+The result is `{accepted:true}` or `{accepted:false, reason}`. Events are
+queued in memory (at most 1,000; overflow drops the oldest and is logged in
+diagnostics) and sent as `{installId, account:{userId, providerIdpId}|null,
+events:[{event, ts, props}]}` batches of at most 100 events every 30 seconds,
+at 50 queued events, and at shutdown within one second. Failed batches are
+appended to `<data_dir>/analytics/spool.jsonl` (at most 1 MB, oldest batches
+dropped first) and resent after the next successful send or at the next start.
 
 `diagnostics.export` optionally accepts `embeddedStream.drops` and
 `lastSessionReport.drops` from the Qt session owner. Each contains the cumulative
@@ -521,6 +727,17 @@ Library and VPC requests use the same selected proxy. The core does not silently
 retry a selected proxy directly. Authenticated HTTP clients do not follow redirects.
 LCARS retains its configured shared endpoint; an Alliance provider ID does not
 select `GFNPartnerJWT` or invent a GraphQL hostname.
+
+GFN service transport failures, including server-info lookup, keep the
+`network_error` code. When the HTTP client identifies the failed stage, the
+message ends with `(dns)`, `(connect)`, `(tls)`, or `(timeout)`; the message
+never includes the request URL or host. When an Alliance (non-NVIDIA) provider's
+server-info lookup for VPC or region discovery fails at the `dns` stage, the
+`network_error` message instead says that the provider display name can only be
+reached from inside its home country and network, asks the user to turn off any
+VPN, proxy or custom DNS, and keeps the original failure after `Details:`. Library,
+favorites, store, launch inspection, subscription and region reads share this
+message; the shell displays it as received.
 
 `settings.set` for `region` also requires the current `providerIdpId`. The core
 atomically updates `region`, `regionProviderIdpId`, and the `providerRegions` map.
@@ -704,11 +921,13 @@ the request to the unconditional 240 FPS ceiling, so the saved preference cannot
 conditional tier without affirmative evidence. This is a necessary condition, not a throughput
 qualification: the client does not measure decoder throughput, and CloudMatch remains the
 authority on the finalized profile.
+Rates snap to 30, 60, 90, 120, 144, 165, 240, or 360 FPS before allocation.
+Embedded codec limits below can reduce the request further.
 
 For the embedded Qt client, `session.create` and `streamer.prepare` accept an optional
 `runtimeCapabilities` object copied from the in-process streamer's protocol-7 `hello` response.
 The core filters its available `videoBackends` by the persisted `nativeVideoBackend` preference
-and resolves codec `auto` to AV1, HEVC, then H.264 (subject to requested color mode) before
+and resolves codec `auto` to AV1, HEVC, then H.264 for both SDR and HDR (subject to requested color mode) before
 CloudMatch allocation. This resolution is session-local: the saved preference stays `auto`.
 Each codec entry may include `colorQualities`, an authoritative array of supported settings
 values such as `8bit_420` and `10bit_420`. An empty array means no supported color modes.
@@ -795,6 +1014,27 @@ clears buffered media and cancels an in-progress clip export.
 These commands use the embedded streamer's protocol-7 JSON payload without
 changing the C ABI:
 
+- Manual `recording-start` uses its command `id` as the recording identity. A
+  `recording-state` terminal event carries that identity as `requestId` and a
+  `state` of `saved` or `failed`. A saved result includes `path`, `videoPackets`,
+  `audioPackets`, and `completion`. Normal completion is `{"kind":"complete"}`.
+  A preserved valid prefix is `{"kind":"cut","reason":"discontinuity"}`,
+  `{"kind":"cut","reason":"queue-overflow"}`, or
+  `{"kind":"cut","reason":"interrupted"}`. A cut stops manual recording and
+  produces a visible early-save notice; it does not start another file or change
+  replay capture.
+- `recording-stopped` repeats the terminal result and its originating `requestId`;
+  its `id` still identifies the stop command. Qt applies a correlated terminal
+  result once, whether the event or stop response arrives first. A repeated stop
+  returns `recording-not-active` without replacing an earlier cut or failure.
+  Packet-write, trailer, publication, and no-valid-keyframe failures remain
+  failures, not saved prefixes.
+- Completion metadata and event correlation are additive protocol-7 fields. Qt
+  ignores uncorrelated terminal events and stale recording identities. A missing
+  completion field means ordinary saved output only on an authoritative,
+  correlated stop response. Historical producers without correlated terminal
+  events do not provide the new unsolicited-completion behavior. These fields do
+  not guarantee callback delivery or preservation after a process crash.
 - The `start` response includes `replayEnabled` for the actual session.
 - `clip-save` accepts `id` and an absolute `.mkv` `outputPath` allocated by
   `media.recording.target`. It returns `clip-saving` promptly or a typed error if
@@ -829,7 +1069,7 @@ surface support, not merely a GPU or decoder capability. Missing, false, or malf
 deny HDR. This value is transient: `settings.set` rejects `nativeHdrSupported`, the settings
 loader discards legacy copies, and the core never saves runtime capability results.
 
-With HDR enabled, the core requires an available hardware HEVC or AV1 decoder whose
+With HDR enabled, an HDR session needs an available hardware HEVC or AV1 decoder whose
 `colorQualities` explicitly includes the requested ten-bit profile. The optional per-codec
 `hdrSupported: true` permits `10bit_420` when `colorQualities` is absent, but does not establish
 4:4:4 support. The optional per-codec `hdrColorQualities` array lists verified HDR profiles.
@@ -842,13 +1082,52 @@ ten-bit 4:4:4 similarly require hardware-required fixture decode and Metal conve
 Linux uses exact attached-device profiles for Vulkan Video. An explicit false or
 malformed `hdrSupported` denies HDR even if 10-bit profiles exist. A true value never
 overrides an explicit empty or incompatible `colorQualities` array. Neither setting
-changes SDR capability filtering. Auto prefers HEVC then AV1. HDR constrains the
-session-local color quality to ten bits while preserving the selected chroma format and saved
-SDR color preference. HEVC supports `10bit_420` and `10bit_444`; AV1 remains limited to `10bit_420`.
-Explicit H.264, software decoding, missing output support, and unavailable 10-bit profiles
-fail before allocating a seat. Without HDR,
-the saved color preference is used, subject to exact hardware profiles and the GFN codec
-restrictions below. Callers without embedded runtime
+changes SDR capability filtering. HDR constrains the session-local color quality to ten
+bits while preserving the selected chroma format and saved SDR color preference. HEVC
+supports `10bit_420` and `10bit_444`; AV1 remains limited to `10bit_420`.
+
+Unsupported color and HDR requests degrade before a seat is allocated instead of failing.
+The core resolves them in this order and returns the effective `codec`, `colorQuality`,
+`enableHdr`, `resolution`, and `fps` that
+CloudMatch and the streamer use:
+
+1. Missing HDR output (`nativeHdrSupported` not `true`) clears HDR.
+2. Software decoding resolves to 8-bit 4:2:0 SDR.
+3. A 4:4:4 request selects HEVC, replacing Auto or any explicit codec, when the selected
+   backend decodes HEVC at that 4:4:4 profile (or HEVC HDR 10-bit 4:4:4 with HDR).
+   Otherwise the chroma becomes 4:2:0 and the bit depth is kept.
+4. HDR that the selected codec cannot decode is cleared. Explicit H.264 is SDR-only.
+   Auto prefers AV1, then HEVC, then H.264 for both SDR and HDR, independent of bitrate
+   and platform. When neither AV1 nor HEVC decodes HDR, Auto continues as SDR.
+5. Ten-bit SDR that the selected codec, or every Auto candidate, cannot decode falls back
+   to 8-bit 4:2:0 BT.709.
+6. H.264 caps the frame rate at 120 FPS and the image area below 4,953,600 pixels,
+   including explicit requests and Auto with only H.264 decode. Resolution reduction
+   selects the closest aspect ratio among supported settings modes that fit the limits,
+   then the largest image at that ratio. For example, 3440x1440 becomes 2560x1080.
+7. AV1 remains eligible for Auto at up to 120 FPS and 5120x2880 pixels. No runtime probe
+   currently confirms higher AV1 frame rates, so explicit AV1 above 120 FPS also caps at 120.
+8. Each codec may report `maxDecodeDimensions:{width,height}` in `runtimeCapabilities`.
+   Both values are positive uint32 dimensions. Windows reports the decoder's enforced
+   4096x2304 envelope; the attached Linux Vulkan device reports the conservative intersection
+   of its advertised color-profile limits; the opt-in MediaCodec bridge reports 2560x1440.
+   Other producers omit unknown limits rather than estimating them. Core reduces oversized
+   modes before allocation using the same closest-aspect rule. It rejects malformed limits
+   or a request with no supported mode within the limits.
+
+`session.create` records each applied fallback as a `streamer`/`stream_profile_fallback`
+diagnostics event. An explicitly selected codec that the selected backend cannot decode at
+all, an unavailable backend, or a backend that cannot decode 8-bit 4:2:0 with any candidate
+still fails with `streamer_codec_unavailable` or `streamer_backend_unavailable`. The core
+never substitutes another codec for an unavailable explicit codec except for the HEVC 4:4:4
+rule above. `streamer.prepare` repeats the same resolution against the accepted session; when
+the accepted codec, color quality, or HDR mode differs from what the current decoder can
+present, it fails with `streamer_color_unavailable` instead of attaching a mismatched decoder.
+Accepted native resolution and FPS override current saved preferences on attachment.
+An accepted mode requiring resolution or FPS normalization fails with
+`streamer_mode_unavailable`; preflight never changes an already allocated stream's mode.
+Without HDR, the saved color preference is used, subject to exact hardware profiles and the
+GFN codec restrictions below. Callers without embedded runtime
 capabilities cannot request HDR through the external-streamer probe path.
 
 CloudMatch receives `sessionRequestData.sdrHdrMode=1` and monitor `sdrHdrMode=1`
@@ -909,6 +1188,23 @@ sends the full request in its POST, with the requested session mode, monitor mod
 requested-content luminance, and `trueHdr`; only an existing-session claim uses PUT RESUME.
 Attachment revalidates the session's HDR codec/color profile and current window output, so
 moving to an SDR display cannot silently resume an HDR stream as SDR.
+
+Fresh creation also applies the launched store version's catalog HDR support. When
+`enableHdr` is on, the window output reports native HDR, and the exact variant that
+`catalog.launch.inspect` validated for this launch has a `features` array without `hdr`,
+the core requests that one session as SDR before resolving the embedded profile: the
+request's `enableHdr` is false, so `sdrHdrMode` is `0`, `displayData` is null, and
+`trueHdr` stays false. Codec and color selection then run as for any SDR request. The saved
+`enableHdr` preference is not changed. A variant whose `features` is null (the catalog
+returned no feature list), a Steam store launch, and every case where HDR was not effectively
+requested keep the request unchanged; missing metadata never downgrades HDR. The normalized
+session carries `hdrDowngrade`: `"game-unsupported"` when this core downgraded the request,
+otherwise null. Polls, resume, and reconnects preserve it only for the same session ID;
+sessions this core did not create report null. Shells use it to explain the SDR stream and
+must not repeat the catalog lookup. The session also carries `catalogAppId`, the parent catalog
+game ID of the launch (`appId` stays the launched store version's CloudMatch ID), with the same
+same-session preservation; it is null for sessions this core did not create. Shells key
+once-per-game state on it, so every store version of a game shares one identity.
 
 The normalized session also carries `keyboardLayout` when this core created or resumed
 the session. It records the exact layout sent in the CloudMatch request, not the current
@@ -988,7 +1284,15 @@ also check its local native-runtime state before requesting installation.
 `updater.state.get` is authoritative after an error or request timeout. The core
 emits `updater.changed` after update operations even if the original request was
 cancelled, because cancellation does not undo an installation already prepared
-by the native helper. Clients must not synthesize `canDownload`, `canInstall`, or
+by the native helper.
+
+While `updater.download` runs, the updater state carries the additive field
+`downloadProgress: {"receivedBytes": n, "totalBytes": n}`, where `totalBytes` is
+the signed asset size. It is `null` in every other state. The core emits
+`updater.changed` when the download starts and each time the received bytes cross
+another whole percent of the signed size, so a download produces at most about
+101 progress events before its response. Progress is advisory: hash and size
+verification still decide whether the download succeeds. Clients must not synthesize `canDownload`, `canInstall`, or
 `canCheck` from an error message. A failed check or a later release check does not
 discard an already verified download.
 
@@ -1129,6 +1433,27 @@ invalid persisted collections cause an `InvalidData` load error before any write
 rather than silently dropping collections or truncating identifiers. A successful
 `settings.reset` clears collections along with other preferences.
 
+`controllerLeftStickDeadzone`, `controllerRightStickDeadzone` (integers 0–50,
+default 5) and `controllerVibrationIntensity` (integer 0–100, default 100) stay the
+global controller tuning and the default for every pad. `controllerProfiles`
+defaults to `{}` and holds per-pad overrides keyed by pad identity. Qt builds the
+key as `serial:<vendor>:<product>:<serial>` (four-digit lowercase hex vendor and
+product IDs) when SDL reports a serial number, and as `guid:<SDL GUID string>`
+otherwise. Two identical pads without a serial therefore share one key and one
+profile. Each value has the form
+`{"name":"DualSense","leftStickDeadzone":8,"rightStickDeadzone":5,"vibrationIntensity":70,"lastSeen":1760440000000}`.
+Every tuning field is optional; a missing field means the global setting applies.
+`settings.set` replaces the whole map and normalizes it rather than rejecting it:
+keys are trimmed and must hold 1–160 characters; tuning fields that are not
+integers are dropped and integers are clamped to the global ranges; `name` is
+trimmed to at most 80 characters and dropped when empty; `lastSeen` (Unix
+milliseconds) defaults to 0. Entries that are not objects or keep no tuning field
+are dropped, so deleting a pad's fields resets it to the globals. At most 32
+profiles are kept, preferring the highest `lastSeen`. Non-object values normalize
+to `{}`. Settings saved before this key existed load with `{}`, and
+`settings.reset` clears it. These values apply live in Qt before input reaches the
+streamer; they never require a new session.
+
 Provider discovery falls back to NVIDIA's
 default service when discovery is unavailable. Device-login tokens are stored
 through the OS credential store (DPAPI/Credential Manager, Keychain or Secret
@@ -1140,11 +1465,63 @@ CloudMatch session methods preserve one client/device identity through create,
 poll and stop, retain pending queue responses before signaling is available,
 and return the complete ordered connection, ICE and negotiated-feature payload
 needed by the native streamer. `streamer.prepare` returns the normalized session
-context used by the NVST runtime linked into the Qt shell. The in-process runtime
+context used by the native runtime linked into the Qt shell. The in-process runtime
 owns secure NVIDIA signaling, ICE/DTLS/SCTP, RTSPS, Mjolnir, RTCP and native
 gameplay input, while Qt owns the graphics device, scene graph, video item and
 all top-level windows. Legacy streamer lifecycle methods remain protocol
 compatibility routes and are not used by the Qt shell.
+
+`webrtcCompatibilityMode` selects `auto`, `on`, or `off` for new allocations.
+The default `auto` uses WebRTC for a detected, authenticated alliance provider and
+NVST for NVIDIA. `on` explicitly selects WebRTC for either provider; `off` selects
+NVST. Provider selection is resolved in the core before codec validation and
+allocation, not inferred by Qt or changed after allocation. The UI calls it
+**WebRTC compatibility mode** and warns about lower performance than NVST.
+An older `allianceWebrtcCompatibility: true` preference migrates to `on`; the old
+default `false` migrates to `auto`. The historical boolean remains a compatibility
+alias for explicit on/off writes. Session ownership and authentication remain
+required. Legacy persisted
+`transportMode` values still normalize to `nvst`; only the core-owned session's
+transport selects the embedded WebRTC path. An explicit H.265 selection preserves
+the requested resolution and frame rate, subject to the normal allocation and
+decoder checks, and supports 8-bit or 10-bit 4:2:0 SDR. Both WebRTC and NVST
+CloudMatch requests use `requestedStreamingFeatures.bitDepth: 1` for 10-bit
+and `0` for 8-bit, rather than the literal media bit depth. The owned session
+profile carries the selected codec through polling, restart, and attachment;
+changed preferences cannot reinterpret an existing stream. H.264, Auto, and AV1
+selections retain the H.264 compatibility profile, at most 1920×1080 at 60 FPS
+with 8-bit 4:2:0. Both WebRTC codecs use SDR, stereo, and no microphone.
+WebRTC startup rejects profiles outside the native runtime's dimensions or frame
+rate bounds rather than substituting a different viewport in its SDP answer.
+WebRTC signaling endpoints remain separate
+from RTSPS endpoints, including their server-provided paths and ports. The native
+runtime owns the WebSocket offer, answer, NVIDIA quality SDP, and ICE exchange.
+It delivers compressed media to the existing decoder and GPU presentation path.
+The setting does not authorize a live NVST seat to be converted, deleted, or replaced.
+For an owned WebRTC allocation that supplies only legacy RTSP descriptors,
+the core derives `wss://<descriptor-host>/nvst/` on port 443, matching Android's
+WebRTC signaling contract. It does not reuse the RTSP port as a WebSocket or UDP
+media port. Explicit WebSocket descriptors take priority and keep their paths
+and ports. `prepare_endpoints` diagnostics record bounded descriptor types and
+numeric protocol/port fields, never hosts, URLs, session IDs, or credentials.
+WebRTC offers may contain additional microphone or inactive media sections.
+Negotiation keeps their order and MIDs, disables RTP upload, and accepts one
+incoming video track matching the selected H.264, H.265 Main, or H.265 Main10
+profile and at most one incoming Opus audio track. Unsupported
+microphone codecs are rejected in place with valid SDP format identifiers rather
+than rejecting the whole session. Offers remain bounded to eight media sections.
+The `webrtc-offer` diagnostic records section kinds and directions without SDP
+credentials. Keyframe feedback uses the transport's negotiated video MID.
+For an `actpass` offer, the native client takes the active DTLS role and sends
+ClientHello, matching browser behavior against NVIDIA's ICE-lite endpoint.
+Explicit active or passive remote roles retain their complementary local role.
+Connection diagnostics distinguish ICE completion from DTLS establishment and
+record redacted candidate classes, ports, and packet-family counters without
+addresses, credentials, or payloads.
+The Qt video item remains visible while the native backend is connecting,
+including reconnect attempts, so it can create the graphics context before the
+first frame. Gameplay focus/input still waits for streaming; startup overlays
+may cover the same video item without preventing presentation initialization.
 
 `acceptance.export` is available only through the Qt shell's Diagnostics screen. It rejects
 headless window systems and writes an atomic, redacted `opennow.live-acceptance` JSON file. The
@@ -1297,6 +1674,64 @@ App availability, favorites, payment models, and GFN membership do not establish
 ownership of another variant. Visible detail metadata refreshes every 30 seconds;
 patch duration history is an estimate, not a promised completion time.
 
+Every game variant also carries `features`, an array of lowercase strings
+parsed from the variant's `gfn.features` key/value list: `rtx` from
+`RTX_ENABLED`, `hdr` from `HDR_ENABLED` or a non-empty
+`SUPPORTED_HDR_VERSION`, and `reflex` from `REFLEX_ENABLED`. Disabled, null,
+and unknown keys produce nothing, so the array is empty when the catalog does
+not declare a feature. `features` is null when the catalog response carried no
+feature list for that variant, so consumers can tell unknown from none.
+
+The catalog has no per-game DLSS key, so the core, and only the core, derives a
+game-level `dlss` field from NVIDIA's published DLSS games list (the JSON behind
+NVIDIA's RTX games page) by title. Shells still must not infer features from
+titles or genres themselves, and a `"dlss"` string in a variant's `features`
+means nothing. While the list is loaded, every game in every `catalog.*` result carries `dlss`, including
+`catalog.public.list`, `catalog.library.list`, `catalog.game.get`,
+`catalog.launch.inspect`, `catalog.launch.store.inspect`,
+`catalog.favorites.list`, the favorites and ownership mutation results,
+`catalog.store.local`, `catalog.store.list`, and `catalog.store.presentation`.
+The value is either null (not on NVIDIA's list) or:
+
+```json
+{"superResolution":"native","frameGeneration":"override",
+ "multiFrameGeneration":{"maxMultiplier":4},"rayReconstruction":null,
+ "dlaa":"override","source":"nvidia-rtx-games-list"}
+```
+
+`superResolution`, `frameGeneration`, `rayReconstruction`, and `dlaa` are
+`native` when the game supports the technology itself, `override` when a DLSS
+override acts on it (the list's "NV, …" cells: an upgraded SR/RR/DLAA or frame
+generation model, or DLAA enabled through the SR mode override), and null when
+the list does not show it. `multiFrameGeneration` is null or the highest
+multiplier an override enables. `dlss` is null when the title has no match and
+when the matched row lists no DLSS technology. When the list is unavailable, games
+have no `dlss` key at all: an absent key means DLSS support is unknown, and shells
+must not present it as "not on NVIDIA's list".
+
+Matching removes ™, ®, ©, and zero-width characters, folds the title to ASCII
+with NFKD, lowercases it, spells `&` as "and", and collapses every other
+non-alphanumeric run to one space. An exact match wins; otherwise a loose match
+also drops the words "the" and "tm" and trailing edition words (game of the
+year, goty, definitive, enhanced, complete, deluxe, standard, ultimate,
+director's cut, anniversary, edition, pc). "Remastered" is never dropped,
+because remasters are listed separately. Only rows of type "Game" count.
+
+The core keeps the list in the store cache for 24 hours (stale copies are used
+when a refresh fails), rejects documents over 4 MiB or 5,000 rows, and applies
+it when a catalog response is sent, so cached catalog pages are unaffected and
+the scope stays `catalog-v3`. Fetching never fails or holds a catalog response:
+only one request waits for the core's first attempt, for at most 1.5 seconds; a failed attempt
+retries on a catalog request at least 60 seconds later. The field is additive
+within protocol version 5.
+
+Every game also carries `requiresPaidMembership`, true when the catalog's
+`minimumMembershipTierLabel` names a tier other than Free (the catalog reports
+`Premium` today). It is the rule the core applies before a launch, so shells
+compare it with the account's `membershipTier` instead of parsing the label.
+Both fields are additive within protocol version 5; store-catalog cache scopes moved from
+`catalog-v2` to `catalog-v3` so cached cards are refetched with it.
+
 `catalog.definitions.get` returns independently fetched `stores`, `genres`, and
 `subscriptions` sections. Each section has `items`, `source`, `status`,
 `freshness`, `fetchedAt`, `expiresAt`, and nullable `error`. Static definitions
@@ -1395,9 +1830,11 @@ core holds no subscription data.
 `settings.choices.get({runtimeCapabilities})` returns `colorQualities` for the current
 persisted settings and embedded streamer capability snapshot. Each of the four
 descriptors contains `value`, `disabled`, and nullable `reason`. The operation
-calls the same profile validator as final launch, including backend, codec,
-HDR, and chroma restrictions. Missing or incompatible capabilities do not imply
-support. This read does not persist or coerce any setting. Protocol 5 and native
+calls the same profile resolver as final launch. A color quality is disabled when
+resolution fails or when the launch would fall back to a lower bit depth or a
+different chroma format; the reason names the delivered profile. Codec descriptors
+are disabled only when the codec itself cannot decode 8-bit 4:2:0 SDR on the selected
+backend. Missing or incompatible capabilities do not imply support. This read does not persist or coerce any setting. Protocol 5 and native
 streamer protocol 7 are unchanged.
 
 CoreClient injects the current native window's `nativeHdrSupported` into

@@ -6,13 +6,22 @@ FocusScope {
     id: root
     property bool opened: false
     property bool quittingApplication: false
+    property string switchTargetName: ""
+    readonly property bool switchingAccount: switchTargetName !== ""
+    readonly property color onDarkTitle: Theme.lightMode ? "#F6F3EE" : DesktopTokens.text
+    readonly property color onDarkBody: Theme.lightMode ? "#C5CDD6" : DesktopTokens.textBody
+    readonly property string sessionTitle: {
+        const title = ShellStore.sessionGameTitle(ShellStore.activeSession)
+        return title || (ShellStore.selectedGame && ShellStore.selectedGame.title ? String(ShellStore.selectedGame.title) : "")
+    }
     readonly property bool present: reveal.present
     visible: present
     enabled: opened
     focus: opened
     MotionProgress { id: reveal; shown: root.opened }
     Accessible.role: Accessible.Dialog
-    Accessible.name: root.quittingApplication ? qsTr("Quit OpenNOW confirmation") : qsTr("End cloud session confirmation")
+    Accessible.name: root.quittingApplication ? qsTr("Quit OpenNOW confirmation")
+        : root.switchingAccount ? qsTr("Switch account confirmation") : qsTr("End cloud session confirmation")
 
     signal cancelRequested()
     signal confirmRequested()
@@ -50,7 +59,8 @@ FocusScope {
             spacing: 0
 
             Text {
-                text: root.quittingApplication ? qsTr("QUIT OPENNOW") : qsTr("END SESSION")
+                text: root.quittingApplication ? qsTr("QUIT OPENNOW")
+                    : root.switchingAccount ? qsTr("END SESSION TO SWITCH") : qsTr("END SESSION")
                 color: DesktopTokens.danger
                 font.family: DesktopTokens.monoFont
                 font.pixelSize: 10
@@ -58,23 +68,34 @@ FocusScope {
                 font.letterSpacing: 1.4
             }
             Text {
+                objectName: "accountSwitchTitle"
                 width: parent.width
                 topPadding: 10
-                text: root.quittingApplication ? qsTr("Quit OpenNOW?") : qsTr("End this cloud session?")
-                color: DesktopTokens.text
+                elide: Text.ElideRight
+                text: root.quittingApplication ? qsTr("Quit OpenNOW?")
+                    : root.switchingAccount ? qsTr("Switch to %1?").arg(root.switchTargetName)
+                    : qsTr("End this cloud session?")
+                color: root.onDarkTitle
                 font.family: DesktopTokens.displayFont
                 font.pixelSize: 28
                 font.weight: Font.Black
             }
             Text {
+                objectName: "accountSwitchBody"
                 width: parent.width
                 topPadding: 10
+                elide: Text.ElideRight
+                maximumLineCount: 3
                 text: root.quittingApplication
                     ? qsTr("OpenNOW will close and disconnect from any active cloud session.")
+                    : root.switchingAccount
+                    ? (root.sessionTitle !== ""
+                        ? qsTr("%1 will close on the remote rig. This session cannot be resumed after it ends.").arg(root.sessionTitle)
+                        : qsTr("Your game will close on the remote rig. This session cannot be resumed after it ends."))
                     : AppController.route === "inserting"
                     ? qsTr("Your session request will be cancelled and you will leave the queue.")
                     : qsTr("Your game will close on the remote rig. This session cannot be resumed after it ends.")
-                color: DesktopTokens.textBody
+                color: root.onDarkBody
                 font.family: DesktopTokens.bodyFont
                 font.pixelSize: 14
                 font.weight: Font.Medium
@@ -88,7 +109,8 @@ FocusScope {
                 spacing: 10
                 DesktopButton {
                     id: keepPlayingButton
-                    objectName: root.quittingApplication ? "quitConfirmKeepOpen" : "streamExitKeepPlaying"
+                    objectName: root.quittingApplication ? "quitConfirmKeepOpen"
+                        : root.switchingAccount ? "accountSwitchKeepPlaying" : "streamExitKeepPlaying"
                     text: root.quittingApplication ? qsTr("Keep OpenNOW open")
                         : AppController.route === "inserting" ? qsTr("Keep waiting") : qsTr("Keep playing")
                     shortcutText: qsTr("Esc")
@@ -98,8 +120,10 @@ FocusScope {
                 }
                 DesktopButton {
                     id: endButton
-                    objectName: root.quittingApplication ? "quitConfirmQuit" : "streamExitEndSession"
-                    text: root.quittingApplication ? qsTr("Quit OpenNOW") : qsTr("End session")
+                    objectName: root.quittingApplication ? "quitConfirmQuit"
+                        : root.switchingAccount ? "accountSwitchEndSession" : "streamExitEndSession"
+                    text: root.quittingApplication ? qsTr("Quit OpenNOW")
+                        : root.switchingAccount ? qsTr("End and switch") : qsTr("End session")
                     shortcutText: qsTr("Enter")
                     danger: true
                     onClicked: root.confirmRequested()

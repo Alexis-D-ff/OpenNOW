@@ -1,6 +1,6 @@
 use super::catalog_actions::{
     LaunchDecision, LaunchStatus, PlayabilityMetadata, account_decision, game_play_denial,
-    readiness_decision, selected_variant,
+    paid_membership_decision, readiness_decision, requires_paid_membership, selected_variant,
 };
 use super::*;
 
@@ -132,7 +132,12 @@ pub(super) fn store_launch_decision(
     if let Some(decision) = game_play_denial(subscription) {
         return decision;
     }
-    if let Some(decision) = account_decision(game, variant, variant_id, access, subscription) {
+    if let Some(decision) = account_decision(variant, variant_id, access) {
+        return decision;
+    }
+    if requires_paid_membership(game)
+        && let Some(decision) = paid_membership_decision(subscription)
+    {
         return decision;
     }
     decide(

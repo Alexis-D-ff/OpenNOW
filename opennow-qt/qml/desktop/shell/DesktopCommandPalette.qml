@@ -158,8 +158,22 @@ FocusScope {
         { icon: "desktop-nav-friends.svg", name: qsTr("Friends and party"), detail: qsTr("See who is online"), route: "friends", key: "4" },
         { icon: "desktop-nav-settings.svg", name: qsTr("Settings"), detail: qsTr("Configure OpenNOW"), route: "settings", key: "," },
         { icon: "desktop-sliders.svg", name: qsTr("Stream settings"), detail: qsTr("Resolution, frame rate and codec"), route: "settings-streaming", key: "" },
+        { icon: "desktop-info.svg", name: qsTr("Updates"), detail: root.updateDetail(), route: "settings-updates", key: "" },
+        { icon: "desktop-info.svg", name: qsTr("What the icons mean"), detail: qsTr("Launcher, feature and membership marks on game tiles"), route: "", overlay: "desktop-icon-guide", key: "" },
         { icon: "desktop-play-stroke.svg", name: qsTr("Start last game"), detail: qsTr("Resume your previous session"), route: "game-detail", key: "Enter" }
     ]
+
+    function updateDetail() {
+        const updater = ShellStore.updaterState || ({})
+        const attention = ShellStore.updaterAttention
+        if (attention === "ready")
+            return qsTr("Install %1 and restart").arg(updater.downloadedVersion || updater.availableVersion || "")
+        if (attention === "downloading")
+            return qsTr("Downloading OpenNOW %1").arg(updater.availableVersion || "")
+        if (attention === "available")
+            return qsTr("OpenNOW %1 is available").arg(updater.availableVersion || "")
+        return qsTr("Check for updates, channel and release notes")
+    }
 
     function matchedGames() {
         if (root.normalizedQuery !== "")
@@ -187,9 +201,36 @@ FocusScope {
         return qsTr("Available on GeForce NOW")
     }
 
+    readonly property var accountActions: {
+        if (!ShellStore.signedIn)
+            return []
+        const accounts = ShellStore.savedAccounts || []
+        const result = []
+        for (let index = 0; index < accounts.length; ++index) {
+            const account = accounts[index]
+            if (ShellStore.isActiveAccount(account))
+                continue
+            const tier = String(account.membershipTier || "")
+            result.push({
+                icon: "desktop-users.svg",
+                name: qsTr("Switch to %1").arg(account.displayName || qsTr("NVIDIA profile")),
+                detail: account.needsSignIn ? qsTr("Sign-in expired · sign in again")
+                    : [tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase(), String(account.providerName || "")]
+                        .filter(part => part !== "").join(" · "),
+                account: account,
+                route: "",
+                key: index < 9 ? "Ctrl+" + (index + 1) : ""
+            })
+        }
+        if (accounts.length > 0)
+            result.push({ icon: "desktop-pencil.svg", name: qsTr("Manage accounts"),
+                detail: qsTr("Add, remove or lock saved accounts"), route: "accounts", key: "" })
+        return result
+    }
+
     function matchedActions() {
         const q = root.query.trim().toLocaleLowerCase()
-        return root.actions.filter(item =>
+        return root.actions.concat(root.accountActions).filter(item =>
             q === "" || String(item.name + " " + item.detail).toLocaleLowerCase().indexOf(q) >= 0)
     }
 
@@ -253,8 +294,13 @@ FocusScope {
             return
         }
         const action = root.actionList[index - root.gameList.length]
-        root.routeRequested(action.route)
         root.closeRequested()
+        if (action.account)
+            ShellStore.chooseAccount(action.account, false)
+        else if (action.overlay)
+            AppController.showOverlay(action.overlay)
+        else
+            root.routeRequested(action.route)
     }
 
     onQueryChanged: root.scheduleSearch()

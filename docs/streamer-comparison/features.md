@@ -232,7 +232,7 @@ the client requests pacing mode 2 with feedback mode 0 and stops sending the neu
 claim complete V9 stage timings: its field order and the actual presentation timestamp
 boundary still need capture-backed verification.
 
-IDR is the recovery command OpenNOW already sends. Official also sends a reference-invalidation request. That invalidation frame is **not** in this tree and is not guessed here.
+OpenNOW sends IDR `0x302` and reference-invalidation `0x301` with sender-authored frame ranges. Pending requests retry every 100 ms. RFI keeps its original bounded IDR-backstop deadline and stays available after a slow episode.
 Mjolnir video uses private NACK v2 and control IDR, not a second RTCP Receiver Report or PLI.
 
 ## Inbound cursor examples
@@ -260,6 +260,6 @@ exercise these boundaries without a live session.
 
 - Feature type 10 on-wire bytes. Logs and DLL names prove it is mouse accel/speed. They do not dump the frame.
 - Official encoding of type 0 and type 8. OpenNOW’s `0x0308` / `0x030d` match the comments and the session behavior. They are not proven equal to Geronimo’s on-wire feature blob until a capture says so.
-- Reference-invalidation bytes.
+- Recovery-mode `0x0312` fields and capture-time offsets in the canonical GS frame header. The mounted audit identifies the message length and the timestamp width, but not the complete layouts needed to implement them safely.
 
 When you have a capture, put the exact type 10 frame in the section above and pin it with a test. Do not fill it from the log English or from reading the DLL.

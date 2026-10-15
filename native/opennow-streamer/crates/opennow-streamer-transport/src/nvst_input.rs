@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use str0m::Rtc;
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 
-use crate::nvst_budget::{TEXT_BATCH_GUARD, WriteClass, admit_write};
+#[cfg(test)]
+use crate::nvst_budget::TEXT_BATCH_GUARD;
+use crate::nvst_budget::{WriteClass, admit_write};
 
 pub(crate) const CONTROL_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const INPUT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -134,32 +136,6 @@ pub(crate) struct NvstInputChannels {
 }
 
 impl NvstInputChannels {
-    pub(crate) fn send_text(
-        self,
-        rtc: &mut Rtc,
-        text: &opennow_streamer_protocol::text_input::UnicodeText,
-        timestamp_us: u64,
-    ) -> bool {
-        let messages = unicode_text_messages(text, timestamp_us);
-        let total_bytes: usize = messages.iter().map(|message| message.bytes.len()).sum();
-        let buffered = self.buffered_total(rtc);
-        if !text_batch_fits(buffered, total_bytes, TEXT_BATCH_GUARD) {
-            return false;
-        }
-        if !admit_write(buffered, total_bytes, WriteClass::Normal).is_admitted() {
-            return false;
-        }
-        let Some(mut channel) = rtc.channel(self.control_reliable) else {
-            return false;
-        };
-        if text.is_cancelled() {
-            return true;
-        }
-        messages
-            .iter()
-            .all(|message| channel.write(true, &message.bytes).unwrap_or(false))
-    }
-
     pub(crate) fn create(rtc: &mut Rtc, bundle_video: bool) -> Self {
         let mut ids = Vec::with_capacity(6);
         for definition in &NVST_CHANNEL_PROFILE[..6] {
@@ -249,21 +225,52 @@ impl NvstInputChannels {
         self.send_control(rtc, &remote_cursor_tracking(enabled))
     }
 
-    pub(crate) fn send_encoded(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> bool {
-        let id = match message.route {
+    pub(crate) fn send_encoded(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> NvstInputWrite {
+        self.write_classified(
+            rtc,
+            self.encoded_channel(message),
+            &message.bytes,
+            WriteClass::Normal,
+        )
+    }
+
+    pub(crate) fn encoded_channel_is_open(self, rtc: &mut Rtc, message: &NvstEncodedInput) -> bool {
+        rtc.channel(self.encoded_channel(message)).is_some()
+    }
+
+    fn encoded_channel(self, message: &NvstEncodedInput) -> ChannelId {
+        match message.route {
             NvstInputRoute::ControlReliable => self.control_reliable,
             NvstInputRoute::ControlPartial => self.control_partial,
             NvstInputRoute::InputPartial => self.input_partial,
-        };
-        self.write(rtc, id, &message.bytes, WriteClass::Normal)
+        }
     }
 
     fn write(self, rtc: &mut Rtc, id: ChannelId, bytes: &[u8], class: WriteClass) -> bool {
-        if !admit_write(self.buffered_total(rtc), bytes.len(), class).is_admitted() {
-            return false;
+        self.write_classified(rtc, id, bytes, class).is_sent()
+    }
+
+    fn write_classified(
+        self,
+        rtc: &mut Rtc,
+        id: ChannelId,
+        bytes: &[u8],
+        class: WriteClass,
+    ) -> NvstInputWrite {
+        if rtc.channel(id).is_none() {
+            return NvstInputWrite::Closed;
         }
-        rtc.channel(id)
-            .is_some_and(|mut channel| channel.write(true, bytes).unwrap_or(false))
+        if !admit_write(self.buffered_total(rtc), bytes.len(), class).is_admitted() {
+            return NvstInputWrite::Deferred;
+        }
+        match rtc
+            .channel(id)
+            .map(|mut channel| channel.write(true, bytes))
+        {
+            Some(Ok(true)) => NvstInputWrite::Sent,
+            Some(Ok(false)) => NvstInputWrite::Deferred,
+            Some(Err(_)) | None => NvstInputWrite::Closed,
+        }
     }
 
     pub(crate) fn buffered_total(self, rtc: &mut Rtc) -> usize {
@@ -288,7 +295,7 @@ impl NvstInputChannels {
     }
 }
 
-fn text_batch_fits(buffered: usize, batch_bytes: usize, guard: usize) -> bool {
+pub(crate) fn text_batch_fits(buffered: usize, batch_bytes: usize, guard: usize) -> bool {
     buffered.saturating_add(batch_bytes) <= guard
 }
 
@@ -563,6 +570,26 @@ pub(crate) enum NvstInputRoute {
 pub(crate) struct NvstEncodedInput {
     pub(crate) route: NvstInputRoute,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) meaningful: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NvstInputWrite {
+    Sent,
+    Deferred,
+    Closed,
+}
+
+impl NvstInputWrite {
+    pub(crate) fn is_sent(self) -> bool {
+        self == Self::Sent
+    }
+}
+
+impl NvstEncodedInput {
+    pub(crate) fn is_meaningful(&self) -> bool {
+        self.meaningful
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +664,7 @@ impl NvstInputCodec {
                 encoded.push(NvstEncodedInput {
                     route: NvstInputRoute::ControlReliable,
                     bytes: control_command(COMMAND_GAMEPAD, &payload),
+                    meaningful: false,
                 });
             }
         }
@@ -649,6 +677,7 @@ impl NvstInputCodec {
         encoded.push(NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: device_descriptor(timestamp_us, filtered),
+            meaningful: false,
         });
     }
 
@@ -791,6 +820,7 @@ impl NvstInputCodec {
                             timestamp,
                             self.gamepad_sequences[controller_id],
                         ),
+                        meaningful: true,
                     });
                 }
                 INPUT_HAPTICS_ENABLED => {
@@ -942,6 +972,17 @@ fn remote_input_message(inner: Vec<u8>, timestamp_us: u64) -> NvstEncodedInput {
             NvstInputRoute::ControlReliable
         },
         bytes: control_command(COMMAND_REMOTE_INPUT, &remote_input_packet(0x0e, &body)),
+        meaningful: matches!(
+            input_type,
+            INPUT_KEY_DOWN
+                | INPUT_KEY_UP
+                | INPUT_MOUSE_ABSOLUTE
+                | INPUT_MOUSE_RELATIVE
+                | INPUT_MOUSE_BUTTON_DOWN
+                | INPUT_MOUSE_BUTTON_UP
+                | INPUT_MOUSE_WHEEL
+                | INPUT_TEXT
+        ),
     }
 }
 
@@ -953,7 +994,7 @@ fn remote_input_packet(input_type: u32, body: &[u8]) -> Vec<u8> {
     packet
 }
 
-fn unicode_text_messages(
+pub(crate) fn unicode_text_messages(
     text: &opennow_streamer_protocol::text_input::UnicodeText,
     timestamp_us: u64,
 ) -> Vec<NvstEncodedInput> {
@@ -973,6 +1014,7 @@ fn unicode_text_messages(
         messages.push(NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: control_command(COMMAND_REMOTE_INPUT, &packet),
+            meaningful: true,
         });
         remaining = &remaining[end..];
     }
@@ -1075,6 +1117,133 @@ pub(crate) fn for_each_sony_output(mut bytes: &[u8], mut handle: impl FnMut(u8, 
         }
         if let Some((low_id, operation)) = parse_sony_output(payload) {
             handle(low_id, operation);
+        }
+    }
+}
+
+pub(crate) fn generic_hid_command(
+    outbound: &opennow_streamer_hid::generic::GenericOutbound,
+) -> Option<Vec<u8>> {
+    use opennow_streamer_hid::generic::{GenericOutbound, MAX_REPORT_BYTES};
+
+    let (id, control, identity) = match outbound {
+        GenericOutbound::Attach { request_id, device } => (
+            *request_id,
+            1,
+            [device.vendor, device.product, device.revision, 0],
+        ),
+        GenericOutbound::Detach { device_id } => (*device_id, 3, [0; 4]),
+        GenericOutbound::Report {
+            device_id,
+            interface,
+            operation,
+            error,
+            bytes,
+            ..
+        } => {
+            if !(10..=254).contains(device_id)
+                || *operation > 4
+                || bytes.len() > MAX_REPORT_BYTES
+                || (bytes.is_empty() && !(matches!(*operation, 1..=4) && *error))
+                || (*operation == 0 && *error)
+            {
+                return None;
+            }
+            let mut payload = Vec::with_capacity(8 + bytes.len());
+            payload.push(HID_REPORT_MARKER);
+            payload.extend_from_slice(&RI_TYPE_HID_REPORT.to_le_bytes());
+            payload.push(*device_id);
+            payload.push(if *operation == 0 {
+                *interface
+            } else {
+                u8::from(*error)
+            });
+            payload.push(*operation);
+            payload.extend_from_slice(bytes);
+            return Some(control_command(COMMAND_GAMEPAD, &payload));
+        }
+    };
+    if !(10..=254).contains(&id) {
+        return None;
+    }
+    let mut body = Vec::with_capacity(14);
+    body.extend_from_slice(&[id, control]);
+    body.extend_from_slice(&0xf_u32.to_be_bytes());
+    for word in identity {
+        body.extend_from_slice(&word.to_be_bytes());
+    }
+    Some(control_command(
+        COMMAND_REMOTE_INPUT,
+        &remote_input_packet(RI_TYPE_DEVICE_CHANGE, &body),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenericHidMessage<'a> {
+    Response {
+        request_id: u8,
+        control: u8,
+        opaque: u32,
+        device_id: u8,
+    },
+    Output {
+        device_id: u8,
+        interface: u8,
+        operation: u8,
+        bytes: &'a [u8],
+    },
+}
+
+fn parse_generic_hid_message(payload: &[u8]) -> Option<GenericHidMessage<'_>> {
+    use opennow_streamer_hid::generic::MAX_REPORT_BYTES;
+
+    match u32::from_le_bytes(payload.get(..4)?.try_into().ok()?) {
+        0x1a if payload.len() == 11 => Some(GenericHidMessage::Response {
+            request_id: payload[4],
+            control: payload[5],
+            opaque: u32::from_be_bytes(payload[6..10].try_into().ok()?),
+            device_id: payload[10],
+        }),
+        RI_TYPE_HID_REPORT if (7..=7 + MAX_REPORT_BYTES).contains(&payload.len()) => {
+            let device_id = payload[4];
+            let operation = payload[6];
+            let bytes = &payload[7..];
+            if !(10..=254).contains(&device_id) || operation > 4 {
+                return None;
+            }
+            if matches!(operation, 2 | 3)
+                && (bytes.len() != 3
+                    || !(1..=MAX_REPORT_BYTES)
+                        .contains(&usize::from(u16::from_le_bytes([bytes[1], bytes[2]]))))
+            {
+                return None;
+            }
+            Some(GenericHidMessage::Output {
+                device_id,
+                interface: payload[5],
+                operation,
+                bytes,
+            })
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn for_each_generic_hid_message<'a>(
+    mut bytes: &'a [u8],
+    mut handle: impl FnMut(GenericHidMessage<'a>),
+) {
+    while bytes.len() >= 4 {
+        let code = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let length = usize::from(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let Some(payload) = bytes.get(4..4 + length) else {
+            return;
+        };
+        bytes = &bytes[4 + length..];
+        if code == COMMAND_REMOTE_INPUT
+            && let Some(message) = parse_generic_hid_message(payload)
+        {
+            handle(message);
         }
     }
 }
@@ -2123,8 +2292,151 @@ mod tests {
         let encoded = NvstEncodedInput {
             route: NvstInputRoute::ControlReliable,
             bytes: command,
+            meaningful: true,
         };
         assert_eq!(encoded.route, NvstInputRoute::ControlReliable);
         assert_ne!(encoded.route, NvstInputRoute::InputPartial);
+    }
+
+    fn generic_report(
+        operation: u8,
+        error: bool,
+        bytes: Vec<u8>,
+    ) -> opennow_streamer_hid::generic::GenericOutbound {
+        opennow_streamer_hid::generic::GenericOutbound::Report {
+            device_id: 10,
+            interface: 2,
+            operation,
+            error,
+            bytes,
+            slot: 0,
+            incarnation: 1,
+            release: false,
+        }
+    }
+
+    #[test]
+    fn generic_attach_detach_and_report_match_exact_wire_golden_bytes() {
+        use opennow_streamer_hid::generic::{GenericDevice, GenericOutbound};
+        let attach = GenericOutbound::Attach {
+            request_id: 10,
+            device: GenericDevice {
+                slot: 0,
+                incarnation: 1,
+                vendor: 0x044f,
+                product: 0x0402,
+                revision: 0x0100,
+                interfaces: vec![],
+            },
+        };
+        assert_eq!(
+            generic_hid_command(&attach).unwrap(),
+            hex("0602160000000012120000000a010000000f044f040201000000")
+        );
+        assert_eq!(
+            generic_hid_command(&GenericOutbound::Detach { device_id: 42 }).unwrap(),
+            hex("0602160000000012120000002a030000000f0000000000000000")
+        );
+        assert_eq!(
+            generic_hid_command(&generic_report(0, false, hex("01aabb"))).unwrap(),
+            hex("0d020b0022110000000a020001aabb")
+        );
+        assert_eq!(
+            generic_hid_command(&generic_report(3, true, vec![])).unwrap(),
+            hex("0d02080022110000000a0103")
+        );
+        assert_eq!(
+            generic_hid_command(&generic_report(2, false, hex("010203"))).unwrap(),
+            hex("0d020b0022110000000a0002010203")
+        );
+    }
+
+    #[test]
+    fn generic_outbound_bounds_do_not_rewrite_reports() {
+        for op in 0..=4 {
+            let bytes = vec![0xa5; 256];
+            let command = generic_hid_command(&generic_report(op, false, bytes.clone())).unwrap();
+            assert_eq!(&command[12..], &bytes);
+            assert!(generic_hid_command(&generic_report(op, false, vec![0; 257])).is_none());
+        }
+        assert!(generic_hid_command(&generic_report(5, false, vec![1])).is_none());
+        assert!(generic_hid_command(&generic_report(0, false, vec![])).is_none());
+        assert!(generic_hid_command(&generic_report(0, true, vec![1])).is_none());
+        assert!(generic_hid_command(&generic_report(3, false, vec![])).is_none());
+        assert!(generic_hid_command(&generic_report(1, false, vec![])).is_none());
+        assert!(generic_hid_command(&generic_report(1, true, vec![])).is_some());
+    }
+
+    #[test]
+    fn generic_response_parser_uses_eleven_byte_payload_and_big_endian_opaque_word() {
+        let packet = hex("06020b001a0000000a01123456782a");
+        let mut parsed = vec![];
+        for_each_generic_hid_message(&packet, |message| parsed.push(message));
+        assert_eq!(
+            parsed,
+            vec![GenericHidMessage::Response {
+                request_id: 10,
+                control: 1,
+                opaque: 0x12345678,
+                device_id: 42,
+            }]
+        );
+        for length in 0..11 {
+            let short = control_command(COMMAND_REMOTE_INPUT, &packet[4..4 + length]);
+            for_each_generic_hid_message(&short, |_| panic!("short response accepted"));
+        }
+        let mut oversized = packet[4..].to_vec();
+        oversized.push(0);
+        for_each_generic_hid_message(&control_command(COMMAND_REMOTE_INPUT, &oversized), |_| {
+            panic!("oversized response accepted")
+        });
+    }
+
+    #[test]
+    fn generic_output_parser_validates_operation_get_and_command_boundaries() {
+        let output = hex("110000000a020001aabb");
+        assert_eq!(
+            parse_generic_hid_message(&output),
+            Some(GenericHidMessage::Output {
+                device_id: 10,
+                interface: 2,
+                operation: 0,
+                bytes: &output[7..],
+            })
+        );
+        for op in 2..=3 {
+            let mut get = hex("110000000a0202010001");
+            get[6] = op;
+            assert!(parse_generic_hid_message(&get).is_some());
+            get.push(0);
+            assert!(parse_generic_hid_message(&get).is_none());
+            get.truncate(10);
+            get[8..].copy_from_slice(&0_u16.to_le_bytes());
+            assert!(parse_generic_hid_message(&get).is_none());
+            get[8..].copy_from_slice(&257_u16.to_le_bytes());
+            assert!(parse_generic_hid_message(&get).is_none());
+        }
+        for length in 0..7 {
+            assert!(parse_generic_hid_message(&output[..length]).is_none());
+        }
+        assert!(parse_generic_hid_message(&output[..7]).is_some());
+        let mut invalid = output.clone();
+        invalid[6] = 5;
+        assert!(parse_generic_hid_message(&invalid).is_none());
+        invalid = output.clone();
+        invalid.resize(264, 0);
+        assert!(parse_generic_hid_message(&invalid).is_none());
+        invalid = output.clone();
+        invalid[4] = 6;
+        assert!(parse_generic_hid_message(&invalid).is_none());
+        let mut packets = control_command(0xffff, &output);
+        packets.extend(control_command(COMMAND_REMOTE_INPUT, &output));
+        packets.extend(hex("0602ffff110000000a020001"));
+        let mut count = 0;
+        for_each_generic_hid_message(&packets, |_| count += 1);
+        assert_eq!(count, 1);
+        let mut sony_count = 0;
+        for_each_sony_output(&packets, |_, _| sony_count += 1);
+        assert_eq!(sony_count, 0);
     }
 }

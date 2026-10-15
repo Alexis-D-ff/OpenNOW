@@ -13,8 +13,8 @@ from nightly_release import assemble, expected_packages, nightly_version
 class StableReleaseTest(unittest.TestCase):
     def test_stable_version_uses_project_version_without_nightly_suffix(self):
         cmake = ROOT / "opennow-qt/CMakeLists.txt"
-        self.assertEqual(nightly_version(cmake, 1, 1, "stable"), "1.0.2")
-        self.assertEqual(nightly_version(cmake, 620, 1), "1.0.2-nightly.620.1")
+        self.assertEqual(nightly_version(cmake, 1, 1, "stable"), "1.0.3")
+        self.assertEqual(nightly_version(cmake, 620, 1), "1.0.3-nightly.620.1")
 
     def test_channels_cannot_relabel_each_others_versions(self):
         for version, channel in (("1.0.0-nightly.1.1", "stable"), ("1.0.0", "nightly"),
@@ -30,7 +30,9 @@ class StableReleaseTest(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             names = expected_packages("1.0.0", "a" * 40, "stable")
-            self.assertEqual(len(names), 13)
+            self.assertEqual(len(names), 15)
+            self.assertIn("OpenNOW-Qt-1.0.0-Linux-x64.flatpak", names)
+            self.assertIn("OpenNOW-Qt-1.0.0-Linux-arm64.flatpak", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Darwin-arm64.dmg", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Windows-x64-setup.exe", names)
             self.assertIn("OpenNOW-Qt-1.0.0-Windows-arm64-setup.exe", names)

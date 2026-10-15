@@ -156,15 +156,21 @@ impl FfmpegDecoder {
             ));
         }
         initialize_ffmpeg()?;
-        let decoder_definition = if mode == FfmpegMode::Software {
-            ffmpeg::decoder::find(codec_id(codec))
-        } else {
-            ffmpeg::decoder::find_by_name(native_decoder_name(codec))
+        let decoder_definition = match (mode, codec) {
+            (FfmpegMode::Software, VideoCodec::Av1) => ["libdav1d", "libaom-av1"]
+                .into_iter()
+                .find_map(ffmpeg::decoder::find_by_name),
+            (FfmpegMode::Software, _) => ffmpeg::decoder::find(codec_id(codec)),
+            _ => ffmpeg::decoder::find_by_name(native_decoder_name(codec)),
         }
         .ok_or_else(|| {
             Error::unavailable(
                 Subsystem::Ffmpeg,
-                format!("FFmpeg was built without the {} decoder", codec.label()),
+                if mode == FfmpegMode::Software && codec == VideoCodec::Av1 {
+                    "software AV1 requires FFmpeg built with libdav1d or libaom-av1".to_owned()
+                } else {
+                    format!("FFmpeg was built without the {} decoder", codec.label())
+                },
             )
         })?;
         let mut context = codec::Context::new_with_codec(decoder_definition);
@@ -376,7 +382,7 @@ impl FfmpegDecoder {
             }
             return Ok(output);
         }
-        let metadata = decoded_metadata(decoded, self.negotiated_format)?;
+        let metadata = decoded_metadata(decoded, self.negotiated_format);
         #[cfg(feature = "vulkan")]
         if let Some(device) = self.shared_device.as_ref() {
             if decoded.format() != Pixel::VULKAN {
@@ -1058,7 +1064,7 @@ fn retain_request_frame(
             ));
         }
     }
-    let metadata = decoded_metadata(decoded, metadata)?;
+    let metadata = decoded_metadata(decoded, metadata);
     validate_request_profile(VideoCodec::H265, metadata)?;
     let mut retained = frame::Video::empty();
     let result = unsafe { ffi::av_frame_ref(retained.as_mut_ptr(), decoded.as_ptr()) };
@@ -1392,10 +1398,11 @@ fn vaapi_cpu_transfer_allowed(mode: FfmpegMode, metadata: StreamFormat, pixel: P
     mode == FfmpegMode::Vaapi && cpu_conversion_allowed(metadata, pixel)
 }
 
-fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<StreamFormat> {
+/// Mirrors GFN's VideoToolbox path, which classifies an unrecognized matrix as unknown and
+/// renders it with the default table instead of failing decode: metadata this presenter cannot
+/// represent falls back to the negotiated value and is reported once per field.
+fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> StreamFormat {
     use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic as Transfer};
-    let unsupported =
-        || Error::unavailable(Subsystem::Ffmpeg, "unsupported decoded color metadata");
     let color_range = match frame.color_range() {
         Range::Unspecified => defaults.color_range,
         Range::JPEG => ColorRange::Full,
@@ -1406,7 +1413,7 @@ fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<Stre
         Space::BT709 => ColorMatrix::Bt709,
         Space::BT470BG | Space::SMPTE170M => ColorMatrix::Bt601,
         Space::BT2020NCL => ColorMatrix::Bt2020,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(0, "matrix", other, defaults.color_matrix),
     };
     let color_transfer = match frame.color_transfer_characteristic() {
         Transfer::Unspecified => defaults.color_transfer,
@@ -1417,28 +1424,44 @@ fn decoded_metadata(frame: &frame::Video, defaults: StreamFormat) -> Result<Stre
         | Transfer::IEC61966_2_1
         | Transfer::BT2020_10
         | Transfer::BT2020_12 => ColorTransfer::Sdr,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(1, "transfer", other, defaults.color_transfer),
     };
     let color_primaries = match frame.color_primaries() {
         Primaries::Unspecified => defaults.color_primaries,
         Primaries::BT709 => ColorPrimaries::Bt709,
         Primaries::BT2020 => ColorPrimaries::Bt2020,
-        _ => return Err(unsupported()),
+        other => unsupported_color_metadata(2, "primaries", other, defaults.color_primaries),
     };
     let chroma_location = match frame.chroma_location() {
         ffmpeg::chroma::Location::Unspecified => defaults.chroma_location,
         ffmpeg::chroma::Location::Center => ChromaLocation::Center,
-        ffmpeg::chroma::Location::Left => ChromaLocation::Left,
-        _ => return Err(unsupported()),
+        ffmpeg::chroma::Location::Left | ffmpeg::chroma::Location::TopLeft => ChromaLocation::Left,
+        other => unsupported_color_metadata(3, "chroma location", other, defaults.chroma_location),
     };
-    Ok(StreamFormat {
+    StreamFormat {
         color_range,
         color_matrix,
         color_transfer,
         color_primaries,
         chroma_location,
         ..defaults
-    })
+    }
+}
+
+fn unsupported_color_metadata<T: std::fmt::Debug>(
+    field_bit: u32,
+    field: &str,
+    value: impl std::fmt::Debug,
+    fallback: T,
+) -> T {
+    static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let bit = 1 << field_bit;
+    if REPORTED.fetch_or(bit, std::sync::atomic::Ordering::Relaxed) & bit == 0 {
+        eprintln!(
+            "decoded color {field} {value:?} is not presentable; using negotiated {fallback:?}"
+        );
+    }
+    fallback
 }
 
 #[cfg(test)]
@@ -1453,6 +1476,20 @@ mod tests {
     fn software_decode_thread_count_stays_within_the_latency_budget() {
         let threads = software_decode_thread_count();
         assert!((2..=4).contains(&threads));
+    }
+
+    #[cfg(feature = "ffmpeg-bundled")]
+    #[test]
+    fn bundled_vaapi_includes_dmabuf_export_support() {
+        let configuration = unsafe { std::ffi::CStr::from_ptr(ffi::avutil_configuration()) }
+            .to_str()
+            .unwrap();
+        assert!(
+            configuration
+                .split_whitespace()
+                .any(|option| option == "--enable-libdrm"),
+            "bundled VAAPI requires DRM PRIME export: {configuration}"
+        );
     }
 
     #[test]
@@ -1781,12 +1818,12 @@ mod tests {
             ..StreamFormat::video_default(1920, 1080).unwrap()
         };
         let mut frame = frame::Video::new(Pixel::P010LE, 2, 2);
-        assert_eq!(decoded_metadata(&frame, defaults).unwrap(), defaults);
+        assert_eq!(decoded_metadata(&frame, defaults), defaults);
         frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
         frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
         frame.set_color_space(ffmpeg::color::Space::BT709);
         frame.set_color_range(ffmpeg::color::Range::MPEG);
-        let metadata = decoded_metadata(&frame, defaults).unwrap();
+        let metadata = decoded_metadata(&frame, defaults);
         assert_eq!(metadata.color_transfer, ColorTransfer::Sdr);
         assert_eq!(metadata.color_primaries, ColorPrimaries::Bt709);
         assert_eq!(metadata.color_matrix, ColorMatrix::Bt709);
@@ -1795,16 +1832,31 @@ mod tests {
             .set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::ARIB_STD_B67);
         frame.set_color_primaries(ffmpeg::color::Primaries::BT2020);
         assert_eq!(
-            decoded_metadata(&frame, defaults).unwrap().color_transfer,
+            decoded_metadata(&frame, defaults).color_transfer,
             ColorTransfer::Hlg
         );
         frame.set_color_space(ffmpeg::color::Space::BT2020CL);
-        assert!(decoded_metadata(&frame, defaults).is_err());
+        assert_eq!(
+            decoded_metadata(&frame, defaults).color_matrix,
+            defaults.color_matrix
+        );
         frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
         unsafe {
             (*frame.as_mut_ptr()).chroma_location = ffmpeg::chroma::Location::TopLeft.into();
         }
-        assert!(decoded_metadata(&frame, defaults).is_err());
+        assert_eq!(
+            decoded_metadata(&frame, defaults).chroma_location,
+            ChromaLocation::Left
+        );
+        unsafe {
+            (*frame.as_mut_ptr()).chroma_location = ffmpeg::chroma::Location::Bottom.into();
+        }
+        frame.set_color_primaries(ffmpeg::color::Primaries::SMPTE432);
+        frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::Linear);
+        let metadata = decoded_metadata(&frame, defaults);
+        assert_eq!(metadata.chroma_location, defaults.chroma_location);
+        assert_eq!(metadata.color_primaries, defaults.color_primaries);
+        assert_eq!(metadata.color_transfer, defaults.color_transfer);
     }
 
     #[test]
@@ -1932,6 +1984,47 @@ mod tests {
         for codec in [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1] {
             assert!(ffmpeg::decoder::find(codec_id(codec)).is_some());
         }
+    }
+
+    #[test]
+    fn software_av1_requires_a_cpu_decoder() {
+        initialize_ffmpeg().unwrap();
+        let available = ["libdav1d", "libaom-av1"]
+            .into_iter()
+            .any(|name| ffmpeg::decoder::find_by_name(name).is_some());
+        let format = StreamFormat::video_default(64, 64).unwrap();
+        let opened = FfmpegDecoder::open(VideoCodec::Av1, format, FfmpegMode::Software);
+        let probe = super::super::probe_ffmpeg_software(VideoCodec::Av1);
+        if !available {
+            assert!(matches!(opened, Err(Error::Unavailable { .. })));
+            assert!(probe.is_err());
+            return;
+        }
+        assert!(probe.is_ok());
+        let mut decoder = opened.unwrap();
+        assert!(matches!(
+            decoder.decoder.codec().unwrap().name(),
+            "libdav1d" | "libaom-av1"
+        ));
+        let packet = EncodedVideoFrame::new(
+            vec![
+                0x12, 0x00, 0x0a, 0x0a, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x9b, 0x5f, 0x20, 0x08,
+                0x32, 0x0e, 0x10, 0x00, 0xc0, 0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x0a, 0x05, 0x77,
+                0x64, 0x80,
+            ],
+            12_345,
+            true,
+        )
+        .unwrap();
+        let mut frames = decoder.decode(&packet).unwrap();
+        frames.extend(decoder.flush().unwrap());
+        assert_eq!(frames.len(), 1);
+        assert_eq!((frames[0].format.width, frames[0].format.height), (64, 64));
+        assert_eq!(frames[0].timestamp_us, 12_345);
+        assert_eq!(frames[0].format.pixel_format, PixelFormat::Nv12);
+        assert!(frames[0].dmabuf.is_none());
+        assert!(frames[0].vulkan.is_none());
+        frames[0].validate().unwrap();
     }
 
     #[cfg(feature = "vulkan")]

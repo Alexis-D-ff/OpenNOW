@@ -9,7 +9,13 @@
 extern "C" {
 #endif
 
-#define OPENNOW_STREAMER_FFI_ABI_VERSION 11u
+#define OPENNOW_STREAMER_FFI_ABI_VERSION 15u
+#define OPENNOW_STREAMER_GENERIC_HID_VERSION 1u
+#define OPENNOW_STREAMER_EVENT_SESSION_TIMER "session-timer"
+#define OPENNOW_STREAMER_EVENT_TEXT_INPUT_ERROR "text-input-error"
+#define OPENNOW_STREAMER_TERMINATION_SOURCE_SERVER "nvst-server"
+#define OPENNOW_STREAMER_TIMER_IDLE_WARNING 4u
+#define OPENNOW_STREAMER_TIMER_IDLE_EXPIRY 5u
 #define OPENNOW_STREAMER_MAX_TEXT_BYTES 65536u
 #define OPENNOW_STREAMER_VULKAN_DEVICE_INFO_VERSION 1u
 #define OPENNOW_STREAMER_GRAPHICS_CONTEXT_VERSION 3u
@@ -36,6 +42,65 @@ extern "C" {
 typedef struct OpenNowStreamer OpenNowStreamer;
 typedef struct OpenNowStreamerFrame OpenNowStreamerFrame;
 typedef struct OpenNowStreamerVulkanDevice OpenNowStreamerVulkanDevice;
+
+typedef struct OpenNowGenericHidInterface {
+    uint32_t version;
+    size_t struct_size;
+    uint8_t slot;
+    uint8_t interface_number;
+    uint16_t reserved;
+    uint64_t incarnation;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t revision;
+    uint16_t reserved2;
+    const uint8_t *descriptor;
+    size_t descriptor_len;
+} OpenNowGenericHidInterface;
+
+typedef struct OpenNowGenericHidReport {
+    uint32_t version;
+    size_t struct_size;
+    uint8_t slot;
+    uint8_t interface_number;
+    uint8_t operation;
+    uint8_t error;
+    uint64_t incarnation;
+    const uint8_t *bytes;
+    size_t byte_count;
+} OpenNowGenericHidReport;
+
+typedef struct OpenNowGenericHidOutput {
+    uint32_t version;
+    size_t struct_size;
+    uint8_t slot;
+    uint8_t interface_number;
+    uint8_t operation;
+    uint8_t reserved;
+    uint64_t incarnation;
+    size_t byte_count;
+    uint8_t bytes[256];
+} OpenNowGenericHidOutput;
+
+typedef enum OpenNowGenericHidAdmissionState {
+    OPENNOW_GENERIC_HID_PENDING = 0,
+    OPENNOW_GENERIC_HID_ADMITTED = 1,
+    OPENNOW_GENERIC_HID_DECLINED = 2
+} OpenNowGenericHidAdmissionState;
+
+typedef struct OpenNowGenericHidAdmission {
+    uint8_t slot;
+    uint8_t admission;
+    uint8_t reserved[6];
+    uint64_t incarnation;
+} OpenNowGenericHidAdmission;
+
+typedef struct OpenNowGenericHidAdmissions {
+    uint32_t version;
+    size_t struct_size;
+    size_t count;
+    OpenNowGenericHidAdmission devices[8];
+} OpenNowGenericHidAdmissions;
 
 typedef struct OpenNowStreamerVulkanDeviceInfo {
     uint32_t version;
@@ -192,6 +257,7 @@ typedef enum OpenNowStreamerStatus {
     OPENNOW_STREAMER_FRAME_ALREADY_RECORDED = 12,
     OPENNOW_STREAMER_SONY_INACTIVE = 13,
     OPENNOW_STREAMER_SDL_CLAIM_REJECTED = 14,
+    OPENNOW_STREAMER_GRAPHICS_UNSUPPORTED = 15,
     OPENNOW_STREAMER_PANIC = 255
 } OpenNowStreamerStatus;
 
@@ -279,6 +345,23 @@ OpenNowStreamerStatus opennow_streamer_replace_sdl_device_claims(
 OpenNowStreamerStatus opennow_streamer_submit_sony_snapshot(
     const OpenNowStreamer *handle,
     const OpenNowSonySnapshot *snapshot);
+
+OpenNowStreamerStatus opennow_streamer_replace_generic_hid_inventory(
+    const OpenNowStreamer *handle,
+    const OpenNowGenericHidInterface *interfaces,
+    size_t count);
+
+OpenNowStreamerStatus opennow_streamer_submit_generic_hid_report(
+    const OpenNowStreamer *handle,
+    const OpenNowGenericHidReport *report);
+
+OpenNowStreamerStatus opennow_streamer_take_generic_hid_output(
+    const OpenNowStreamer *handle,
+    OpenNowGenericHidOutput *output);
+
+OpenNowStreamerStatus opennow_streamer_get_generic_hid_admissions(
+    const OpenNowStreamer *handle,
+    OpenNowGenericHidAdmissions *admissions);
 
 OpenNowStreamerStatus opennow_streamer_submit_local_action(
     const OpenNowStreamer *handle,

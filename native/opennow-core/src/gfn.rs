@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) mod catalog;
 mod catalog_actions;
+mod dlss_support;
 mod store_launch;
 use catalog::*;
 
@@ -84,6 +85,7 @@ pub struct Endpoints {
     pub public_graphql: String,
     pub account_linking: String,
     pub subscription: String,
+    pub dlss_games: String,
     #[cfg(test)]
     server_info: Option<String>,
 }
@@ -104,6 +106,7 @@ impl Default for Endpoints {
             public_graphql: "https://public.games.geforce.com/graphql".into(),
             account_linking: "https://als.geforcenow.com/v1".into(),
             subscription: MES_URL.into(),
+            dlss_games: dlss_support::LIST_URL.into(),
             #[cfg(test)]
             server_info: None,
         }
@@ -310,9 +313,32 @@ pub struct ServiceError {
 
 impl ServiceError {
     pub(crate) fn network(context: &str, error: reqwest::Error) -> Self {
+        let error = error.without_url();
         Self {
             code: "network_error",
-            message: format!("{context}: {}", error.without_url()),
+            message: match transport_failure(&error) {
+                Some(stage) => format!("{context}: {error} ({stage})"),
+                None => format!("{context}: {error}"),
+            },
+        }
+    }
+
+    fn server_info(provider: &LoginProvider, context: &str, error: reqwest::Error) -> Self {
+        let home_network_only =
+            provider.idp_id != DEFAULT_IDP_ID && transport_failure(&error) == Some("dns");
+        let error = Self::network(context, error);
+        if !home_network_only {
+            return error;
+        }
+        let name = Some(provider.display_name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(provider.code.trim());
+        Self {
+            code: error.code,
+            message: format!(
+                "{name} can only be reached from inside its home country and network. Turn off any VPN, proxy or custom DNS (such as 1.1.1.1 or 8.8.8.8) and try again. Details: {}",
+                error.message
+            ),
         }
     }
 
@@ -351,6 +377,26 @@ impl ServiceError {
     }
 }
 
+fn transport_failure(error: &reqwest::Error) -> Option<&'static str> {
+    if error.is_timeout() {
+        return Some("timeout");
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if cause.to_string() == "dns error" {
+            return Some("dns");
+        }
+        if cause.is::<rustls::Error>() {
+            return Some("tls");
+        }
+        source = match cause.downcast_ref::<std::io::Error>() {
+            Some(io) => io.get_ref().map(|inner| inner as _),
+            None => cause.source(),
+        };
+    }
+    error.is_connect().then_some("connect")
+}
+
 #[derive(Default)]
 struct SessionRouting {
     active_owner: Option<ActiveSeatOwner>,
@@ -368,14 +414,21 @@ struct ActiveSeatOwner {
 #[serde(rename_all = "camelCase")]
 struct SessionReconciliationHint {
     session_id: String,
-    owner_scope: SessionReconciliationOwner,
+    owner_scope: SessionOwnerIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionReconciliationOwner {
+struct SessionOwnerIdentity {
     user_id: String,
     provider_idp_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionEndNotification {
+    session_id: String,
+    owner_scope: SessionOwnerIdentity,
 }
 
 impl ActiveSeatOwner {
@@ -414,7 +467,8 @@ pub struct GfnService {
     cloudmatch: CloudMatchService,
     account_connections: AccountConnectionsService,
     persistent_storage: PersistentStorageService,
-    store_cache: crate::store_cache::StoreCache,
+    store_cache: std::sync::Arc<crate::store_cache::StoreCache>,
+    dlss_games: dlss_support::DlssCatalog,
     catalog_revision: std::sync::atomic::AtomicU64,
     catalog_mutations: Mutex<std::collections::HashSet<catalog_actions::CatalogActionKey>>,
     server_vpc_cache: crate::server_vpc_cache::ServerVpcCache,
@@ -452,8 +506,14 @@ impl GfnService {
             Ok(_) => {}
             Err(error) => eprintln!("auth: Electron account migration was deferred: {error}"),
         }
-        let store_cache = crate::store_cache::StoreCache::new(data_dir.clone());
+        let store_cache =
+            std::sync::Arc::new(crate::store_cache::StoreCache::new(data_dir.clone()));
         let catalog_revision = store_cache.catalog_revision();
+        let dlss_games = dlss_support::DlssCatalog::new(
+            client.clone(),
+            endpoints.dlss_games.clone(),
+            store_cache.clone(),
+        );
         Self {
             cloudmatch: CloudMatchService::with_cleanup_path(
                 client.clone(),
@@ -468,6 +528,7 @@ impl GfnService {
             vault,
             profiles: ConsoleProfiles::load(&data_dir),
             store_cache,
+            dlss_games,
             catalog_revision: std::sync::atomic::AtomicU64::new(catalog_revision),
             catalog_mutations: Mutex::new(std::collections::HashSet::new()),
             server_vpc_cache: crate::server_vpc_cache::ServerVpcCache::default(),
@@ -1022,6 +1083,7 @@ impl GfnService {
                 ),
                 Ok(_) => {
                     self.defer_refresh();
+                    self.mark_needs_sign_in(&current.user.user_id);
                     (
                         None,
                         json!({"attempted":true,"outcome":"expired","message":"The required authentication token was not renewed. Sign in again."}),
@@ -1060,6 +1122,9 @@ impl GfnService {
                 Err(error) => {
                     self.defer_refresh();
                     eprintln!("auth: expired session could not refresh: {}", error.message);
+                    if error.code == "http_unauthorized" {
+                        self.mark_needs_sign_in(&current.user.user_id);
+                    }
                     (
                         None,
                         json!({"attempted":true,"outcome":"expired","message":"Saved session expired. Sign in again if this continues."}),
@@ -1088,6 +1153,12 @@ impl GfnService {
             )
         };
         Ok((session, refresh))
+    }
+
+    fn mark_needs_sign_in(&self, user_id: &str) {
+        if let Err(error) = self.vault.mark_needs_sign_in(user_id) {
+            eprintln!("auth: expired account state could not be saved: {error}");
+        }
     }
 
     fn defer_refresh(&self) {
@@ -1284,17 +1355,34 @@ impl GfnService {
             code: "credential_store_error",
             message,
         })?;
+        let (active_user_id, providers) = {
+            let state = self.state.lock().expect("GFN state poisoned");
+            (
+                state
+                    .session
+                    .as_ref()
+                    .map(|session| session.user.user_id.clone()),
+                state.providers.clone(),
+            )
+        };
         for account in &mut accounts {
             let user_id = account["userId"].as_str().unwrap_or_default();
             account["hasPin"] = Value::Bool(self.profiles.has_pin(user_id));
+            let code = account["providerCode"]
+                .as_str()
+                .filter(|code| !code.is_empty())
+                .unwrap_or("NVIDIA")
+                .to_owned();
+            let discovered = providers
+                .iter()
+                .find(|provider| provider.code == code)
+                .map(|provider| provider.display_name.as_str());
+            let name =
+                provider_display_name(&code, account["providerName"].as_str().or(discovered))
+                    .unwrap_or_else(|| code.clone());
+            account["providerName"] = Value::String(name);
+            account["alliance"] = Value::Bool(is_alliance_provider(&code));
         }
-        let active_user_id = self
-            .state
-            .lock()
-            .expect("GFN state poisoned")
-            .session
-            .as_ref()
-            .map(|session| session.user.user_id.clone());
         Ok(
             json!({"accounts":accounts,"activeUserId":active_user_id,"generation":self.auth_generation()}),
         )
@@ -1542,7 +1630,9 @@ impl GfnService {
             .get(url)
             .headers(lcars_headers(token, "BROWSER", "WEBRTC", false)?)
             .send()
-            .map_err(|error| ServiceError::network("Region discovery failed", error))?;
+            .map_err(|error| {
+                ServiceError::server_info(&session.provider, "Region discovery failed", error)
+            })?;
         if !response.status().is_success() {
             return Err(ServiceError::response("Region discovery failed", response));
         }
@@ -1596,7 +1686,7 @@ impl GfnService {
         let rolled = number_value(&data["rolledOverTimeInMinutes"]).unwrap_or(0.0);
         let total =
             number_value(&data["totalTimeInMinutes"]).unwrap_or(allotted + purchased + rolled);
-        let remaining = number_value(&data["remainingTimeInMinutes"]).unwrap_or(0.0);
+        let remaining = number_value(&data["remainingTimeInMinutes"]);
         let mut resolutions = data["features"]["resolutions"].as_array().into_iter().flatten()
             .filter(|resolution| resolution["isEntitled"].as_bool() == Some(true))
             .map(|resolution| json!({"width":resolution["widthInPixels"],"height":resolution["heightInPixels"],"fps":resolution["framesPerSecond"]}))
@@ -1629,18 +1719,25 @@ impl GfnService {
         Ok(json!({"subscription":{
             "membershipTier":membership,"subscriptionType":data["type"],"subscriptionSubType":data["subType"],
             "allottedHours":allotted/60.0,"purchasedHours":purchased/60.0,"rolledOverHours":rolled/60.0,
-            "usedHours":(total-remaining).max(0.0)/60.0,"remainingHours":remaining/60.0,"totalHours":total/60.0,
+            "usedHours":remaining.map(|remaining| (total-remaining).max(0.0)/60.0),
+            "remainingHours":remaining.map(|remaining| remaining/60.0),"totalHours":total/60.0,
             "firstEntitlementStartDateTime":data["firstEntitlementStartDateTime"],"serverRegionId":vpc_id,
             "currentSpanStartDateTime":data["currentSpanStartDateTime"],"currentSpanEndDateTime":data["currentSpanEndDateTime"],
             "notifyUserWhenTimeRemainingInMinutes":data["notifications"]["notifyUserWhenTimeRemainingInMinutes"],
             "notifyUserOnSessionWhenRemainingTimeInMinutes":data["notifications"]["notifyUserOnSessionWhenRemainingTimeInMinutes"],
             "state":data["currentSubscriptionState"]["state"],"isGamePlayAllowed":data["currentSubscriptionState"]["isGamePlayAllowed"],
-            "isUnlimited":data["subType"] == "UNLIMITED","entitledResolutions":resolutions,"storageAddon":storage_addon
+            "isUnlimited":data["subType"] == "UNLIMITED","entitledResolutions":resolutions,"storageAddon":storage_addon,
+            "dlssOverrides":crate::dlss::entitlements(&data)
         }}))
         })
     }
 
-    pub fn create_session(&self, params: &Value, settings: &Value) -> Result<Value, ServiceError> {
+    pub fn create_session(
+        &self,
+        params: &Value,
+        settings: &Value,
+        resolve_profile: impl FnOnce(&Value) -> Result<Value, ServiceError>,
+    ) -> Result<Value, ServiceError> {
         let admission = self.cloudmatch.admit_create()?;
         let app_id = params["catalogAppId"].as_str().unwrap_or_default();
         let variant_id = params["variantId"].as_str().unwrap_or_default();
@@ -1699,7 +1796,16 @@ impl GfnService {
         }
         let variant = catalog_actions::selected_variant(&inspection["game"], variant_id)
             .expect("ready decision validated the exact variant");
-        let (mut params, settings) = self.scoped_session_route(params, settings, &session)?;
+        let settings = resolve_profile(&if store_launch {
+            settings.clone()
+        } else {
+            crate::cloudmatch::catalog_hdr_settings(
+                settings,
+                &params["runtimeCapabilities"],
+                variant,
+            )
+        })?;
+        let (mut params, settings) = self.scoped_session_route(params, &settings, &session)?;
         params["accountLinked"] = variant["inLibrary"].clone();
         params["supportsInGameSettingsPersistence"] =
             variant["supportsInGameSettingsPersistence"].clone();
@@ -1842,6 +1948,38 @@ impl GfnService {
         self.cloudmatch
             .stop(&params, settings, &session, &self.device_id)
             .map(|result| scoped_result(result, &session, generation))
+    }
+
+    pub fn acknowledge_session_end(&self, params: &Value) -> Result<Value, ServiceError> {
+        let notification: SessionEndNotification = serde_json::from_value(params.clone())
+            .map_err(|_| ServiceError::invalid("Session end requires sessionId and ownerScope"))?;
+        if notification.session_id.is_empty()
+            || notification.session_id.len() > 256
+            || notification.owner_scope.user_id.is_empty()
+            || notification.owner_scope.user_id.len() > 1024
+            || notification.owner_scope.provider_idp_id.is_empty()
+            || notification.owner_scope.provider_idp_id.len() > 1024
+        {
+            return Err(ServiceError::invalid("Invalid ended session identity"));
+        }
+        let mut routing = crate::store_requests::lock(&self.session_routing)?;
+        let Some(owner) = routing.active_owner.as_ref().filter(|owner| {
+            owner.session_id == notification.session_id
+                && owner.auth.user.user_id == notification.owner_scope.user_id
+                && owner.auth.provider.idp_id == notification.owner_scope.provider_idp_id
+        }) else {
+            return Ok(json!({"sessionId":notification.session_id,"cleared":false}));
+        };
+        if owner.allocation_generation.is_some() {
+            return Err(ServiceError {
+                code: "session_update_busy",
+                message: "The session allocation handoff is still completing. Retry cleanup."
+                    .into(),
+            });
+        }
+        self.cloudmatch.clear_active(&notification.session_id);
+        routing.active_owner = None;
+        Ok(json!({"sessionId":notification.session_id,"cleared":true}))
     }
 
     pub fn reconcile_active_session(
@@ -2165,16 +2303,27 @@ impl GfnService {
                 message: "The owned session is not ready for media attachment".into(),
             });
         }
-        if !owned["rtspsEndpoints"].as_array().is_some_and(|endpoints| {
-            endpoints.iter().any(|endpoint| {
-                endpoint
-                    .as_str()
-                    .is_some_and(|endpoint| endpoint.starts_with("rtsps://"))
+        let webrtc = owned["transportMode"] == "webrtc";
+        let endpoint_ready = if webrtc {
+            crate::cloudmatch::has_webrtc_endpoint(&owned)
+        } else {
+            owned["rtspsEndpoints"].as_array().is_some_and(|endpoints| {
+                endpoints.iter().any(|endpoint| {
+                    endpoint
+                        .as_str()
+                        .is_some_and(|endpoint| endpoint.starts_with("rtsps://"))
+                })
             })
-        }) {
+        };
+        if !endpoint_ready {
             return Err(ServiceError {
                 code: "session_endpoint_missing",
-                message: "The owned session has no RTSPS media endpoint".into(),
+                message: if webrtc {
+                    "The owned session has no WebRTC signaling endpoint"
+                } else {
+                    "The owned session has no RTSPS media endpoint"
+                }
+                .into(),
             });
         }
         let mut params = params.clone();
@@ -2500,6 +2649,13 @@ impl GfnService {
         self.state.lock().expect("GFN state poisoned").generation
     }
 
+    pub(crate) fn bug_report_identity(&self) -> Value {
+        let state = self.state.lock().expect("GFN state poisoned");
+        state.session.as_ref().map_or(Value::Null, |session| {
+            bug_report_identity(&session.user, &session.provider)
+        })
+    }
+
     pub(crate) fn push_scope(&self) -> Option<opennow_core::push::PushScope> {
         let state = self.state.lock().expect("GFN state poisoned");
         let session = state.session.as_ref()?;
@@ -2554,10 +2710,16 @@ impl GfnService {
                 self.check_scope(session, generation)?;
                 let request = client.get(url).headers(headers);
                 let response = match requests {
-                    Some(requests) => requests.send(request, "Store server info failed"),
-                    None => request
-                        .send()
-                        .map_err(|error| ServiceError::network("Server info failed", error)),
+                    Some(requests) => requests.send_mapped(request, |error| {
+                        ServiceError::server_info(
+                            &session.provider,
+                            "Store server info failed",
+                            error,
+                        )
+                    }),
+                    None => request.send().map_err(|error| {
+                        ServiceError::server_info(&session.provider, "Server info failed", error)
+                    }),
                 };
                 let response = response?;
                 if !response.status().is_success() {
@@ -2937,6 +3099,27 @@ fn is_definitive_auth_revocation(error: &ServiceError) -> bool {
         || message.contains("revoked")
 }
 
+/// Partners whose discovery label is not the brand their members know.
+const PROVIDER_DISPLAY_OVERRIDES: &[(&str, &str)] = &[("BPC", "bro.game")];
+
+pub(crate) fn is_alliance_provider(code: &str) -> bool {
+    code != "NVIDIA"
+}
+
+/// The one place a provider code becomes the name shown to people.
+pub(crate) fn provider_display_name(code: &str, discovered: Option<&str>) -> Option<String> {
+    PROVIDER_DISPLAY_OVERRIDES
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map(|(_, name)| (*name).to_owned())
+        .or_else(|| {
+            discovered
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+}
+
 fn parse_providers(payload: &Value) -> Vec<LoginProvider> {
     let mut providers = payload["gfnServiceInfo"]["gfnServiceEndpoints"]
         .as_array()
@@ -2948,12 +3131,10 @@ fn parse_providers(payload: &Value) -> Vec<LoginProvider> {
                 LoginProvider {
                     idp_id: entry["idpId"].as_str()?.to_owned(),
                     code: code.to_owned(),
-                    display_name: if code == "BPC" {
-                        "bro.game"
-                    } else {
-                        entry["loginProviderDisplayName"].as_str()?
-                    }
-                    .to_owned(),
+                    display_name: provider_display_name(
+                        code,
+                        entry["loginProviderDisplayName"].as_str(),
+                    )?,
                     streaming_service_url: entry["streamingServiceUrl"].as_str()?.to_owned(),
                     priority: entry["loginProviderPriority"].as_i64().unwrap_or(0),
                 }
@@ -3488,6 +3669,32 @@ fn lcars_headers(
     headers.insert("x-nv-client-identity", HeaderValue::from_static("GFN-PC"));
     headers.insert(USER_AGENT, HeaderValue::from_static(GFN_USER_AGENT));
     Ok(headers)
+}
+
+fn bug_report_identity(user: &AuthUser, provider: &LoginProvider) -> Value {
+    let email = user
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty());
+    let derived = email.and_then(|email| email.split('@').next());
+    let username = Some(user.display_name.trim())
+        .filter(|name| !name.is_empty() && *name != "User" && Some(*name) != derived);
+    let (reporter, basis) = match (username, email) {
+        (Some(username), _) => (Some(username), "username"),
+        (None, Some(email)) => (Some(email), "email"),
+        (None, None) => (None, "none"),
+    };
+    json!({
+        "userId": user.user_id,
+        "providerIdpId": provider.idp_id,
+        "providerCode": provider.code,
+        "providerName": provider.display_name,
+        "reporter": reporter,
+        "reporterBasis": basis,
+        "alliancePartner": is_alliance_provider(&provider.code),
+        "membershipTier": user.membership_tier
+    })
 }
 
 fn user_from_jwt(token: &str) -> Option<AuthUser> {
@@ -4529,6 +4736,83 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn network_errors_name_the_failed_transport_stage_without_the_host() {
+        struct UnresolvedHost;
+        impl reqwest::dns::Resolve for UnresolvedHost {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                Box::pin(std::future::ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such host",
+                )
+                .into())))
+            }
+        }
+        let client = |builder: reqwest::blocking::ClientBuilder, timeout: Duration| {
+            builder.no_proxy().timeout(timeout).build().unwrap()
+        };
+        let failure = |client: Client, url: String| {
+            ServiceError::network("Server info failed", client.get(url).send().unwrap_err())
+        };
+
+        let unresolved = failure(
+            client(
+                Client::builder().dns_resolver(std::sync::Arc::new(UnresolvedHost)),
+                Duration::from_secs(10),
+            ),
+            "https://prod.partner.geforcenow.nvidiagrid.net/v2/serverInfo".into(),
+        );
+        assert_eq!(unresolved.code, "network_error");
+        assert_eq!(
+            unresolved.message,
+            "Server info failed: error sending request (dns)"
+        );
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        let refused = failure(
+            client(Client::builder(), Duration::from_secs(10)),
+            format!("http://{address}/v2/serverInfo"),
+        );
+        assert_eq!(
+            refused.message,
+            "Server info failed: error sending request (connect)"
+        );
+
+        let plaintext = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = plaintext.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = plaintext.accept().unwrap();
+            let _ = std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n",
+            );
+            let _ = stream.read(&mut [0; 1024]);
+        });
+        let handshake = failure(
+            client(Client::builder(), Duration::from_secs(10)),
+            format!("https://{address}/v2/serverInfo"),
+        );
+        server.join().unwrap();
+        assert_eq!(
+            handshake.message,
+            "Server info failed: error sending request (tls)"
+        );
+
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = silent.local_addr().unwrap();
+        let stalled = failure(
+            client(Client::builder(), Duration::from_millis(500)),
+            format!("http://{address}/v2/serverInfo"),
+        );
+        drop(silent);
+        assert_eq!(
+            stalled.message,
+            "Server info failed: error sending request (timeout)"
+        );
+    }
+
+    #[test]
     fn browser_service_identity_keeps_nvidia_required_webrtc_label() {
         let headers = lcars_headers("token", "BROWSER", "WEBRTC", false).unwrap();
         assert_eq!(headers["nv-client-type"], "BROWSER");
@@ -4619,6 +4903,7 @@ pub(crate) mod tests {
         assert_eq!(game["imageUrl"], "https://img.example/poster.jpg");
         assert_eq!(game["heroImageUrl"], "https://img.example/hero.jpg");
         assert!(STORE_PANELS_QUERY.contains("GAME_BOX_ART"));
+        assert!(STORE_PANELS_QUERY.contains("... on GfnSubscriptionFeatureValue { key value }"));
     }
 
     #[test]
@@ -4679,6 +4964,70 @@ pub(crate) mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["id"], "digital_store");
         assert_eq!(groups[0]["options"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn provider_codes_map_to_one_display_name() {
+        assert_eq!(
+            provider_display_name("BPC", Some("BPC")).as_deref(),
+            Some("bro.game")
+        );
+        assert_eq!(
+            provider_display_name("BPC", None).as_deref(),
+            Some("bro.game")
+        );
+        assert_eq!(
+            provider_display_name("DIG", Some(" Digevo ")).as_deref(),
+            Some("Digevo")
+        );
+        assert_eq!(provider_display_name("NEW", Some("  ")), None);
+        assert_eq!(provider_display_name("NEW", None), None);
+        assert!(!is_alliance_provider("NVIDIA"));
+        assert!(is_alliance_provider("BPC"));
+        assert!(is_alliance_provider("UNKNOWN"));
+    }
+
+    #[test]
+    fn saved_accounts_name_partners_and_report_expired_sign_ins() {
+        let (service, path) = test_service("http://127.0.0.1:9");
+        let mut partner = auth_fixture("partner");
+        partner.provider.code = "BPC".into();
+        partner.provider.idp_id = "bpc-idp".into();
+        partner.provider.display_name = "bro.game".into();
+        service.vault.save(&partner).unwrap();
+        service.vault.save(&auth_fixture("nvidia")).unwrap();
+        service.vault.mark_needs_sign_in("partner").unwrap();
+        service.state.lock().unwrap().providers.push(LoginProvider {
+            idp_id: "dig-idp".into(),
+            code: "DIG".into(),
+            display_name: "Digevo".into(),
+            streaming_service_url: "https://dig.example/".into(),
+            priority: 3,
+        });
+        let mut legacy = auth_fixture("legacy");
+        legacy.provider.code = "DIG".into();
+        legacy.provider.display_name = String::new();
+        service.vault.save(&legacy).unwrap();
+        let result = service.saved_accounts().unwrap();
+        let accounts = result["accounts"].as_array().unwrap();
+        let by_id = |id: &str| {
+            accounts
+                .iter()
+                .find(|item| item["userId"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_id("partner")["providerName"], "bro.game");
+        assert_eq!(by_id("partner")["providerIdpId"], "bpc-idp");
+        assert_eq!(by_id("partner")["alliance"], true);
+        assert_eq!(by_id("partner")["needsSignIn"], true);
+        assert_eq!(by_id("nvidia")["providerName"], "NVIDIA");
+        assert_eq!(by_id("nvidia")["alliance"], false);
+        assert_eq!(by_id("nvidia")["needsSignIn"], false);
+        assert_eq!(by_id("legacy")["providerName"], "Digevo");
+        assert!(accounts.iter().all(|item| item.get("tokens").is_none()));
+        assert!(!result.to_string().contains("test-access"));
+        std::fs::remove_dir_all(path).ok();
     }
 
     #[test]
@@ -4747,6 +5096,8 @@ pub(crate) mod tests {
             game["variants"][0]["supportsInGameSettingsPersistence"],
             true
         );
+        assert_eq!(game["variants"][0]["features"], json!([]));
+        assert_eq!(game["requiresPaidMembership"], false);
         assert!(game["imageUrl"].as_str().unwrap().ends_with(";f=jpg;w=900"));
         assert!(game["searchText"].as_str().unwrap().contains("valve"));
         assert!(!gfn_feature_enabled(
@@ -4761,14 +5112,15 @@ pub(crate) mod tests {
             "id":"cms-multi-store",
             "title":"Multi Store Game",
             "variants":[
-                {"id":"1001","appStore":"Steam","gfn":{"library":{"status":"PLATFORM_SYNC","selected":true}}},
+                {"id":"1001","appStore":"Steam","gfn":{"library":{"status":"PLATFORM_SYNC","selected":true},"features":[{"key":"RTX_ENABLED","value":"true"},{"key":"REFLEX_ENABLED","value":"true"}]}},
                 {"id":"1002","appStore":"Epic Games Store","gfn":{"library":{"status":"NOT_OWNED","selected":false}}},
                 {"id":"1003","appStore":"Xbox","gfn":{"library":{"status":"MANUAL","selected":false}}}
             ],
-            "gfn":{"playabilityState":"PLAYABLE"}
+            "gfn":{"playabilityState":"PLAYABLE","minimumMembershipTierLabel":"Premium"}
         }))
         .unwrap();
 
+        assert_eq!(game["requiresPaidMembership"], true);
         assert_eq!(
             game["availableStores"],
             json!(["Steam", "Epic Games Store", "Xbox"])
@@ -4777,6 +5129,8 @@ pub(crate) mod tests {
         assert_eq!(game["variants"][0]["inLibrary"], true);
         assert_eq!(game["variants"][1]["inLibrary"], false);
         assert_eq!(game["variants"][2]["inLibrary"], true);
+        assert_eq!(game["variants"][0]["features"], json!(["rtx", "reflex"]));
+        assert!(game["variants"][1]["features"].is_null());
     }
 
     #[test]
@@ -4842,6 +5196,41 @@ pub(crate) mod tests {
         assert_eq!(user.display_name, "Player");
         assert_eq!(user.membership_tier, "ULTIMATE");
         assert!(user.avatar_url.unwrap().contains("gravatar.com/avatar/"));
+    }
+
+    #[test]
+    fn bug_reports_use_the_username_then_the_email_and_name_alliance_partners() {
+        let jwt_user = |claims: &str| {
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims);
+            user_from_jwt(&format!("header.{payload}.signature")).unwrap()
+        };
+        let nvidia = LoginProvider::default_nvidia();
+        let named =
+            jwt_user(r#"{"sub":"1","email":"player@example.com","preferred_username":"Zortos"}"#);
+        let identity = bug_report_identity(&named, &nvidia);
+        assert_eq!(identity["reporter"], "Zortos");
+        assert_eq!(identity["reporterBasis"], "username");
+        assert_eq!(identity["alliancePartner"], false);
+
+        let unnamed = jwt_user(r#"{"sub":"2","email":"player@example.com"}"#);
+        let partner = LoginProvider {
+            code: "BPC".to_owned(),
+            display_name: "Boosteroid".to_owned(),
+            ..LoginProvider::default_nvidia()
+        };
+        let identity = bug_report_identity(&unnamed, &partner);
+        assert_eq!(identity["reporter"], "player@example.com");
+        assert_eq!(identity["reporterBasis"], "email");
+        assert_eq!(identity["providerName"], "Boosteroid");
+        assert_eq!(identity["providerIdpId"], partner.idp_id);
+        assert_eq!(identity["userId"], "2");
+        assert_eq!(identity["alliancePartner"], true);
+
+        let anonymous = jwt_user(r#"{"sub":"3"}"#);
+        assert_eq!(
+            bug_report_identity(&anonymous, &nvidia)["reporter"],
+            Value::Null
+        );
     }
 
     #[test]

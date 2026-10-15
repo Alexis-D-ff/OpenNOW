@@ -25,7 +25,7 @@ syntax checks, and the headless-compatible `ci-unit` Qt tests. The Qt check comp
 bundled FFmpeg. Rust test binaries and the SDL3 test dependency still need compiling;
 Rust, Qt, and SDL caches reduce repeated work.
 General-purpose check and package jobs use Blacksmith runners. The isolated
-release-signing job remains on `opennow-release-signer`.
+release-signing jobs run on `blacksmith-2vcpu-ubuntu-2404`.
 
 The upstream Rust cache action automatically uses Blacksmith's colocated cache.
 Platform-specific shared keys survive job renames, and dependency caches are saved
@@ -41,6 +41,37 @@ matrix, including macOS; platform-specific steps handle its app bundle and reloc
 Required status names are `linux-x64`, `windows-x64`, and `macos-arm64`. Keep all
 three required in the repository's branch rules. Each also fails if shared checks
 fail or are cancelled, and manual packaging waits for every platform to pass.
+
+### Linux installation layout
+
+Linux installs use GNUInstallDirs. Executables go in `CMAKE_INSTALL_BINDIR`, and
+`libopennow_streamer_ffi.so` goes in `CMAKE_INSTALL_LIBDIR`. The installed Qt
+executable finds the library through an origin-relative RPATH, including `lib64`
+and multiarch layouts. Relative install directories support `cmake --install
+--prefix` overrides. Absolute directories also work at the configured prefix.
+If one directory is absolute and the other is relative, changing the prefix at
+install time is rejected before files are installed. Reconfigure with the intended
+prefix or make both directories relative.
+
+For example, stage a multiarch installation without writing into the host `/usr`:
+
+```sh
+cmake -S opennow-qt -B build/opennow-qt -DCMAKE_INSTALL_PREFIX=/usr \
+  -DCMAKE_INSTALL_LIBDIR=lib/x86_64-linux-gnu
+cmake --build build/opennow-qt
+DESTDIR="$PWD/build/stage" cmake --install build/opennow-qt
+python3 opennow-qt/packaging/verify_linux_package.py build/stage/usr/bin \
+  --libdir lib/x86_64-linux-gnu
+```
+
+The verifier's `--libdir` is relative to the executable directory's parent, not
+an absolute filesystem path. With `--deb`, the same value is relative to `/usr`
+inside the extracted distribution DEB. AppImage and bundled-DEB assembly explicitly
+use `lib`; ordinary CMake installs retain the configured libdir. Distribution
+installs use the system Qt and SDL3 runtime, while AppImage and bundled DEB builds
+deploy their private runtime and plugins.
+
+### Local Qt tests
 
 To run the test-only Qt suite locally after configuring a Debug build:
 
@@ -237,7 +268,7 @@ cpack --config build/opennow-qt/CPackConfig.cmake -G 'DragNDrop;ZIP' -B build/qt
 CMake selects the matching Rust target; an explicitly supplied
 `OPENNOW_RUST_TARGET` must agree with the Qt architecture. The app bundle carries
 the core, acceptance verifier, standalone capability probe, embedded streamer
-dylib, and deployed Qt/SDL3 libraries. The FFI dylib uses an `@rpath` install name
+dylib, macOS AWDL helper, and deployed Qt/SDL3 libraries. The FFI dylib uses an `@rpath` install name
 so it can load outside the build tree.
 The app explicitly links Qt Svg so macdeployqt includes the SVG image plugin used
 by the QML icons; the relocated-bundle check requires that plugin to be present.
@@ -251,6 +282,23 @@ notarization and require manual updates. See
 Windows MSI/portable ZIP contract. Offscreen tests cover shell and FFI
 contracts; real VideoToolbox/Metal presentation, audio, input capture, and login
 still require macOS hardware and a GFN account.
+
+The macOS-only `opennow-awdl-helper` crate uses Rust's standard library and `libc`.
+CMake builds it for the configured Qt architecture and Debug or Release profile,
+without the streamer's media features. It is bundled at
+`Contents/Helpers/opennow-awdl-helper`; its LaunchDaemon template is
+`Contents/Resources/opennow-awdl.plist`. Packaging does not install a privileged
+service on the build host or the user's Mac.
+
+AWDL suppression during streaming is opt-in and off by default. Installing the
+helper requires a separate administrator approval. The helper keeps `awdl0` down
+while OpenNOW holds a streaming lease, then restores the state it changed when
+the last lease ends. AirDrop, AirPlay, Sidecar, Universal Control, and other
+Continuity features can stop working for all users while suppression is active.
+See [the macOS AWDL helper contract](../docs/macos-awdl-helper.md) for installation
+requirements, signing limitations, crash recovery, and removal. Run the
+[macOS acceptance checks](../docs/qt-acceptance.md#macos-awdl-helper) before relying
+on the feature on a real Mac.
 
 Relative mouse mode uses native CoreGraphics pointer capture on macOS, not repeated
 cursor warps. F8 (or the configured pointer-lock shortcut) explicitly locks or
@@ -270,12 +318,17 @@ the server/client cursor handoff.
 
 ### First-run onboarding
 
-New profiles enter setup after provider sign-in. The flow covers the 1.0.0 beta
-notice, desktop or console mode, streaming preferences, optional frame generation,
-macOS-only MetalFX upscaling, and optional GitHub Sponsors support. Existing
-profiles migrate with onboarding completed and retain their preferences.
+New profiles enter setup after provider sign-in. Setup asks one question per
+screen: **Mode** (desktop or console, with the beta notice and a bug-report link),
+**Picture** (resolution and frame rate up front; HDR, codec and bitrate under
+**Fine-tune**), **Network check** (macOS only), optional **Boost** (frame generation
+and upscaling, with **Skip for now**), and **Ready** (a summary plus an optional
+GitHub Sponsors card). A segmented progress bar in the header shows the steps for
+the current platform. Existing profiles migrate with onboarding completed and
+retain their preferences.
 
-Choices stay in a local draft until **Finish setup** or **Skip setup**. Both actions
+Choices stay in a local draft until **Finish and open library** or **Skip setup**.
+**Skip for now** on Boost discards only the staged boost choices. Both actions
 save the current choices, then persist `onboardingCompleted` last. If a write fails,
 setup keeps the draft and presents the error for retry. Selecting console mode does
 not replace the wizard while its settings are being saved. No payment or diagnostic
@@ -293,18 +346,11 @@ stepper as Settings. Selection still edits the onboarding draft rather than savi
 immediately. Short pages center within the available content area; longer pages
 remain scrollable, including keyboard focus inside the expanded resolution picker.
 
-On macOS, setup requires the `awdl0` interface to be down. Boost offers an explicit,
-confirmed disable action using the macOS administrator prompt. Finish and Skip
-both check the current interface state, with a fresh check before sending the
-completion-marker write after the other settings. Enabled, unreadable and busy
-states block completion and return to Boost without discarding the draft. A
-confirmed absent interface needs no change; other platforms have no AWDL requirement.
-Re-enabling AWDL from the card undoes the network change and blocks completion again.
-OpenNOW never disables AWDL automatically, stores administrator credentials, or
-installs a service. Disabling AWDL can interrupt AirDrop, AirPlay, Sidecar and other
-Continuity features for all users. macOS may re-enable it after the check; OpenNOW
-does not enforce its state after setup. An interface-down reading is not proof of
-zero AWDL radio traffic or a guaranteed fix for streaming stutter.
+On macOS, the Network check offers the optional AWDL helper described above.
+Leaving suppression off, declining administrator approval, or having no helper
+does not block setup or streaming. OpenNOW never saves administrator credentials.
+An interface-down reading is not proof of zero AWDL radio traffic or a guaranteed
+fix for streaming stutter.
 
 Run persistence and whole-app acceptance without an account:
 
@@ -316,23 +362,24 @@ QT_QPA_PLATFORM=offscreen build/opennow-qt/opennow-qt \
   --reduced-motion --screenshot /absolute/path/onboarding.png
 ```
 
-`--onboarding-step` accepts 0 through 5. Add `--smoke-light-theme` or
+`--onboarding-step` accepts 0 through 3 (Mode, Picture, Boost, Ready) where the
+Network check is absent. Add `--smoke-light-theme` or
 `--onboarding-ui-scale 1.25` to inspect alternate appearances. For the existing
 provider sign-in screen, replace `--onboarding-step 0` with `--onboarding-login`.
 Add `--onboarding-ui-check` to verify centering and draft resolution selection, and
-`--onboarding-resolution-expanded --onboarding-step 2` to exercise the expanded
+`--onboarding-resolution-expanded --onboarding-step 1` to exercise the expanded
 picker. Use `--onboarding-replay-check` to verify the Settings confirmation,
 cancellation and failed-save retry; add `--onboarding-replay-dialog` for a dialog
 screenshot. These replay UI fixtures do not restart the test process.
-Add `--onboarding-awdl-check --onboarding-step 3` to exercise the macOS card with an
-injected controller on any platform. This checks confirmation, cancellation,
+Add `--onboarding-awdl-check --onboarding-step 2` to exercise the macOS Network check
+with an injected controller on any platform. This checks confirmation, cancellation,
 restore, busy, error and unsupported states without changing a network interface.
 These switches run only with the smoke fixture; they do not start provider login,
 open donation links, or write account settings. Real provider approval and native
 MetalFX output still require the corresponding account and macOS device.
 
-Capture every setup step in desktop, compact 1.25×, and light appearances, plus
-desktop and compact login, for visual comparison with the Paper design:
+Capture every setup step in desktop, compact 1.25×, and light appearances, the
+macOS Network check, plus desktop and compact login, for visual comparison with the Paper design:
 
 ```sh
 bash scripts/capture-qt-onboarding.sh build/opennow-qt/opennow-qt /absolute/path/onboarding-review
@@ -699,9 +746,16 @@ window. CPack installs the Qt executable, `opennow-core`, the runtime library
 and `opennow-streamer` for the core's capability probe. Qt streaming still runs
 in process through the runtime library, not in the probe executable. CI produces
 the platform packages from that layout.
-The screenshot shortcut captures the exact stream region, and F12 records the
-negotiated H.264/H.265/AV1 source stream plus Opus audio atomically into Matroska
-before generating a media thumbnail.
+F12 records the negotiated H.264/H.265/AV1 source stream plus Opus audio atomically
+into Matroska.
+
+The screenshot shortcut, Ctrl+F11 by default, grabs the stream's desktop region
+and saves a PNG. This is a compositor-dependent desktop grab, not a video-frame
+snapshot. Visible local menus, statistics, capture indicators, or other windows
+can appear in the image. The compositor can refuse capture. Capture uses a single
+screen. Multi-monitor boundaries, display scaling, and HDR image output require
+target validation. Neither screenshots nor source recordings remove GFN or game UI
+already encoded into the server's video.
 
 Settings → Recording exposes source capture information, the recordings folder,
 editable recording/clipping shortcuts, and an opt-in replay buffer. Replay is off
@@ -712,6 +766,15 @@ F12 still starts/stops a manual recording. Both bindings also appear under Contr
 enabling it or changing its limits takes effect next session.
 Both stream interfaces show a recording timer and transient clip results above the
 same video item without taking focus or opening a blocking overlay.
+
+If a manual recording encounters stream discontinuity, recording-queue overflow,
+or a stream interruption, it stops and finalizes the valid prefix already written
+to the muxer. The capture notice distinguishes this early save from normal
+completion. Recording does not restart automatically. No file is saved before a
+usable video keyframe, and write, finalization, or publication errors remain
+failures. Publication uses a same-directory no-replace rename, not a hard link or
+copy. A filesystem that cannot perform that operation reports a save failure.
+Replay buffering and its discontinuity policy are unchanged.
 
 Recording and clips use the incoming resolution, frame rate, codec and bitrate.
 There is no independent scaling or encoding pass; change Stream settings to change

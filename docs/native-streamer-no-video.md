@@ -83,6 +83,15 @@ to `timeoutMs`. It must be at least the idle timeout and no more than 90 seconds
 The native session negotiator supplies 60 seconds on Windows and eight seconds
 elsewhere. This changes neither the external core protocol nor the C ABI.
 
+For prepared sessions, that first-video allowance starts when PLAY completes,
+not when the receive workers start. The bundle shares its PLAY-completion clock
+with dedicated Mjolnir. Waiting for PLAY does not consume the video allowance;
+the bounded PLAY gate still ends startup if PLAY fails. Sessions without a PLAY
+gate retain the worker-start clock.
+An authenticated video packet before PLAY does not end the startup allowance.
+The first authenticated video packet after PLAY starts the regular idle timeout
+and frame-progress watchdog.
+
 To verify on Windows, use a new executable path with no existing firewall rule,
 start a session, and leave the Windows permission prompt open for more than
 16 seconds but less than 60 seconds before allowing access. Video should start
@@ -125,9 +134,11 @@ show incoming authenticated video, assembled frames, and visible playback.
 Startup ordering remains a separate lead. Android starts its UDP workers before
 ANNOUNCE. Mac also explicitly starts video punches before PLAY and records a
 [late-punch failure on high-RTT seats](https://github.com/OpenCloudGaming/openNOW-Mac/blob/f95fde8ed79cedd8f7e4333e195ecfd7a701a04b/OPN/Stream/NvstBifrostFreeVideo.swift#L274-L284).
-Rust starts the workers after ANNOUNCE and before PLAY, but does not wait for
-their first send. The supplied logs do not timestamp that first send, so they
-cannot establish whether this race occurred. No timing delay is added by this fix.
+Rust starts the workers after ANNOUNCE and now waits up to 20 seconds for
+authenticated transport readiness before PLAY. DTLS completion publishes that
+readiness; a raw transport can establish it through authenticated media from
+the negotiated peer. The supplied incident logs do not timestamp the first send,
+so they cannot establish whether an earlier startup race occurred.
 
 ## Verification
 
