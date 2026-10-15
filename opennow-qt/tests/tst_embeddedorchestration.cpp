@@ -2060,6 +2060,100 @@ private slots:
         }
     }
 
+    void sessionElapsedTimeBelongsToCloudSeatNotNativeAttachment()
+    {
+        QJSEngine engine;
+        QVERIFY(prepareLaunchGuards(engine));
+        QVERIFY(prepareRecordingTeardown(engine));
+        const auto evaluate = [&](const QString &script) {
+            const auto result = engine.evaluate(script);
+            if (result.isError())
+                qWarning().noquote() << result.toString() << result.property("stack").toString();
+            return result;
+        };
+        QVERIFY(!evaluate(QStringLiteral(R"JS(
+            var clockNow = 10000; Date.now = function() {return clockNow;};
+            var ready = true, activeSession = null, streamer = {status:'stopped'};
+            var streamStartedAtMs = 0, streamState = '', streamMessage = '', runtimeStreamProfile = {};
+            var sessionSetupProgress = {title:'Preparing',detail:'Waiting for a seat'};
+            var streamPollRequestId = '', streamStopRequestId = '', streamerStopRequestId = '';
+            var streamerStartRequestId = '', sessionClaimRequestId = '', streamerPrepareRequestId = '';
+            var streamerRestartAttempts = 0, sessionReconnectAttempts = 0, streamPollFailureAttempts = 0;
+            var sessionRecoveryPending = false, sessionRecoveryAwaitingAuth = false;
+            var streamerRecoveryExhausted = false, streamerStopExpected = false, streamRecordingActive = false;
+            var streamInputStateKnown = false, desiredStreamInputPaused = false;
+            var nativeRuntimeReady = true, nativeRuntimeCapabilities = {};
+            var streamerRestartTimer = {running:false,stop:function(){this.running=false;}};
+            var streamPollTimer = {stop:function(){},restart:function(){}};
+            var CoreClient = {cancel:function(){},request:function(){return 'prepare';}};
+            var AppController = {route:'stream',overlay:''};
+            function qsTr(text) {return text;}
+            function syncDiscordPresence() {}
+            function cancelSessionRecovery() {}
+            function stopNativeStreamer() {}
+            function resetStreamReplay() {}
+            function isRemoteSessionTermination() {return false;}
+            function inspectStreamerOverlayRequest() {}
+            function inspectStreamerScreenshotRequest() {}
+            function inspectStreamerRecordingRequest() {}
+            function inspectStreamerShortcutAction() {}
+            function setStreamInputPaused() {}
+        )JS")).isError());
+        for (const auto &name : {"normalizedStreamingSession", "acceptStreamingSession",
+                 "startNativeStreamer", "acceptStreamerSnapshot"})
+            QVERIFY(loadShellFunction(engine, QString::fromLatin1(name)));
+        const auto check = [&](const QString &script) {
+            const auto result = evaluate(script);
+            QVERIFY2(!result.isError(), qPrintable(result.toString()));
+            QVERIFY2(result.toBool(), qPrintable(script));
+        };
+        check(QStringLiteral(R"JS(
+            acceptStreamingSession({sessionId:'seat-a',status:1,phase:'queued'});
+            streamStartedAtMs === 0;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            clockNow = 20000;
+            acceptStreamingSession({sessionId:'seat-a',status:2,phase:'ready'});
+            streamStartedAtMs === 20000 && streamer.sessionStartedAtMs === '20000';
+        )JS"));
+        check(QStringLiteral(R"JS(
+            acceptStreamerSnapshot({sessionId:'seat-a',status:'streaming',sessionStartedAtMs:'21000'});
+            streamStartedAtMs === 20000;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            clockNow = 30000; streamerPrepareRequestId = '';
+            streamer = {sessionId:'seat-a',status:'stopped'};
+            acceptStreamingSession({sessionId:'seat-a',status:1,phase:'preparing',resumePending:true});
+            acceptStreamingSession({sessionId:'seat-a',status:2,phase:'ready'});
+            streamStartedAtMs === 20000 && streamer.sessionStartedAtMs === '30000';
+        )JS"));
+        check(QStringLiteral(R"JS(
+            acceptStreamerSnapshot({sessionId:'seat-a',status:'streaming',sessionStartedAtMs:'31000'});
+            acceptStreamerSnapshot({sessionId:'seat-a',status:'streaming'});
+            streamStartedAtMs === 20000;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            acceptStreamingSession({sessionId:'seat-b',status:1,phase:'queued'});
+            streamStartedAtMs === 0;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            clockNow = 40000; streamerPrepareRequestId = ''; streamer = {status:'stopped'};
+            acceptStreamingSession({sessionId:'seat-b',status:2,phase:'ready'});
+            acceptStreamerSnapshot({sessionId:'seat-a',status:'streaming',sessionStartedAtMs:'21000'});
+            streamStartedAtMs === 40000;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            acceptStreamingSession(null);
+            acceptStreamerSnapshot({sessionId:'seat-b',status:'streaming',sessionStartedAtMs:'41000'});
+            streamStartedAtMs === 0;
+        )JS"));
+        check(QStringLiteral(R"JS(
+            clockNow = 50000; streamerPrepareRequestId = ''; streamer = {status:'stopped'};
+            acceptStreamingSession({sessionId:'seat-b',status:2,phase:'ready'});
+            streamStartedAtMs === 50000;
+        )JS"));
+    }
+
     void mediaRecoveryIsBoundedUntilVideoActuallyStarts()
     {
         // Execute the actual ShellStore functions with side effects stubbed,

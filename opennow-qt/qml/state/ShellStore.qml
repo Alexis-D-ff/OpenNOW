@@ -2109,6 +2109,8 @@ QtObject {
             nextSession.keyboardLayout = previousSession.keyboardLayout
         activeSession = nextSession
         if (!activeSession || !previousSession || previousSession.sessionId !== activeSession.sessionId) {
+            if (activeSession)
+                streamStartedAtMs = 0
             const pollId = streamPollRequestId
             streamPollRequestId = ""
             coreSessionRestoreId = ""
@@ -2285,10 +2287,6 @@ QtObject {
         inspectStreamerScreenshotRequest(streamer)
         inspectStreamerRecordingRequest(streamer)
         inspectStreamerShortcutAction(streamer)
-
-        const startedAt = Number(streamer.sessionStartedAtMs || 0)
-        if (Number.isFinite(startedAt) && startedAt > 0)
-            streamStartedAtMs = startedAt
 
         const status = String(streamer.status || "unknown")
         if (activeSession && !sessionRecoveryPending && status !== "stopped" && status !== "error") {

@@ -863,12 +863,15 @@ QtObject {
         checkConnectingPresentation(parent)
         // This is another reply for the same seat, not the first session.
         ShellStore.activeSession = {sessionId:"fixture", phase:"ready", status:2}
+        const sessionStartedAt = Date.now() - 600000
+        ShellStore.streamStartedAtMs = sessionStartedAt
         ShellStore.streamerRestartAttempts = 2
         ShellStore.sessionReconnectAttempts = 2
         ShellStore.acceptStreamingSession({sessionId:"fixture", phase:"ready", status:2})
         check(ShellStore.sessionReconnectAttempts === 2, "seat claim must not reset video retries")
-        ShellStore.acceptStreamerSnapshot({sessionId:"fixture", status:"streaming"})
+        ShellStore.acceptStreamerSnapshot({sessionId:"fixture", status:"streaming", sessionStartedAtMs:String(Date.now())})
         check(ShellStore.streamerRestartAttempts === 2, "transport startup must not reset video retries")
+        check(ShellStore.streamStartedAtMs === sessionStartedAt, "native attachment cannot reset cloud-session elapsed time")
         client.state = "ready"
         ShellStore.sessionReconnectAttempts = ShellStore.maximumSessionReconnectAttempts
         for (let i = 0; i < 20; ++i)
@@ -917,6 +920,9 @@ QtObject {
         id = ShellStore.streamPollRequestId
         client.responseReceived(id, {session:{sessionId:"fixture", status:2, phase:"ready", resumePending:false}})
         check(client.calls.some(call => call.method === "streamer.prepare"), "prepare only after ready poll")
+        check(ShellStore.streamStartedAtMs === sessionStartedAt
+            && Number(ShellStore.streamer.sessionStartedAtMs) > sessionStartedAt,
+            "discovery, claim, resume polling, and native restart retain the original session clock")
         ShellStore.cancelSessionRecovery()
         ShellStore.streamer = {status:"stopped"}
         ShellStore.recoverStreamingSession("cancel fixture")
