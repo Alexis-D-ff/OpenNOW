@@ -104,7 +104,8 @@ Popup {
             }
             Text {
                 visible: root.changes.length > 3
-                text: qsTr("+ %1 more changes").arg(root.changes.length - 3)
+                text: root.changes.length === 4 ? qsTr("+ 1 more change")
+                    : qsTr("+ %1 more changes").arg(root.changes.length - 3)
                 color: DesktopTokens.textMuted
                 font.family: Theme.bodyFont
                 font.pixelSize: DesktopTokens.px(13)

@@ -13,6 +13,7 @@
     "downloadingAccessible": "Downloading update, %1%",
     "installedVersion": "INSTALLED %1",
     "versionChange": "%1  →  %2",
+    "moreChange": "+ 1 more change",
     "moreChanges": "+ %1 more changes",
     "download": "Download",
     "restartToInstall": "Restart to install",
