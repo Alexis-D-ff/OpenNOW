@@ -115,9 +115,10 @@ internal fun TouchOverlay(
         onDispose { lifecycle.removeObserver(observer) }
     }
     val opacity = touch.opacity
-    val layoutScale = touch.scale
+    // Keep the gamepad compact while giving its sticks more room; keyboard controls retain their sizing.
+    val layoutScale = touch.scale * if (touch.keyboardModeEnabled) 1f else 0.9f
     val buttonScale = touch.buttonScale
-    val stickScale = touch.stickScale
+    val stickScale = touch.stickScale * if (touch.keyboardModeEnabled) 1f else 1.25f
     val defaultOffsets = remember { AndroidTouchSettings().offsets }
 
     val localOffsets = remember(touch.offsets) {
@@ -1434,16 +1435,16 @@ internal fun applyTouchJoystickDeadZone(value: Float, deadZone: Float): Float {
     return if (clampedValue < 0f) -adjusted else adjusted
 }
 
-/** Offset the fixed origin toward the finger without a response jump at the calibration limit. */
+/** Fixed sticks keep their layout center; only dynamic sticks follow the initial touch. */
 internal fun touchStickGestureCenter(
     fixedCenter: Offset,
     downPosition: Offset,
-    maxRadius: Float,
     mode: TouchJoystickMode,
 ): Offset {
-    if (mode == TouchJoystickMode.Dynamic) return downPosition
-    val offset = downPosition - fixedCenter
-    return fixedCenter + clampStickOffset(offset, maxRadius * 0.6f)
+    return when (mode) {
+        TouchJoystickMode.Fixed -> fixedCenter
+        TouchJoystickMode.Dynamic -> downPosition
+    }
 }
 
 @Composable
@@ -1616,7 +1617,7 @@ private fun VirtualStick(
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     val fixedCenter = Offset(size.width / 2f, size.height / 2f)
                     val maxRadius = min(size.width, size.height) * 0.34f
-                    val gestureCenter = touchStickGestureCenter(fixedCenter, down.position, maxRadius, mode)
+                    val gestureCenter = touchStickGestureCenter(fixedCenter, down.position, mode)
                     pressed = true
                     baseOffset = gestureCenter - fixedCenter
                     var lastValue = Offset.Zero

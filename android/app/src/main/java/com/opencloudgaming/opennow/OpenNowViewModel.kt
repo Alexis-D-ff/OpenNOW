@@ -2461,6 +2461,20 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
         return latestSession.tokens.idToken ?: latestSession.tokens.accessToken
     }
 
+    private suspend fun launchAuthToken(expected: AuthSession): String {
+        val refreshed = authSessionForLaunch(
+            expected = expected,
+            load = { authStore.reload(); authStore.activeSession() },
+            refresh = { restoreAuthSession(throwOnRefreshFailure = true).getOrThrow() },
+        )
+        val current = checkNotNull(state.value.authSession) { "Please log in again before starting a game." }
+        check(current.user.userId == expected.user.userId && current.provider.idpId == expected.provider.idpId) {
+            "The signed-in account changed. Start the game again."
+        }
+        _state.update { it.copy(authSession = current.copy(tokens = refreshed.tokens), savedAccounts = savedAccountsSnapshot()) }
+        return refreshed.tokens.idToken ?: refreshed.tokens.accessToken
+    }
+
     private fun refreshAccountConnectorsAfterLinking() {
         viewModelScope.launch {
             repeat(6) { attempt ->
@@ -2780,7 +2794,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                     "Adjusted stream settings requested=${requestedSettings.debugSummary()} effective=${settings.debugSummary()}",
                 )
             }
-            val token = auth.tokens.idToken ?: auth.tokens.accessToken
             var baseUrl = streamingBaseUrlOverride ?: effectiveStreamingBaseUrl()
             val manuallySelectedServer = manuallySelectedServerForReport(
                 streamingBaseUrlOverride = streamingBaseUrlOverride,
@@ -2818,6 +2831,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             runCatching {
+                val token = launchAuthToken(auth)
                 val requestedVariantId = game.variants.getOrNull(game.selectedVariantIndex)?.id
                     ?: game.variants.firstOrNull()?.id
                 var launchGame = game
@@ -3255,7 +3269,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 recordDebugEvent("queue", "Replace active session ignored without an auth session")
                 return@launch
             }
-            val token = auth.tokens.idToken ?: auth.tokens.accessToken
             _state.update {
                 it.copy(
                     streamStatus = "queue",
@@ -3276,6 +3289,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             runCatching {
+                val token = launchAuthToken(auth)
                 val appLaunchMode = appLaunchModeFor(pending.game, pending.settings)
                 runCatching { sessionRepository.stopActiveSession(token, pending.activeSession, pending.settings) }
                     .onSuccess {
@@ -3350,7 +3364,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 return@launch
             }
             val settings = effectiveStreamSettings()
-            val token = auth.tokens.idToken ?: auth.tokens.accessToken
             val baseUrl = effectiveStreamingBaseUrl(auth)
             val cachedActive = state.value.activeSession
             val returnPage = state.value.page.takeUnless { it == AppPage.Stream } ?: state.value.streamReturnPage ?: AppPage.Home
@@ -3374,6 +3387,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             runCatching {
+                val token = launchAuthToken(auth)
                 val active = cachedActive ?: sessionRepository.getActiveSessions(token, baseUrl, settings)
                     .let { activeSessionLaunchConflict(it, launchAppId = null, settings = settings) }
                     ?: error("No active cloud session was found. Start a game to create a new one.")
@@ -3436,7 +3450,6 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 recordDebugEvent("queue", "Pending resume ignored without an auth session")
                 return@launch
             }
-            val token = auth.tokens.idToken ?: auth.tokens.accessToken
             val resumeSettings = resumeSettingsForActiveSession(pending.activeSession, pending.settings)
             val pendingSession = pending.activeSession.toPendingSession(zone = "prod")
             prepareSessionReport(
@@ -3465,6 +3478,7 @@ class OpenNowViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             runCatching {
+                val token = launchAuthToken(auth)
                 resumeKnownActiveSession(token, pending.activeSession, resumeSettings, pending.baseUrl)
             }.onSuccess { readySession ->
                 recordDebugEvent("stream", "Pending resume ready for native stream ${readySession.debugSummary()}")

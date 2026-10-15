@@ -1469,6 +1469,17 @@ internal fun StreamControlsPanel(
                             )
                             if (settings.androidTouch.mousePad) {
                                 ControlSwitchRow(
+                                    label = stringResource(R.string.stream_mouse_with_touch_controller),
+                                    checked = settings.androidTouch.mouseWithTouchController,
+                                    onCheckedChange = { enabled ->
+                                        onButtonTone()
+                                        onTouchSettingsChange(settings.androidTouch.copy(mouseWithTouchController = enabled))
+                                    },
+                                    value = onOffLabel(settings.androidTouch.mouseWithTouchController),
+                                    description = stringResource(R.string.stream_mouse_with_touch_controller_description),
+                                    indentLevel = 1,
+                                )
+                                ControlSwitchRow(
                                     label = stringResource(R.string.stream_panel_direct_click),
                                     checked = settings.androidTouch.mouseDirectClick,
                                     onCheckedChange = {

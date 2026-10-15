@@ -14,6 +14,15 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+internal fun touchMouseEnabledForStream(
+    touch: AndroidTouchSettings,
+    streamReady: Boolean,
+    touchInputEnabled: Boolean,
+    nativeTouchActive: Boolean,
+    virtualGamepadVisible: Boolean,
+): Boolean = streamReady && touchInputEnabled && touch.mousePad && !nativeTouchActive &&
+    (!virtualGamepadVisible || touch.mouseWithTouchController)
+
 internal class NativeUiTouchRoutingState {
     @Volatile
     private var streamChromeBounds: TouchPassthroughBounds? = null
@@ -563,6 +572,12 @@ object NativeStreamInputRouter {
         updateNativeUiTouchPointers(event, width, height)
         if (nativeTouchEnabled && event.isFingerTouchEvent() && width > 0 && height > 0) {
             return dispatchNativeTouch(event, current, width, height)
+        }
+        // Direct click must respect the finger-mouse gate too. External mouse/touchpad input
+        // remains independent, including when background fingers are blocked by the controller.
+        if (event.isFingerTouchEvent() && !touchMouseEnabled) {
+            touchMouseState.reset(current)
+            return false
         }
         val decodedResolution = decodedStreamResolution
         val transform = presentationTransform

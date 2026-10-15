@@ -1428,6 +1428,16 @@ private fun SettingsContent(
                 }
                 SettingSwitch(stringResource(R.string.stream_panel_finger_mouse), settings.androidTouch.mousePad) { enabled -> viewModel.updateSettings(settings.copy(androidTouch = settings.androidTouch.copy(mousePad = enabled))) }
                 if (settings.androidTouch.mousePad) {
+                    Column(Modifier.padding(start = 24.dp)) {
+                        SettingSwitch(stringResource(R.string.stream_mouse_with_touch_controller), settings.androidTouch.mouseWithTouchController) { enabled ->
+                            viewModel.updateSettings(settings.copy(androidTouch = settings.androidTouch.copy(mouseWithTouchController = enabled)))
+                        }
+                        Text(
+                            text = stringResource(R.string.stream_mouse_with_touch_controller_description),
+                            color = SettingsTextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     Box(Modifier.padding(start = 24.dp)) {
                         SettingSwitch(stringResource(R.string.stream_panel_direct_click), settings.androidTouch.mouseDirectClick) { enabled -> viewModel.updateSettings(settings.copy(androidTouch = settings.androidTouch.copy(mouseDirectClick = enabled))) }
                     }

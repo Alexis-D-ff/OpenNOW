@@ -367,6 +367,21 @@ internal fun sessionClaimResponseFailure(httpStatus: Int, requestStatus: Int?, o
     requestStatus != 1 -> "Cloud session $operation failed (provider status ${requestStatus ?: "missing"})."
     else -> null
 }
+
+/** An unsuccessful lookup cannot establish that it is safe to create another session. */
+internal fun checkActiveSessionsResponse(httpStatus: Int, payload: JsonObject?) {
+    val requestStatus = payload?.obj("requestStatus")
+    val statusCode = requestStatus?.int("statusCode")
+    if (statusCode != null && statusCode != 1) {
+        throw CloudMatchRequestStatusException(
+            statusCode = statusCode,
+            statusDescription = requestStatus.string("statusDescription"),
+            unifiedErrorCode = requestStatus.string("unifiedErrorCode"),
+        )
+    }
+    check(httpStatus in 200..299) { "Active session lookup failed (HTTP $httpStatus)." }
+    check(statusCode == 1) { "Active session lookup returned an invalid response." }
+}
 private const val INVALID_SESSION_PROXY_MESSAGE =
     "Invalid session proxy URL. Use http://host:port, https://host:port, socks4://host:port, or socks5://host:port."
 
@@ -3196,9 +3211,9 @@ class GfnSessionRepository(
             .build()
         val (code, text) = requestHttp.awaitText(request)
         recordDiagnosticResponse("session.active", request, code, text)
-        if (code !in 200..299) return emptyList()
-        val payload = runCatching { OpenNowJson.parseToJsonElement(text).jsonObject }.getOrNull() ?: return emptyList()
-        if (payload.obj("requestStatus")?.int("statusCode") != 1) return emptyList()
+        val payload = runCatching { OpenNowJson.parseToJsonElement(text).jsonObject }.getOrNull()
+        checkActiveSessionsResponse(code, payload)
+        checkNotNull(payload)
         return payload.arr("sessions")?.mapNotNull { raw ->
             val s = raw.asObject() ?: return@mapNotNull null
             val status = s.int("status") ?: return@mapNotNull null
