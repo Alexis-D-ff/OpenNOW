@@ -447,13 +447,13 @@ QtObject {
     }
 
     function hdrNoticeShown(gameId) {
-        return (settings.hdrNoticeShownAppIds || []).indexOf(gameId) >= 0
+        return (settings.hdrNoticeShownGameIds || []).indexOf(gameId) >= 0
     }
 
     function rememberHdrNotice(gameId) {
         if (!gameId || hdrNoticeShown(gameId))
             return
-        setSetting("hdrNoticeShownAppIds", (settings.hdrNoticeShownAppIds || []).concat([gameId]).slice(-200))
+        setSetting("hdrNoticeShownGameIds", (settings.hdrNoticeShownGameIds || []).concat([gameId]).slice(-200))
     }
 
     function hdrDecoderAvailable() {

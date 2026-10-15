@@ -24,7 +24,7 @@ const SHORTCUT_KEYS: [&str; 9] = [
     "shortcutSaveClip",
 ];
 const RESERVED_SHORTCUTS: [&str; 2] = ["Ctrl+G", "Shift+F3"];
-const HDR_NOTICE_SHOWN: &str = "hdrNoticeShownAppIds";
+const HDR_NOTICE_SHOWN: &str = "hdrNoticeShownGameIds";
 const MAXIMUM_HDR_NOTICE_SHOWN: usize = 200;
 const MAXIMUM_CONTROLLER_PROFILES: usize = 32;
 const MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS: usize = 160;
@@ -1214,7 +1214,7 @@ fn defaults() -> Map<String, Value> {
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
         "desktopBackgroundImage":"", "desktopBackgroundOpacity":30,
         "switchToConsoleOnPad":false, "leaveConsoleOnPointer":true,
-        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "hdrNoticeShownAppIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
+        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "hdrNoticeShownGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
         "showSessionReport":true, "showSessionTimeRemainingInStatsOverlay":false,
         "sessionClockShowEveryMinutes":60, "sessionClockShowDurationSeconds":30,
         "windowX":null, "windowY":null, "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",

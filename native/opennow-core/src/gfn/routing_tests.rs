@@ -546,6 +546,12 @@ fn create_uses_the_launched_variant_hdr_metadata_without_saving_settings() {
             })
             .unwrap();
         assert_eq!(created["session"]["hdrDowngrade"], expected_downgrade);
+        assert_eq!(created["session"]["catalogAppId"], "launch-fixture");
+        assert_eq!(created["session"]["appId"], "123");
+        assert_eq!(
+            service.cloudmatch.active()["session"]["catalogAppId"],
+            "launch-fixture"
+        );
         assert_eq!(
             service.cloudmatch.active()["session"]["hdrDowngrade"],
             expected_downgrade

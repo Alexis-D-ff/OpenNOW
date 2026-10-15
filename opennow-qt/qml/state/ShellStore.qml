@@ -3583,7 +3583,7 @@ QtObject {
     }
 
     function observeHdrDowngrade() {
-        const gameId = String(activeSession && activeSession.appId || "")
+        const gameId = String(activeSession && activeSession.catalogAppId || "")
         if (streamHdrNotice || streamHdrNoticeShown || !gameId
                 || activeSession.hdrDowngrade !== "game-unsupported" || settingsOwner.hdrNoticeShown(gameId)) return
         streamHdrNotice = {sessionId: String(activeSession.sessionId || ""), gameId: gameId,

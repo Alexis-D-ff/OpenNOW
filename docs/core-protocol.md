@@ -1201,7 +1201,10 @@ requested keep the request unchanged; missing metadata never downgrades HDR. The
 session carries `hdrDowngrade`: `"game-unsupported"` when this core downgraded the request,
 otherwise null. Polls, resume, and reconnects preserve it only for the same session ID;
 sessions this core did not create report null. Shells use it to explain the SDR stream and
-must not repeat the catalog lookup.
+must not repeat the catalog lookup. The session also carries `catalogAppId`, the parent catalog
+game ID of the launch (`appId` stays the launched store version's CloudMatch ID), with the same
+same-session preservation; it is null for sessions this core did not create. Shells key
+once-per-game state on it, so every store version of a game shares one identity.
 
 The normalized session also carries `keyboardLayout` when this core created or resumed
 the session. It records the exact layout sent in the CloudMatch request, not the current

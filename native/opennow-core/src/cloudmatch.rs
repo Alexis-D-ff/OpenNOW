@@ -386,6 +386,7 @@ impl CloudMatchService {
             .unwrap_or_default();
         let mut info = session_info(&payload, &base, &zone, &app_id, device_id)?;
         info["hdrDowngrade"] = settings["hdrDowngrade"].clone();
+        info["catalogAppId"] = json!(params["catalogAppId"].as_str());
         info["transportMode"] = json!(if settings["allianceWebrtcCompatibility"] == true {
             "webrtc"
         } else {
@@ -2093,6 +2094,7 @@ fn session_info(
         "mediaConnectionInfo":media,
         "negotiatedStreamProfile":negotiated,
         "hdrDowngrade":null,
+        "catalogAppId":null,
         "requestedStreamingFeatures":session["sessionRequestData"]["requestedStreamingFeatures"],
         "finalizedStreamingFeatures":session["finalizedStreamingFeatures"],
         "clientId":LCARS_CLIENT_ID,
@@ -2152,8 +2154,10 @@ fn preserve_session_profile(info: &mut Value, previous: &Value) {
     if previous["sessionId"].as_str() != Some(session_id) {
         return;
     }
-    if info["hdrDowngrade"].is_null() {
-        info["hdrDowngrade"] = previous["hdrDowngrade"].clone();
+    for key in ["hdrDowngrade", "catalogAppId"] {
+        if info[key].is_null() {
+            info[key] = previous[key].clone();
+        }
     }
     if previous["transportMode"] == "webrtc" {
         info["transportMode"] = json!("webrtc");
@@ -5297,15 +5301,17 @@ mod tests {
         let base = trusted_cloudmatch_base(DEFAULT_STREAMING_BASE).unwrap();
         let payload = |id: &str| json!({"session":{"sessionId":id,"status":2,"sdrHdrMode":0}});
         let mut created = session_info(&payload("seat"), &base, "auto", "123", "device").unwrap();
-        assert!(created["hdrDowngrade"].is_null());
+        assert!(created["hdrDowngrade"].is_null() && created["catalogAppId"].is_null());
         created["hdrDowngrade"] = json!("game-unsupported");
+        created["catalogAppId"] = json!("doom-eternal");
         let mut polled = session_info(&payload("seat"), &base, "auto", "123", "device").unwrap();
         preserve_session_profile(&mut polled, &created);
         assert_eq!(polled["hdrDowngrade"], "game-unsupported");
+        assert_eq!(polled["catalogAppId"], "doom-eternal");
         assert_eq!(polled["negotiatedStreamProfile"]["enableHdr"], false);
         let mut other = session_info(&payload("other"), &base, "auto", "123", "device").unwrap();
         preserve_session_profile(&mut other, &created);
-        assert!(other["hdrDowngrade"].is_null());
+        assert!(other["hdrDowngrade"].is_null() && other["catalogAppId"].is_null());
     }
 
     #[test]

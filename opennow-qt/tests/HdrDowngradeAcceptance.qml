@@ -39,10 +39,10 @@ QtObject {
         return item
     }
 
-    function session(id, appId, title, downgrade) {
-        ShellStore.selectedGame = {id: "catalog-" + appId, title: title, imageUrl: ""}
-        ShellStore.activeSession = {sessionId: id, appId: appId, phase: "ready", status: 2,
-            hdrDowngrade: downgrade,
+    function session(id, gameId, variantId, title, downgrade) {
+        ShellStore.selectedGame = {id: gameId, title: title, imageUrl: ""}
+        ShellStore.activeSession = {sessionId: id, appId: variantId, catalogAppId: gameId,
+            phase: "ready", status: 2, hdrDowngrade: downgrade,
             negotiatedStreamProfile: {colorQuality: "8bit_420", bitDepth: 8, chromaFormat: 0,
                 enableHdr: false, enableHdrSource: "request"}}
         ShellStore.streamer = {status: "streaming", sessionId: id}
@@ -56,7 +56,7 @@ QtObject {
     }
 
     function shown() {
-        return ShellStore.settings.hdrNoticeShownAppIds || []
+        return ShellStore.settings.hdrNoticeShownGameIds || []
     }
 
     function assertUndisturbed(message) {
@@ -76,17 +76,17 @@ QtObject {
         ShellStore.streamerStartRequestId = "fixture-blocked"
         ShellStore.streamInputPauseRequestId = "fixture-blocked"
         const owner = ShellStore.settingsOwnerState
-        ShellStore.settings = Object.assign({}, ShellStore.settings, {enableHdr: true, hdrNoticeShownAppIds: []})
+        ShellStore.settings = Object.assign({}, ShellStore.settings, {enableHdr: true, hdrNoticeShownGameIds: []})
         owner.confirmedSettings = Object.assign({}, owner.settings)
         owner.coreClient = settingsClient
         owner.ready = true
 
-        session("warm-up", "1000", "Portal 2", null)
+        session("warm-up", "portal-2", "620", "Portal 2", null)
         firstFrame()
         surface = find(parent, "streamSurfaceHost")
         check(surface && surface.visible, "stream surface is alive before the notice")
         check(!toast().visible && shown().length === 0, "a session without a downgrade stays silent")
-        session("downgraded-a", "1001", "DOOM Eternal", "game-unsupported")
+        session("downgraded-a", "doom-eternal", "1001", "DOOM Eternal", "game-unsupported")
         initialInput = surface.inputEnabled
         initialOverlay = AppController.overlay
         initialRoute = AppController.route
@@ -97,32 +97,43 @@ QtObject {
         check(toast().title === "Streaming in SDR"
             && toast().subtitle === "DOOM Eternal doesn't support HDR. Your HDR setting stays on.",
             "the toast names the game and keeps the HDR setting on")
-        check(shown().length === 1 && shown()[0] === "1001", "the game is remembered as shown")
+        check(shown().length === 1 && shown()[0] === "doom-eternal",
+            "the parent game, not the store version, is remembered as shown")
         check(ShellStore.settings.enableHdr === true
             && settingsClient.writes.every(write => write.key !== "enableHdr"), "the HDR preference is untouched")
         assertUndisturbed("first notice")
         firstFrame()
         check(settingsClient.writes.length === 1, "recovery frames do not record the game again")
 
-        session("downgraded-a-again", "1001", "DOOM Eternal", "game-unsupported")
+        session("downgraded-a-again", "doom-eternal", "1001", "DOOM Eternal", "game-unsupported")
         firstFrame()
         check(!toast().visible && ShellStore.streamHdrNotice === null, "the same game does not show the toast again")
 
-        session("hdr-supported", "1002", "Cyberpunk 2077", null)
+        session("downgraded-a-xbox", "doom-eternal", "2002", "DOOM Eternal", "game-unsupported")
+        firstFrame()
+        check(!toast().visible && ShellStore.streamHdrNotice === null && shown().length === 1,
+            "another store version of the same game does not show the toast again")
+
+        session("downgraded-unknown-game", "", "3003", "Unknown game", "game-unsupported")
+        firstFrame()
+        check(!toast().visible && ShellStore.streamHdrNotice === null && shown().length === 1,
+            "a session without a catalog game identity shows nothing")
+
+        session("hdr-supported", "cyberpunk-2077", "1002", "Cyberpunk 2077", null)
         firstFrame()
         check(!toast().visible && ShellStore.streamHdrNotice === null, "no toast when hdrDowngrade is null")
 
         const history = []
         for (let index = 0; index < 199; ++index) history.push("old-" + index)
-        history.push("1001")
-        ShellStore.settings = Object.assign({}, ShellStore.settings, {hdrNoticeShownAppIds: history})
-        session("downgraded-b", "730", "Counter-Strike 2", "game-unsupported")
+        history.push("doom-eternal")
+        ShellStore.settings = Object.assign({}, ShellStore.settings, {hdrNoticeShownGameIds: history})
+        session("downgraded-b", "counter-strike-2", "730", "Counter-Strike 2", "game-unsupported")
         firstFrame()
         check(toast().visible
             && toast().subtitle === "Counter-Strike 2 doesn't support HDR. Your HDR setting stays on.",
             "a different game shows the toast")
-        check(shown().length === 200 && shown()[0] === "old-1" && shown()[199] === "730"
-            && shown().indexOf("1001") >= 0, "the bounded history evicts the oldest game")
+        check(shown().length === 200 && shown()[0] === "old-1" && shown()[199] === "counter-strike-2"
+            && shown().indexOf("doom-eternal") >= 0, "the bounded history evicts the oldest game")
         assertUndisturbed("second game")
         return true
     }
