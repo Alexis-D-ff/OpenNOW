@@ -18,7 +18,7 @@ DesktopSettingsPanel {
                 devices: []
             },
             {
-                label: qsTr("LOGITECH G · FLIGHT"),
+                label: qsTr("SAITEK"),
                 count: 0,
                 devices: []
             },
@@ -194,7 +194,7 @@ DesktopSettingsPanel {
         paperStyle: true
         glyph: "info"
         title: qsTr("Supported devices")
-        description: qsTr("18 product IDs across Thrustmaster and Logitech sticks, throttles, pedals and wheels")
+        description: qsTr("18 product IDs across Thrustmaster, Logitech and Saitek sticks, throttles, pedals and wheels")
         expandable: true
         expanded: root.supportedExpanded
         showDivider: root.supportedExpanded
