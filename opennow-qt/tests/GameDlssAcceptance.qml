@@ -12,6 +12,8 @@ OwnershipAcceptance {
     property int modifiers: 0
     property bool settling: false
     onKeyChanged: if (key !== 0) settling = true
+    property point click: Qt.point(-1, -1)
+    onClickChanged: if (click.x >= 0) settling = true
     property int playCount: 0
     property real collapsedHeight: 0
     property Connections playObserver: Connections {
@@ -75,6 +77,16 @@ OwnershipAcceptance {
         expect(JSON.stringify(actual) === JSON.stringify(expected), message + ": " + JSON.stringify(actual))
     }
     function panel() { return find(modal, "gameDlssPanel") }
+    function within(item, bounds, message) {
+        const top = item.mapToItem(bounds, 0, 0)
+        expect(item.visible && item.width > 0 && item.height > 0, message + " has no size: " + [item.width, item.height])
+        expect(top.x >= -0.5 && top.y >= -0.5 && top.x + item.width <= bounds.width + 0.5 && top.y + item.height <= bounds.height + 0.5,
+            message + " lies outside its container: " + [top.x, top.y, item.width, item.height, bounds.width, bounds.height])
+    }
+    function clickOn(item) {
+        const center = item.mapToItem(host, item.width / 2, item.height / 2)
+        click = Qt.point(center.x, center.y)
+    }
     function strip() { return find(modal, "gameDlssStrip") }
     function fits() {
         const dialog = find(modal, "gameDetailsDialog")
@@ -85,6 +97,8 @@ OwnershipAcceptance {
             "content past the cap does not scroll")
         const box = panel()
         expect(box.visible && box.width > 0, "the expanded panel is hidden")
+        within(find(modal, "gameDlssOverridesLink"), box, "the DLSS overrides link")
+        within(find(modal, "gameDlssToggle"), find(modal, "gameDetailsHero"), "the details toggle")
         const bottom = box.mapToItem(scroll, 0, box.height).y
         expect(bottom <= scroll.height + 0.5, "the expanded panel is cut off at the top of the window: " + [bottom, scroll.height])
         for (const key of features) {
@@ -124,7 +138,7 @@ OwnershipAcceptance {
             return 0
         }
         const steps = [measureWithoutData, collapsedUltimate, expandedUltimate, ultimateFocus, multiplierCaps,
-            performancePlan, performanceFocus, freePlan, notListed, signedOut, closeDetails, reopenDetails, openOverrides,
+            performancePlan, performanceFocus, freePlan, collapseByKey, expandByKey, notListed, unknownSupport, signedOut, closeDetails, reopenDetails, openOverrides,
             prepareScreenshot, finish]
         return steps[phase++]()
     }
@@ -145,14 +159,13 @@ OwnershipAcceptance {
         expect(toggle.text === "What you get" && !modal.dlssExpanded && !panel().visible, "details are not collapsed by default")
         expect(Math.abs(find(modal, "gameDetailsHero").height - collapsedHeight) <= 0.5,
             "the collapsed row grew the window: " + [find(modal, "gameDetailsHero").height, collapsedHeight])
-        toggle.forceActiveFocus()
-        expect(toggle.activeFocus, "the toggle cannot take focus")
-        key = Qt.Key_Return
+        within(toggle, find(modal, "gameDetailsHero"), "the collapsed toggle")
+        clickOn(toggle)
         return 0
     }
     function expandedUltimate() {
-        expect(modal.dlssExpanded && panel().visible, "Return on the toggle did not expand the details")
-        expect(playCount === 0, "Return on the toggle started the game")
+        expect(modal.dlssExpanded && panel().visible, "clicking the toggle did not expand the details")
+        expect(playCount === 0, "clicking the toggle started the game")
         expect(find(modal, "gameDlssToggle").text === "Hide", "the toggle does not read Hide")
         expect(row("frameGeneration").source === "IN GAME · 6×" && row("dlaa").source === "OVERRIDE", "source tags are wrong")
         expect(row("superResolution").answer === "Included · Upgrades the game's DLSS model", "the SR answer is wrong")
@@ -211,6 +224,18 @@ OwnershipAcceptance {
         expect(strip().visible && strip().text === "Performance adds RR and the FG preset. Ultimate adds MFG up to 4×.",
             "the Free upgrade strip is wrong")
         fits()
+        find(modal, "gameDlssToggle").forceActiveFocus()
+        key = Qt.Key_Return
+        return 0
+    }
+    function collapseByKey() {
+        expect(!modal.dlssExpanded && !panel().visible, "Return on the toggle did not collapse the details")
+        expect(playCount === 0, "Return on the toggle started the game")
+        key = Qt.Key_Return
+        return 0
+    }
+    function expandByKey() {
+        expect(modal.dlssExpanded && panel().visible, "Return on the toggle did not expand the details")
         show(hades)
         return 0
     }
@@ -221,6 +246,13 @@ OwnershipAcceptance {
             && find(modal, "gameDlssNotListedTitle").text === "Hades II isn't on NVIDIA's DLSS list", "the not-listed card is wrong")
         expect(!strip().visible && find(modal, "gameDlssOverridesLink").visible, "the not-listed panel has the wrong actions")
         fits()
+        show(plain)
+        return 0
+    }
+    function unknownSupport() {
+        expect(modal.dlssExpanded, "the expanded state was lost")
+        expect(!find(modal, "gameDlssChips").visible && !panel().visible && !find(modal, "gameDlssNotListedChip").visible,
+            "a game without a dlss key shows DLSS support or claims it is not on NVIDIA's list")
         show(cyberpunk)
         ShellStore.authSession = null
         ShellStore.subscription = null
@@ -256,12 +288,11 @@ OwnershipAcceptance {
     function reopenDetails() {
         expect(modal.opened && modal.dlssExpanded && panel().visible, "the expanded state was not kept for the session")
         expect(Object.keys(ShellStore.settings).every(name => name.indexOf("Expanded") < 0), "the expanded state was persisted")
-        find(modal, "gameDlssOverridesLink").forceActiveFocus()
-        key = Qt.Key_Return
+        clickOn(find(modal, "gameDlssOverridesLink"))
         return 0
     }
     function openOverrides() {
-        expect(AppController.route === "settings-streaming", "the DLSS overrides link did not open Stream settings")
+        expect(AppController.route === "settings-streaming", "clicking the DLSS overrides link did not open Stream settings")
         expect(playCount === 0, "a DLSS control started the game")
         if (!shot)
             return 0

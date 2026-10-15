@@ -9,7 +9,7 @@ QtObject {
     property var game: null
     readonly property var dlss: game && game.dlss ? game.dlss : null
     readonly property bool listed: dlss !== null
-    readonly property bool notListed: Boolean(game) && game.dlss === null
+    readonly property bool notListed: Boolean(game) && "dlss" in game && game.dlss === null
     readonly property bool signedIn: ShellStore.signedIn
     readonly property bool planKnown: signedIn && ShellStore.dlssOverrideAvailability !== null
 

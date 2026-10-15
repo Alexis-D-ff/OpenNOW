@@ -7,6 +7,7 @@
 #include <QColor>
 #include <QGuiApplication>
 #include <QKeyEvent>
+#include <qpa/qwindowsysteminterface.h>
 #include <QDeadlineTimer>
 #include <QDateTime>
 #include <QQmlComponent>
@@ -893,6 +894,19 @@ int AcceptanceSession::startSmokeWorkload()
                         QKeyEvent release(QEvent::KeyRelease, key, modifiers);
                         QGuiApplication::sendEvent(window, &press);
                         QGuiApplication::sendEvent(window, &release);
+                    }
+                    if (const auto clickValue = fixture->property("click"); clickValue.isValid()
+                            && clickValue.toPointF().x() >= 0) {
+                        const auto click = clickValue.toPointF();
+                        fixture->setProperty("click", QPointF(-1, -1));
+                        const auto global = window->mapToGlobal(click);
+                        using Delivery = QWindowSystemInterface::SynchronousDelivery;
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::NoButton, Qt::NoButton, QEvent::MouseMove);
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::LeftButton, Qt::LeftButton, QEvent::MouseButtonPress);
+                        QWindowSystemInterface::handleMouseEvent<Delivery>(window, click, global,
+                            Qt::NoButton, Qt::LeftButton, QEvent::MouseButtonRelease);
                     }
                     QVariant state;
                     const bool advanced = QMetaObject::invokeMethod(fixture, "advance", Q_RETURN_ARG(QVariant, state));

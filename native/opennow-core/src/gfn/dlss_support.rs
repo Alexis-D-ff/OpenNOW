@@ -282,10 +282,15 @@ pub fn annotate(value: &mut Value, index: Option<&DlssIndex>) {
                     && object.contains_key("launchAppId")
                     && let Some(title) = object.get("title").and_then(Value::as_str)
                 {
-                    let dlss = index
-                        .and_then(|index| index.lookup(title))
-                        .map_or(Value::Null, DlssSupport::to_json);
-                    object.insert("dlss".to_owned(), dlss);
+                    match index {
+                        Some(index) => {
+                            let dlss = index.lookup(title).map_or(Value::Null, DlssSupport::to_json);
+                            object.insert("dlss".to_owned(), dlss);
+                        }
+                        None => {
+                            object.remove("dlss");
+                        }
+                    }
                     return;
                 }
                 for child in object.values_mut() {
@@ -638,7 +643,7 @@ mod tests {
 
         let mut unavailable = json!({"game":response["games"][0].clone()});
         annotate(&mut unavailable, None);
-        assert!(unavailable["game"]["dlss"].is_null());
+        assert!(unavailable["game"].get("dlss").is_none());
     }
 
     fn serve(body: &'static [u8], requests: usize) -> String {

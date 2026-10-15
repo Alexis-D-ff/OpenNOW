@@ -1668,12 +1668,12 @@ The catalog has no per-game DLSS key, so the core, and only the core, derives a
 game-level `dlss` field from NVIDIA's published DLSS games list (the JSON behind
 NVIDIA's RTX games page) by title. Shells still must not infer features from
 titles or genres themselves, and a `"dlss"` string in a variant's `features`
-means nothing. Every game in every `catalog.*` result carries `dlss`, including
+means nothing. While the list is loaded, every game in every `catalog.*` result carries `dlss`, including
 `catalog.public.list`, `catalog.library.list`, `catalog.game.get`,
 `catalog.launch.inspect`, `catalog.launch.store.inspect`,
 `catalog.favorites.list`, the favorites and ownership mutation results,
 `catalog.store.local`, `catalog.store.list`, and `catalog.store.presentation`.
-The value is either null or:
+The value is either null (not on NVIDIA's list) or:
 
 ```json
 {"superResolution":"native","frameGeneration":"override",
@@ -1686,8 +1686,10 @@ The value is either null or:
 override acts on it (the list's "NV, …" cells: an upgraded SR/RR/DLAA or frame
 generation model, or DLAA enabled through the SR mode override), and null when
 the list does not show it. `multiFrameGeneration` is null or the highest
-multiplier an override enables. `dlss` is null when the title has no match,
-when the matched row lists no DLSS technology, and when the list is unavailable.
+multiplier an override enables. `dlss` is null when the title has no match and
+when the matched row lists no DLSS technology. When the list is unavailable, games
+have no `dlss` key at all: an absent key means DLSS support is unknown, and shells
+must not present it as "not on NVIDIA's list".
 
 Matching removes ™, ®, ©, and zero-width characters, folds the title to ASCII
 with NFKD, lowercases it, spells `&` as "and", and collapses every other

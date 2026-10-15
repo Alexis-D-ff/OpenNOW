@@ -8,7 +8,8 @@ AbstractButton {
     property string trailing: ""
     property string chevron: ""
     property int pixelSize: DesktopTokens.px(12)
-    height: DesktopTokens.px(24)
+    implicitWidth: implicitContentWidth + leftPadding + rightPadding
+    implicitHeight: Math.max(DesktopTokens.px(24), implicitContentHeight + topPadding + bottomPadding)
     leftPadding: DesktopTokens.px(4); rightPadding: DesktopTokens.px(4)
     focusPolicy: Qt.StrongFocus
     hoverEnabled: true
