@@ -24,6 +24,8 @@ const SHORTCUT_KEYS: [&str; 9] = [
     "shortcutSaveClip",
 ];
 const RESERVED_SHORTCUTS: [&str; 2] = ["Ctrl+G", "Shift+F3"];
+const HDR_NOTICE_SHOWN: &str = "hdrNoticeShownGameIds";
+const MAXIMUM_HDR_NOTICE_SHOWN: usize = 200;
 const MAXIMUM_CONTROLLER_PROFILES: usize = 32;
 const MAXIMUM_CONTROLLER_PROFILE_KEY_CHARS: usize = 160;
 const MAXIMUM_CONTROLLER_PROFILE_NAME_CHARS: usize = 80;
@@ -379,6 +381,7 @@ impl SettingsStore {
 
     fn normalize(&mut self) {
         normalize_types(&mut self.values);
+        normalize_recent_ids(&mut self.values, HDR_NOTICE_SHOWN, MAXIMUM_HDR_NOTICE_SHOWN);
         if self.values["audioOutputDevice"]
             .as_str()
             .is_some_and(|device| device.len() > 1024 || device.contains('\0'))
@@ -893,6 +896,24 @@ fn normalize_types(values: &mut Map<String, Value>) {
     }
 }
 
+fn normalize_recent_ids(values: &mut Map<String, Value>, key: &str, limit: usize) {
+    let mut ids = Vec::new();
+    for id in values[key].as_array().into_iter().flatten().rev() {
+        if ids.len() == limit {
+            break;
+        }
+        if id
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+            && !ids.contains(id)
+        {
+            ids.push(id.clone());
+        }
+    }
+    ids.reverse();
+    values.insert(key.to_owned(), Value::Array(ids));
+}
+
 fn normalize_optional_integer(
     values: &mut Map<String, Value>,
     key: &str,
@@ -1193,7 +1214,7 @@ fn defaults() -> Map<String, Value> {
         "desktopRailCollapsed":true, "desktopSidebarHover":true, "desktopBackground":"art",
         "desktopBackgroundImage":"", "desktopBackgroundOpacity":30,
         "switchToConsoleOnPad":false, "leaveConsoleOnPointer":true,
-        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
+        "autoFullScreen":true, "favoriteGameIds":[], "hiddenGameIds":[], "hdrNoticeShownGameIds":[], "gameCollections":[], "homeTileSizes":{}, "sessionCounterEnabled":false,
         "showSessionReport":true, "showSessionTimeRemainingInStatsOverlay":false,
         "sessionClockShowEveryMinutes":60, "sessionClockShowDurationSeconds":30,
         "windowX":null, "windowY":null, "windowWidth":1400, "windowHeight":900, "keyboardLayout":"en-US",
@@ -1223,6 +1244,24 @@ fn defaults() -> Map<String, Value> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn hdr_notice_history_keeps_the_newest_two_hundred_distinct_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(store.all()[HDR_NOTICE_SHOWN], json!([]));
+        let mut ids: Vec<Value> = (0..205).map(|id| json!(id.to_string())).collect();
+        ids.extend([json!("7"), json!(""), json!(42), json!("x".repeat(257))]);
+        store.set(HDR_NOTICE_SHOWN, Value::Array(ids)).unwrap();
+        let kept = store.all()[HDR_NOTICE_SHOWN].as_array().unwrap().clone();
+        assert_eq!(kept.len(), MAXIMUM_HDR_NOTICE_SHOWN);
+        assert_eq!(kept.first(), Some(&json!("5")));
+        assert_eq!(kept.last(), Some(&json!("7")));
+        assert!(!kept.contains(&json!("4")));
+        assert_eq!(kept.iter().filter(|id| **id == "7").count(), 1);
+        let reloaded = SettingsStore::load(Some(directory.path().to_owned())).unwrap();
+        assert_eq!(reloaded.all()[HDR_NOTICE_SHOWN], Value::Array(kept));
+    }
 
     #[test]
     fn settings_backup_recovers_missing_and_corrupt_primary_without_bootstrap_writes() {

@@ -1732,7 +1732,12 @@ impl GfnService {
         })
     }
 
-    pub fn create_session(&self, params: &Value, settings: &Value) -> Result<Value, ServiceError> {
+    pub fn create_session(
+        &self,
+        params: &Value,
+        settings: &Value,
+        resolve_profile: impl FnOnce(&Value) -> Result<Value, ServiceError>,
+    ) -> Result<Value, ServiceError> {
         let admission = self.cloudmatch.admit_create()?;
         let app_id = params["catalogAppId"].as_str().unwrap_or_default();
         let variant_id = params["variantId"].as_str().unwrap_or_default();
@@ -1791,7 +1796,16 @@ impl GfnService {
         }
         let variant = catalog_actions::selected_variant(&inspection["game"], variant_id)
             .expect("ready decision validated the exact variant");
-        let (mut params, settings) = self.scoped_session_route(params, settings, &session)?;
+        let settings = resolve_profile(&if store_launch {
+            settings.clone()
+        } else {
+            crate::cloudmatch::catalog_hdr_settings(
+                settings,
+                &params["runtimeCapabilities"],
+                variant,
+            )
+        })?;
+        let (mut params, settings) = self.scoped_session_route(params, &settings, &session)?;
         params["accountLinked"] = variant["inLibrary"].clone();
         params["supportsInGameSettingsPersistence"] =
             variant["supportsInGameSettingsPersistence"].clone();
@@ -5116,7 +5130,7 @@ pub(crate) mod tests {
         assert_eq!(game["variants"][1]["inLibrary"], false);
         assert_eq!(game["variants"][2]["inLibrary"], true);
         assert_eq!(game["variants"][0]["features"], json!(["rtx", "reflex"]));
-        assert_eq!(game["variants"][1]["features"], json!([]));
+        assert!(game["variants"][1]["features"].is_null());
     }
 
     #[test]

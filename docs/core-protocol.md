@@ -1189,6 +1189,23 @@ requested-content luminance, and `trueHdr`; only an existing-session claim uses 
 Attachment revalidates the session's HDR codec/color profile and current window output, so
 moving to an SDR display cannot silently resume an HDR stream as SDR.
 
+Fresh creation also applies the launched store version's catalog HDR support. When
+`enableHdr` is on, the window output reports native HDR, and the exact variant that
+`catalog.launch.inspect` validated for this launch has a `features` array without `hdr`,
+the core requests that one session as SDR before resolving the embedded profile: the
+request's `enableHdr` is false, so `sdrHdrMode` is `0`, `displayData` is null, and
+`trueHdr` stays false. Codec and color selection then run as for any SDR request. The saved
+`enableHdr` preference is not changed. A variant whose `features` is null (the catalog
+returned no feature list), a Steam store launch, and every case where HDR was not effectively
+requested keep the request unchanged; missing metadata never downgrades HDR. The normalized
+session carries `hdrDowngrade`: `"game-unsupported"` when this core downgraded the request,
+otherwise null. Polls, resume, and reconnects preserve it only for the same session ID;
+sessions this core did not create report null. Shells use it to explain the SDR stream and
+must not repeat the catalog lookup. The session also carries `catalogAppId`, the parent catalog
+game ID of the launch (`appId` stays the launched store version's CloudMatch ID), with the same
+same-session preservation; it is null for sessions this core did not create. Shells key
+once-per-game state on it, so every store version of a game shares one identity.
+
 The normalized session also carries `keyboardLayout` when this core created or resumed
 the session. It records the exact layout sent in the CloudMatch request, not the current
 saved preference. Polls and ad updates preserve it only for the same session ID; a successful
@@ -1662,7 +1679,8 @@ parsed from the variant's `gfn.features` key/value list: `rtx` from
 `RTX_ENABLED`, `hdr` from `HDR_ENABLED` or a non-empty
 `SUPPORTED_HDR_VERSION`, and `reflex` from `REFLEX_ENABLED`. Disabled, null,
 and unknown keys produce nothing, so the array is empty when the catalog does
-not declare a feature.
+not declare a feature. `features` is null when the catalog response carried no
+feature list for that variant, so consumers can tell unknown from none.
 
 The catalog has no per-game DLSS key, so the core, and only the core, derives a
 game-level `dlss` field from NVIDIA's published DLSS games list (the JSON behind

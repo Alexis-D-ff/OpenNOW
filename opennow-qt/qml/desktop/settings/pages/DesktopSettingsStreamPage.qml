@@ -85,7 +85,9 @@ Column {
             width: parent.width; paperStyle: true; glyph: "sun"; title: qsTr("HDR")
             description: !ShellStore.tenBitAllowedByMembership() ? qsTr("HDR10 requires a Performance or Ultimate membership.")
                 : HdrOutput.supported && !ShellStore.hdrDecoderAvailable()
-                ? qsTr("HDR requires a supported 10-bit H.265 or AV1 hardware decoder.") : HdrOutput.status
+                ? qsTr("HDR requires a supported 10-bit H.265 or AV1 hardware decoder.")
+                : HdrOutput.supported ? HdrOutput.status + " " + qsTr("Games without HDR stream in SDR; you get a short note the first time.")
+                : HdrOutput.status
             DesktopSettingsToggle {
                 objectName: "enableHdrToggle"
                 checked: page.settingsScreen.boolSetting("enableHdr", false)

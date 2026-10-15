@@ -20,6 +20,9 @@ Column {
     property var colorFormat: ShellStore.streamColorNotice
     property bool colorNotice: false
     property real colorLifetime: 0
+    property var hdrDowngrade: ShellStore.streamHdrNotice
+    property bool hdrNotice: false
+    property real hdrLifetime: 0
     readonly property var bugReport: ShellStore.bugReports.latest
     property bool bugReportNotice: false
     property real bugReportLifetime: 0
@@ -33,6 +36,8 @@ Column {
         lossAnimation.stop()
         colorAnimation.stop()
         colorNotice = false
+        hdrAnimation.stop()
+        hdrNotice = false
         bugReportAnimation.stop()
         bugReportNotice = false
         antiAfkAnimation.stop()
@@ -90,6 +95,13 @@ Column {
         colorAnimation.restart()
     }
 
+    function observeHdrDowngrade() {
+        if (!active || !hdrDowngrade || hdrDowngrade.sessionId !== sessionId
+                || ShellStore.streamerStopExpected || !ShellStore.claimHdrNotice(hdrDowngrade)) return
+        hdrNotice = true
+        hdrAnimation.restart()
+    }
+
     function colorLabel(value) {
         switch (value) {
         case "8bit_420": return qsTr("8-bit 4:2:0")
@@ -101,6 +113,7 @@ Column {
     }
 
     onColorFormatChanged: observeColorFormat()
+    onHdrDowngradeChanged: observeHdrDowngrade()
     Connections {
         target: ShellStore.bugReports
         function onGenerationChanged() {
@@ -122,6 +135,7 @@ Column {
         if (active) {
             observeTelemetry()
             observeColorFormat()
+            observeHdrDowngrade()
         }
     }
     onSessionIdChanged: reset()
@@ -130,6 +144,7 @@ Column {
         if (active) {
             observeTelemetry()
             observeColorFormat()
+            observeHdrDowngrade()
         }
     }
 
@@ -156,6 +171,12 @@ Column {
         target: root; property: "antiAfkLifetime"
         from: 1; to: 0; duration: 4000
         onFinished: root.antiAfkNotice = false
+    }
+    NumberAnimation {
+        id: hdrAnimation
+        target: root; property: "hdrLifetime"
+        from: 1; to: 0; duration: 4000
+        onFinished: root.hdrNotice = false
     }
     NumberAnimation {
         id: colorAnimation
@@ -188,6 +209,17 @@ Column {
                 .arg(root.colorLabel(root.colorFormat.actualColorQuality))
                 .arg(root.colorLabel(root.colorFormat.requestedColorQuality))
         lifetimeFraction: root.colorLifetime
+    }
+
+    DesktopStreamToast {
+        objectName: "streamHdrDowngradeToast"
+        width: root.width
+        visible: root.active && root.hdrNotice && !ShellStore.streamerStopExpected
+        formatNotice: true
+        title: qsTr("Streaming in SDR")
+        subtitle: qsTr("%1 doesn't support HDR. Your HDR setting stays on.")
+            .arg(root.hdrDowngrade && root.hdrDowngrade.title ? root.hdrDowngrade.title : qsTr("This game"))
+        lifetimeFraction: root.hdrLifetime
     }
 
     DesktopStreamToast {

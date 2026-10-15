@@ -869,6 +869,19 @@ if(BUILD_TESTING)
         set_tests_properties("qml-color-format-menu-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
+    qt_add_resources(opennow-qt "hdr-downgrade-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/HdrDowngradeAcceptance.qml)
+    foreach(mode windowed fullscreen)
+        set(hdr_downgrade_args)
+        if(mode STREQUAL "fullscreen")
+            list(APPEND hdr_downgrade_args --smoke-hdr-downgrade-fullscreen)
+        endif()
+        add_test(NAME "qml-hdr-downgrade-${mode}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route stream --smoke-hdr-downgrade --reduced-motion ${hdr_downgrade_args})
+        set_tests_properties("qml-hdr-downgrade-${mode}" PROPERTIES
+            ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
+    endforeach()
     foreach(width 960 1440)
         foreach(view stats report)
             set(queue_drop_args)

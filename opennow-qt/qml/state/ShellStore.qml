@@ -386,6 +386,8 @@ QtObject {
     property var streamColorNotice: null
     property bool streamColorNoticeShown: false
     property bool streamColorProfileObserved: false
+    property var streamHdrNotice: null
+    property bool streamHdrNoticeShown: false
     property string dropSessionId: ""
     property string sessionReportDropId: ""
     property var streamDropCounts: ({})
@@ -411,6 +413,8 @@ QtObject {
             streamColorNotice = null
             streamColorNoticeShown = false
             streamColorProfileObserved = false
+            streamHdrNotice = null
+            streamHdrNoticeShown = false
         }
         if (sessionId !== "" && sessionId !== dropSessionId) {
             dropSessionId = sessionId
@@ -3578,6 +3582,21 @@ QtObject {
             streamColorNotice = streamColorFormat
     }
 
+    function observeHdrDowngrade() {
+        const gameId = String(activeSession && activeSession.catalogAppId || "")
+        if (streamHdrNotice || streamHdrNoticeShown || !gameId
+                || activeSession.hdrDowngrade !== "game-unsupported" || settingsOwner.hdrNoticeShown(gameId)) return
+        streamHdrNotice = {sessionId: String(activeSession.sessionId || ""), gameId: gameId,
+            title: selectedGame && selectedGame.title ? String(selectedGame.title) : ""}
+    }
+
+    function claimHdrNotice(notice) {
+        if (streamHdrNoticeShown || notice !== streamHdrNotice) return false
+        streamHdrNoticeShown = true
+        settingsOwner.rememberHdrNotice(notice.gameId)
+        return true
+    }
+
     function observeNegotiatedColorFormat() {
         if (streamColorProfileObserved) return
         streamColorProfileObserved = true
@@ -3649,6 +3668,7 @@ QtObject {
             fields.mediaBackend = String(event.backend || "")
             if (!event.sessionId || event.sessionId === String(activeSession.sessionId)) {
                 observeNegotiatedColorFormat()
+                observeHdrDowngrade()
                 reportSessionStart(fields)
             }
         } else if (event.event === "backend-fallback") {

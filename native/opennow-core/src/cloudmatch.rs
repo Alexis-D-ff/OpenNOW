@@ -75,6 +75,22 @@ pub(crate) fn allocation_settings(settings: &Value, auth: &AuthSession) -> Value
     settings
 }
 
+pub(crate) fn catalog_hdr_settings(settings: &Value, runtime: &Value, variant: &Value) -> Value {
+    let mut settings = settings.clone();
+    let display_hdr = runtime
+        .get("nativeHdrSupported")
+        .unwrap_or(&settings["nativeHdrSupported"])
+        == true;
+    let declares_hdr = variant["features"]
+        .as_array()
+        .map(|features| features.iter().any(|feature| feature == "hdr"));
+    if setting_bool(&settings, "enableHdr", false) && display_hdr && declares_hdr == Some(false) {
+        settings["enableHdr"] = json!(false);
+        settings["hdrDowngrade"] = json!("game-unsupported");
+    }
+    settings
+}
+
 fn reported_webrtc_session(session: &Value) -> bool {
     session["sessionRequestData"]["secureRTSPSupported"] != true
         && session["sessionRequestData"]["metaData"]
@@ -369,6 +385,8 @@ impl CloudMatchService {
             .or_else(|| base.host_str().map(ToOwned::to_owned))
             .unwrap_or_default();
         let mut info = session_info(&payload, &base, &zone, &app_id, device_id)?;
+        info["hdrDowngrade"] = settings["hdrDowngrade"].clone();
+        info["catalogAppId"] = json!(params["catalogAppId"].as_str());
         info["transportMode"] = json!(if settings["allianceWebrtcCompatibility"] == true {
             "webrtc"
         } else {
@@ -2075,6 +2093,8 @@ fn session_info(
         "iceServers":ice_servers,
         "mediaConnectionInfo":media,
         "negotiatedStreamProfile":negotiated,
+        "hdrDowngrade":null,
+        "catalogAppId":null,
         "requestedStreamingFeatures":session["sessionRequestData"]["requestedStreamingFeatures"],
         "finalizedStreamingFeatures":session["finalizedStreamingFeatures"],
         "clientId":LCARS_CLIENT_ID,
@@ -2133,6 +2153,11 @@ fn preserve_session_profile(info: &mut Value, previous: &Value) {
     let profile = &previous["negotiatedStreamProfile"];
     if previous["sessionId"].as_str() != Some(session_id) {
         return;
+    }
+    for key in ["hdrDowngrade", "catalogAppId"] {
+        if info[key].is_null() {
+            info[key] = previous[key].clone();
+        }
     }
     if previous["transportMode"] == "webrtc" {
         info["transportMode"] = json!("webrtc");
@@ -5208,6 +5233,85 @@ mod tests {
         assert_eq!(info["serverIp"], "80.84.160.10");
         assert_eq!(info["rtspsEndpoints"][0], "rtsps://80.84.160.10:322");
         assert!(trusted_cloudmatch_base(direct.as_str()).is_ok());
+    }
+
+    #[test]
+    fn launched_variant_without_hdr_requests_sdr_for_that_session_only() {
+        let capabilities = json!({"protocolVersion":7,"nativeHdrSupported":true,"videoBackends":[{
+            "backend":"d3d11","available":true,"codecs":[
+                {"codec":"h265","available":true,"hdrSupported":true,
+                    "colorQualities":["8bit_420","10bit_420"],"hdrColorQualities":["10bit_420"]}
+            ]
+        }]});
+        let hdr_on = json!({"codec":"auto","enableHdr":true,"colorQuality":"8bit_420"});
+        let persisted = hdr_on.clone();
+        let request = |settings: &Value, variant: &Value| {
+            let settings = catalog_hdr_settings(settings, &capabilities, variant);
+            let resolved = crate::streamer::StreamerService::embedded_session_settings(
+                &settings,
+                &capabilities,
+            )
+            .unwrap();
+            let body = build_create_body("123", &json!({}), &resolved, "device");
+            (body["sessionRequestData"].clone(), resolved)
+        };
+
+        let (sdr, resolved) = request(&hdr_on, &json!({"features":["rtx","reflex"]}));
+        assert_eq!(resolved["hdrDowngrade"], "game-unsupported");
+        assert_eq!(resolved["enableHdr"], false);
+        assert_eq!(resolved["colorQuality"], "8bit_420");
+        assert_eq!(sdr["sdrHdrMode"], 0);
+        assert_eq!(sdr["clientRequestMonitorSettings"][0]["sdrHdrMode"], 0);
+        assert!(sdr["clientRequestMonitorSettings"][0]["displayData"].is_null());
+        assert_eq!(sdr["requestedStreamingFeatures"]["trueHdr"], false);
+        assert_eq!(sdr["requestedStreamingFeatures"]["bitDepth"], 0);
+
+        let (hdr, resolved) = request(&hdr_on, &json!({"features":["hdr"]}));
+        assert!(resolved["hdrDowngrade"].is_null());
+        assert_eq!(hdr["sdrHdrMode"], 1);
+        assert!(hdr["clientRequestMonitorSettings"][0]["displayData"].is_object());
+
+        for unknown in [json!({"features":null}), json!({"id":"123"}), Value::Null] {
+            let (request, resolved) = request(&hdr_on, &unknown);
+            assert!(resolved["hdrDowngrade"].is_null(), "{unknown}");
+            assert_eq!(request["sdrHdrMode"], 1, "{unknown}");
+        }
+
+        let hdr_off = json!({"codec":"auto","enableHdr":false,"colorQuality":"8bit_420"});
+        let (request, resolved) = request(&hdr_off, &json!({"features":[]}));
+        assert!(resolved["hdrDowngrade"].is_null());
+        assert_eq!(request["sdrHdrMode"], 0);
+        assert!(
+            catalog_hdr_settings(
+                &hdr_on,
+                &json!({"nativeHdrSupported":false}),
+                &json!({"features":[]})
+            )["hdrDowngrade"]
+                .is_null(),
+            "a display without HDR output is already SDR"
+        );
+        assert_eq!(
+            hdr_on, persisted,
+            "the saved HDR preference is never rewritten"
+        );
+    }
+
+    #[test]
+    fn hdr_downgrade_follows_the_same_session_through_polls_and_resume() {
+        let base = trusted_cloudmatch_base(DEFAULT_STREAMING_BASE).unwrap();
+        let payload = |id: &str| json!({"session":{"sessionId":id,"status":2,"sdrHdrMode":0}});
+        let mut created = session_info(&payload("seat"), &base, "auto", "123", "device").unwrap();
+        assert!(created["hdrDowngrade"].is_null() && created["catalogAppId"].is_null());
+        created["hdrDowngrade"] = json!("game-unsupported");
+        created["catalogAppId"] = json!("doom-eternal");
+        let mut polled = session_info(&payload("seat"), &base, "auto", "123", "device").unwrap();
+        preserve_session_profile(&mut polled, &created);
+        assert_eq!(polled["hdrDowngrade"], "game-unsupported");
+        assert_eq!(polled["catalogAppId"], "doom-eternal");
+        assert_eq!(polled["negotiatedStreamProfile"]["enableHdr"], false);
+        let mut other = session_info(&payload("other"), &base, "auto", "123", "device").unwrap();
+        preserve_session_profile(&mut other, &created);
+        assert!(other["hdrDowngrade"].is_null() && other["catalogAppId"].is_null());
     }
 
     #[test]

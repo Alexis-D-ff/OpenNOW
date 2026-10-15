@@ -430,7 +430,8 @@ impl GfnService {
     }
 
     /// Sets `dlss` on every catalog game in a response from NVIDIA's DLSS games list.
-    /// An unavailable list leaves `dlss: null` and never fails the response.
+    /// An unavailable list omits the `dlss` key, a loaded list sets `dlss: null` for a
+    /// game it does not list, and neither ever fails the response.
     pub fn annotate_dlss(&self, response: &mut Value, settings: &Value) {
         let index = self.dlss_games.index(settings);
         super::dlss_support::annotate(response, index.as_deref());
@@ -841,7 +842,8 @@ pub(super) fn app_to_game(app: &Value) -> Option<Value> {
             "stateDetails":serde_json::from_value::<crate::catalog_types::PatchDetails>(variant["gfn"]["stateDetails"].clone()).ok(),
             "gfnStatus":variant["gfn"]["status"],
             "supportsInGameSettingsPersistence":supports_persistence,
-            "features":crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"]),
+            "features":matches!(variant["gfn"]["features"], Value::Array(_) | Value::Object(_))
+                .then(|| crate::catalog_types::GameFeature::from_variant_features(&variant["gfn"]["features"])),
         }))
     }).collect::<Vec<_>>();
     let mut variant_ids = std::collections::HashSet::new();
