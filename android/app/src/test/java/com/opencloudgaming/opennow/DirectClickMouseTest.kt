@@ -119,6 +119,22 @@ class DirectClickMouseTest {
         assertFalse(host.pressed)
     }
 
+    @Test fun cursorOnlyPositioningMovesWithoutChangingAnAssignedButtonsHold() {
+        val mouse = DirectClickMouse()
+        val host = Host()
+        host.pressed = true // An independent overlay button owns this hold.
+        val target = directClickMousePosition(StreamPoint(100f, 200f), 1920, 1080)
+        assertTrue(mouse.press(target, host::sendPosition, host::setButton, clickEnabled = false))
+        assertFalse(mouse.isPressed)
+        assertTrue(mouse.move(directClickMousePosition(StreamPoint(800f, 600f), 1920, 1080), host::sendPosition))
+        mouse.release(host::setButton)
+        mouse.release(host::setButton)
+        assertFalse(mouse.move(target, host::sendPosition))
+        assertEquals(listOf(5, 5), host.packetTypes())
+        assertTrue(host.pressed)
+        assertEquals(800 to 600, host.position)
+    }
+
     @Test fun pillarboxingAndViewResizeProduceTheSameHostPositionAndExtent() {
         val full = streamPointForTouch(750f, 270f, 2460, 1080, 1920, 1080, false, 0f)
         val resized = streamPointForTouch(375f, 135f, 1230, 540, 1920, 1080, false, 0f)

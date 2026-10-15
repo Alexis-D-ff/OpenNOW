@@ -4,6 +4,7 @@ import kotlin.math.roundToInt
 
 /** Sends each direct touch as a host position, independent of the game's current cursor. */
 internal class DirectClickMouse {
+    private var active = false
     var isPressed = false
         private set
 
@@ -11,20 +12,23 @@ internal class DirectClickMouse {
         position: AbsoluteMousePosition?,
         sendPosition: (AbsoluteMousePosition) -> Boolean,
         setButton: (Boolean) -> Boolean,
+        clickEnabled: Boolean = true,
     ): Boolean {
-        if (isPressed || position == null || !sendPosition(position)) return false
-        isPressed = setButton(true)
-        return isPressed
+        if (active || position == null || !sendPosition(position)) return false
+        isPressed = clickEnabled && setButton(true)
+        active = !clickEnabled || isPressed
+        return active
     }
 
     fun move(position: AbsoluteMousePosition?, sendPosition: (AbsoluteMousePosition) -> Boolean): Boolean {
-        if (!isPressed || position == null) return false
+        if (!active || position == null) return false
         return sendPosition(position)
     }
 
     fun release(setButton: ((Boolean) -> Boolean)?) {
         if (isPressed) setButton?.invoke(false)
         isPressed = false
+        active = false
     }
 }
 

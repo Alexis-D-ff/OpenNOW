@@ -1060,14 +1060,15 @@ internal fun StreamControlsPanel(
                         }
                         TouchButtonAppearanceEditor(settings.androidTouch, onTouchSettingsChange)
                     }
-                    if (!keyboardOverlayActive) item {
+                    item {
                         ControlSection(stringResource(R.string.settings_touch_visible_controls)) {
                             Text(
                                 text = stringResource(R.string.settings_touch_visible_controls_desc),
                                 color = TextMuted,
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            TouchControlGroup.entries.forEach { group ->
+                            val groups = if (keyboardOverlayActive) listOf(TouchControlGroup.LeftStick) else TouchControlGroup.entries
+                            groups.forEach { group ->
                                 val visible = settings.androidTouch.isControlVisible(group)
                                 ControlSwitchRow(
                                     label = stringResource(touchControlGroupLabelRes(group)),

@@ -889,6 +889,7 @@ internal class TouchMouseState {
     private var lastTapX = Float.NaN
     private var lastTapY = Float.NaN
     private val directClickMouse = DirectClickMouse()
+    private var clickEnabled = true
     private var twoFingerTapCandidate = false
     private val motionAccumulator = MouseMotionAccumulator()
     // 2-finger scroll state
@@ -900,13 +901,14 @@ internal class TouchMouseState {
     private var scrollGestureOccurred = false
 
     /** Releases the in-flight gesture when input mode, focus, or session changes. */
-    fun reset(client: NativeStreamClient?) {
+    fun reset(client: TouchMouseOutput?) {
         // Touchpad motion tracks a pointer without holding a button; release only actual presses.
         if (selecting) client?.setTouchMouseButton(false)
         directClickMouse.release(client?.let { it::setDirectClickMouseButton })
         activePointerId = -1
         selecting = false
         doubleTapDragCandidate = false
+        lastTapTimeMs = Long.MIN_VALUE
         twoFingerTapCandidate = false
         motionAccumulator.reset()
         secondPointerId = -1
@@ -918,9 +920,10 @@ internal class TouchMouseState {
     fun handle(
         event: MotionEvent,
         enabled: Boolean,
-        client: NativeStreamClient,
+        client: TouchMouseOutput,
         ignoredPointerIds: Set<Int>,
         directClick: Boolean = false,
+        buttonsEnabled: Boolean = true,
         width: Int = 0,
         height: Int = 0,
         stretchToFit: Boolean = false,
@@ -931,6 +934,10 @@ internal class TouchMouseState {
         decodedStreamWidth: Int = 0,
         decodedStreamHeight: Int = 0,
     ): Boolean {
+        if (clickEnabled != buttonsEnabled) {
+            reset(client)
+            clickEnabled = buttonsEnabled
+        }
         if (!enabled) {
             reset(client)
             return false
@@ -977,16 +984,17 @@ internal class TouchMouseState {
 
                         activePointerId = pointerId
                         val position = positionAt(index)
-                        val positionedAndPressed = directClickMouse.press(
+                        val positioned = directClickMouse.press(
                             position = position,
                             sendPosition = client::sendDirectClickMousePosition,
                             setButton = client::setDirectClickMouseButton,
+                            clickEnabled = clickEnabled,
                         )
                         NativeInputDiagnostics.add(
                             "touch direct click target=${position?.x},${position?.y} " +
-                                "stream=${streamWidth}x${streamHeight} positionedAndPressed=$positionedAndPressed",
+                                "stream=${streamWidth}x${streamHeight} positioned=$positioned clickEnabled=$clickEnabled",
                         )
-                        if (!positionedAndPressed) activePointerId = -1
+                        if (!positioned) activePointerId = -1
                     }
                     return true
                 }
@@ -1153,13 +1161,13 @@ internal class TouchMouseState {
         lastY = downY
         motionAccumulator.reset()
         selecting = false
-        doubleTapDragCandidate = isDoubleTap(event, index)
+        doubleTapDragCandidate = clickEnabled && isDoubleTap(event, index)
         if (doubleTapDragCandidate) {
             lastTapTimeMs = Long.MIN_VALUE
         }
     }
 
-    private fun processMove(x: Float, y: Float, eventTimeMs: Long, client: NativeStreamClient) {
+    private fun processMove(x: Float, y: Float, eventTimeMs: Long, client: TouchMouseOutput) {
         if (
             doubleTapDragCandidate && !selecting &&
             (abs(x - downX) > TOUCH_MOUSE_DRAG_START_SLOP_PX || abs(y - downY) > TOUCH_MOUSE_DRAG_START_SLOP_PX)
@@ -1173,7 +1181,7 @@ internal class TouchMouseState {
         lastY = y
     }
 
-    private fun finishPointer(event: MotionEvent, index: Int, client: NativeStreamClient) {
+    private fun finishPointer(event: MotionEvent, index: Int, client: TouchMouseOutput) {
         val x = event.getX(index)
         val y = event.getY(index)
         sendMouseDelta(
@@ -1200,7 +1208,7 @@ internal class TouchMouseState {
             selecting = false
             return
         }
-        if (wasTap) {
+        if (clickEnabled && wasTap) {
             if (twoFingerTapCandidate) {
                 NativeInputDiagnostics.add("touch 2-finger tap right click dx=${tapDistanceX.roundToInt()} dy=${tapDistanceY.roundToInt()}")
                 client.sendTouchMouseRightClick()
@@ -1234,7 +1242,7 @@ internal class TouchMouseState {
         dx: Float,
         dy: Float,
         eventTimeMs: Long,
-        client: NativeStreamClient,
+        client: TouchMouseOutput,
         force: Boolean = false,
     ) {
         val delta = motionAccumulator.add(

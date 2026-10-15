@@ -644,7 +644,8 @@ internal fun StreamScreen(
 
     // Also gated on nativeTouchActive: dispatchTouch would take the native branch first anyway, but
     // leaving two input modes both flagged "enabled" is how they end up fighting later.
-    LaunchedEffect(touchMouseActive) {
+    LaunchedEffect(touchMouseActive, keyboardModeEnabled) {
+        NativeStreamInputRouter.setTouchMouseButtonsEnabled(!keyboardModeEnabled)
         NativeStreamInputRouter.setTouchMouseEnabled(touchMouseActive)
         client.setTouchMouseEnabled(touchMouseActive)
     }
@@ -927,6 +928,16 @@ internal fun StreamScreen(
                     onButtonAppearanceChange = { button, appearance ->
                         viewModel.updateSettings(state.settings.copy(
                             androidTouch = state.settings.androidTouch.withButtonAppearance(button, appearance),
+                        ))
+                    },
+                    onKeyboardStickVisibleChange = { visible ->
+                        viewModel.updateSettings(state.settings.copy(
+                            androidTouch = state.settings.androidTouch.withControlVisible(TouchControlGroup.LeftStick, visible),
+                        ))
+                    },
+                    onKeyboardStickScaleChange = { scale ->
+                        viewModel.updateSettings(state.settings.copy(
+                            androidTouch = state.settings.androidTouch.copy(leftStickScale = scale),
                         ))
                     },
                     onKeyboardButtonAdd = { actionId ->
