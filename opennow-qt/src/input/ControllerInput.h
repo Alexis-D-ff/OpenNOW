@@ -177,6 +177,13 @@ private:
         bool touchpadClick = false;
         bool guideLatched = false;
         quint16 withheldButtons = 0;
+        quint16 tappedButtons = 0;
+        qint64 chordDeadline = 0;
+        qint64 tapReleaseAt = 0;
+        [[nodiscard]] quint16 forwardedButtons() const
+        {
+            return static_cast<quint16>((buttons | tappedButtons) & ~withheldButtons);
+        }
         std::array<SonyContact, 2> contacts{};
         QHash<int, ShellKeyPress> shellKeys;
         std::array<RepeatingDirection, 4> directions{{

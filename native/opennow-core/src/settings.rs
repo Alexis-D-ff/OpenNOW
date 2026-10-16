@@ -2862,6 +2862,7 @@ mod tests {
             .as_nanos();
         let directory = env::temp_dir().join(format!("opennow-core-deck-identity-{unique}"));
         let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        store.passthrough.remove(STEAM_DECK_IDENTITY_POLICY);
         store.set("identifyAsSteamDeck", json!(false)).unwrap();
         assert!(!store.apply_steam_deck_identity_default(false));
         assert_eq!(store.all()["identifyAsSteamDeck"], json!(false));
