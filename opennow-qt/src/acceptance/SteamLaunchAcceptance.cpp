@@ -22,16 +22,19 @@ int AcceptanceSession::startSteamLaunchWorkload()
         return EXIT_FAILURE;
     }
     const auto quitExpected = std::make_shared<bool>(false);
-    connect(&m_controller, &AppController::applicationExitCommitted, this, [this, quitExpected] {
-        if (*quitExpected) return;
-        qCritical("--quit-after-session quit before the session finished stopping");
-        m_application.exit(EXIT_FAILURE);
+    connect(&m_controller, &AppController::applicationExitCommitted, this, [quitExpected] {
+        if (!*quitExpected) qFatal("--quit-after-session quit while a session was stopping or relaunching");
     });
-    store->setProperty("activeSession", QVariantMap{{u"sessionId"_s, u"steam-launch-fixture"_s}});
+    const auto session = [](const QString &id) {
+        return QVariantMap{{u"sessionId"_s, id}};
+    };
+    store->setProperty("pendingLaunchParams", QVariantMap{
+        {u"title"_s, u"Steam launch fixture"_s}, {u"variantId"_s, u"100362511"_s}});
+    store->setProperty("activeSession", session(u"steam-launch-first"_s));
     const auto step = std::make_shared<int>(0);
     auto *timer = new QTimer(this);
     timer->setInterval(200);
-    connect(timer, &QTimer::timeout, this, [this, window, store, quitExpected, step, timer] {
+    connect(timer, &QTimer::timeout, this, [this, window, store, quitExpected, session, step, timer] {
         const auto current = (*step)++;
         const auto fail = [this, current, timer](const char *message) {
             qCritical("Steam launch step %d: %s", current, message);
@@ -45,12 +48,20 @@ int AcceptanceSession::startSteamLaunchWorkload()
             store->setProperty("activeSession", QVariant{});
             return;
         case 1:
-            if (window->visibility() != QWindow::FullScreen) return fail("the window left fullscreen");
-            *quitExpected = true;
+            store->setProperty("forceNewAfterStop", true);
             store->setProperty("streamStopRequestId", QString{});
             return;
+        case 2:
+            if (window->visibility() != QWindow::FullScreen) return fail("the window left fullscreen");
+            store->setProperty("activeSession", session(u"steam-launch-replacement"_s));
+            store->setProperty("forceNewAfterStop", false);
+            return;
+        case 3:
+            *quitExpected = true;
+            store->setProperty("activeSession", QVariant{});
+            return;
         default:
-            return fail("OpenNOW stayed open after the session stopped");
+            return fail("OpenNOW stayed open after the server ended the session");
         }
     });
     timer->start();

@@ -238,6 +238,8 @@ ApplicationWindow {
         }
         function onStreamBusyChanged() { window.quitIfSessionFinished() }
         function onSessionRecoveryPendingChanged() { window.quitIfSessionFinished() }
+        function onForceNewAfterStopChanged() { window.quitIfSessionFinished() }
+        function onLaunchInspectRequestIdChanged() { window.quitIfSessionFinished() }
         function onBackgroundStreamReminderRequested() {
             AppController.requestWindowAttention(window)
         }
@@ -395,7 +397,8 @@ ApplicationWindow {
             return
         }
         if (window.quitAfterSessionArmed && !ShellStore.streamBusy && !ShellStore.sessionRecoveryPending
-                && !ShellStore.pendingLaunchParams && !ShellStore.pendingDirectLaunch)
+                && !ShellStore.forceNewAfterStop && ShellStore.launchInspectRequestId === ""
+                && !ShellStore.pendingDirectLaunch)
             AppController.quitApplication()
     }
 
