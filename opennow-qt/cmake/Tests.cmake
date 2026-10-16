@@ -882,6 +882,15 @@ if(BUILD_TESTING)
         set_tests_properties("qml-hdr-downgrade-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
+    foreach(minimum_fixture color-format hdr-downgrade)
+        add_test(NAME "qml-${minimum_fixture}-minimum-stats-overlay"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route stream --smoke-${minimum_fixture}
+                --overlay desktop-stream-stats-expanded
+                --smoke-width 960 --smoke-height 540 --reduced-motion)
+        set_tests_properties("qml-${minimum_fixture}-minimum-stats-overlay" PROPERTIES
+            ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
+    endforeach()
     foreach(width 960 1440)
         foreach(view stats report)
             set(queue_drop_args)
