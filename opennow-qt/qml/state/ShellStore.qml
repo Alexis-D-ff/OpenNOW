@@ -3686,6 +3686,9 @@ QtObject {
             recordQueueDrop(event)
             if (event.unit === "frames")
                 bugReports.observeFrameDrops(Number(event.count), event.sessionId)
+            if ((event.media === "d3d11-video" || event.media === "video-decode")
+                    && (!event.sessionId || String(event.sessionId) === connectionHealth.sessionId))
+                connectionHealth.acceptDecoderDrops(Number(event.count))
             fields.queueDropCount = Number(streamer && streamer.queueDropCount || 0)
                 + Number(event.count || 0)
         }

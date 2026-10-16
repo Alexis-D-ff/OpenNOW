@@ -368,6 +368,8 @@
     "frameGeneration": "FRAME GEN 2×",
     "packetLoss": "Packet loss · %1%",
     "healthy": "Stream healthy",
+    "decoderLimited": "Decoder can't keep up",
+    "decoderLimitedBody": "This device is dropping frames while decoding. Lower the resolution or frame rate in Settings.",
     "maximum": "max %1 · 60 s",
     "sessionTotal": "session total"
   },

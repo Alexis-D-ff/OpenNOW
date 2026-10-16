@@ -46,6 +46,31 @@ TestCase {
         ShellStore.connectionHealth = createTemporaryObject(healthComponent, testCase)
     }
 
+    function test_decoderLimitedWarnsOncePerSession() {
+        const stack = createTemporaryObject(stackComponent, testCase)
+        const toast = findChild(stack, "streamDecoderLimitedToast")
+        const health = ShellStore.connectionHealth
+        health.acceptDecoderDrops(20)
+        sampleTime += 5000
+        health.acceptDecoderDrops(20)
+        verify(!health.decoderLimited && !toast.visible)
+        sampleTime += 1000
+        health.acceptDecoderDrops(10)
+        verify(health.decoderLimited)
+        verify(toast.visible)
+        compare(toast.title, "Decoder can't keep up")
+        stack.decoderNotice = false
+        sampleTime += 5000
+        health.expire(sampleTime)
+        verify(!health.decoderLimited)
+        health.acceptDecoderDrops(30)
+        verify(health.decoderLimited && !toast.visible)
+        ShellStore.activeSession = {sessionId: "next-session"}
+        verify(!health.decoderLimited)
+        health.acceptDecoderDrops(30)
+        verify(toast.visible)
+    }
+
     function test_colorFormatLifetimeAndRecovery() {
         const stack = createTemporaryObject(stackComponent, testCase)
         verify(stack !== null)
