@@ -142,6 +142,111 @@ private slots:
         QCOMPARE(snapshots.last().at(2).toUInt(), 0u);
     }
 
+    void viewAndMenuOpenTheSessionMenuWithoutReachingTheGame()
+    {
+        ControllerInput input;
+        QSignalSpy snapshots(&input, &ControllerInput::gamepadSnapshot);
+        QSignalSpy localActions(&input, &ControllerInput::localActionRequested);
+        SDL_VirtualJoystickDesc descriptor{};
+        SDL_INIT_INTERFACE(&descriptor);
+        descriptor.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        descriptor.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        descriptor.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        descriptor.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        descriptor.name = "OpenNOW guideless controller";
+        const auto id = SDL_AttachVirtualJoystick(&descriptor);
+        QVERIFY2(id != 0, SDL_GetError());
+        QTRY_COMPARE_WITH_TIMEOUT(input.controllerCount(), 1, 2000);
+        input.setShellCaptureEnabled(false);
+        auto *joystick = SDL_GetJoystickFromID(id);
+        QVERIFY(joystick);
+        const auto press = [joystick](SDL_GamepadButton button, bool down) {
+            QVERIFY(SDL_SetJoystickVirtualButton(joystick, button, down));
+            SDL_UpdateJoysticks();
+        };
+
+        const auto lastButtons = [&snapshots] {
+            return snapshots.isEmpty() ? 0xffffffffu : snapshots.last().at(2).toUInt();
+        };
+        const auto chordReachedGame = [&snapshots] {
+            for (const auto &snapshot : snapshots)
+                if (snapshot.at(2).toUInt() & 0x0030) return true;
+            return false;
+        };
+
+        for (const auto &[first, second] : {std::pair{SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_BACK},
+                                           std::pair{SDL_GAMEPAD_BUTTON_BACK, SDL_GAMEPAD_BUTTON_START}}) {
+            snapshots.clear();
+            const auto actionsBefore = localActions.size();
+            press(first, true);
+            press(second, true);
+            QTRY_COMPARE_WITH_TIMEOUT(localActions.size(), actionsBefore + 1, 1000);
+            QCOMPARE(localActions.last().at(0).toUInt(), 1u);
+            press(SDL_GAMEPAD_BUTTON_SOUTH, true);
+            QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0x1000, 1000);
+            press(SDL_GAMEPAD_BUTTON_SOUTH, false);
+            press(second, false);
+            press(first, false);
+            QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0u, 1000);
+            QTest::qWait(200);
+            QVERIFY(!chordReachedGame());
+        }
+
+        snapshots.clear();
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        QTRY_VERIFY_WITH_TIMEOUT(chordReachedGame(), 1000);
+        QCOMPARE(lastButtons(), 0x0020u);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0u, 1000);
+
+        snapshots.clear();
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        press(SDL_GAMEPAD_BUTTON_START, true);
+        press(SDL_GAMEPAD_BUTTON_START, false);
+        QTest::qWait(250);
+        QCOMPARE(lastButtons(), 0u);
+        for (const auto &snapshot : snapshots)
+            QVERIFY((snapshot.at(2).toUInt() & 0x0030) != 0x0030);
+
+        snapshots.clear();
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        press(SDL_GAMEPAD_BUTTON_START, true);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0x0010, 1000);
+        bool startForwarded = false;
+        for (const auto &snapshot : snapshots) {
+            const bool start = (snapshot.at(2).toUInt() & 0x0010) != 0;
+            QVERIFY(start || !startForwarded);
+            startForwarded = startForwarded || start;
+        }
+        press(SDL_GAMEPAD_BUTTON_START, false);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0u, 1000);
+
+        input.setShellCaptureEnabled(true);
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        QTest::qWait(60);
+        input.setShellCaptureEnabled(false);
+        snapshots.clear();
+        QTest::qWait(250);
+        QVERIFY(!chordReachedGame());
+
+        snapshots.clear();
+        press(SDL_GAMEPAD_BUTTON_START, true);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0x0010, 1000);
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        QTest::qWait(50);
+        QCOMPARE(lastButtons(), 0x0030u);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        press(SDL_GAMEPAD_BUTTON_START, false);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0u, 1000);
+        QCOMPARE(localActions.size(), 2);
+
+        QVERIFY(SDL_DetachVirtualJoystick(id));
+        QTRY_COMPARE_WITH_TIMEOUT(input.controllerCount(), 0, 2000);
+    }
+
     void idleMetadataDoesNotInvalidateTheUi()
     {
         ControllerInput input;

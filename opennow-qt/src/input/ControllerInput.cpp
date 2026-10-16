@@ -18,6 +18,8 @@ constexpr qint64 repeatDelayMs = 280;
 constexpr qint64 repeatIntervalMs = 85;
 constexpr qint64 gamepadKeepaliveMs = 100;
 constexpr quint32 guideLocalAction = 1;
+constexpr quint16 sessionChordButtons = 0x0030;
+constexpr qint64 sessionChordWindowMs = 80;
 constexpr quint32 testRumbleDurationMs = 280;
 constexpr int maximumSerialChars = 120;
 
@@ -530,6 +532,7 @@ void ControllerInput::updateShellInputDrain()
 void ControllerInput::setInputSuspended(bool suspended)
 {
     if (m_inputSuspended == suspended) return;
+    cancelChordReplays();
     if (suspended) {
         stopRumble();
         publishConnectedInputs(true);
@@ -550,6 +553,7 @@ void ControllerInput::setInputSuspended(bool suspended)
 void ControllerInput::setShellCaptureEnabled(bool enabled)
 {
     if (m_shellCaptureEnabled == enabled) return;
+    cancelChordReplays();
     if (enabled) {
         stopRumble();
         publishConnectedInputs(true);
@@ -568,6 +572,14 @@ void ControllerInput::setShellCaptureEnabled(bool enabled)
     }
     updatePollInterval();
     emit shellCaptureEnabledChanged();
+}
+
+void ControllerInput::cancelChordReplays()
+{
+    for (auto &slot : m_slots) {
+        slot.chordDeadline = 0;
+        slot.tappedButtons = 0;
+    }
 }
 
 void ControllerInput::poll()
@@ -614,6 +626,20 @@ void ControllerInput::poll()
 
     const auto now = m_clock.elapsed();
     dispatchRepeats(now);
+    for (int index = 0; index < static_cast<int>(m_slots.size()); ++index) {
+        auto &slot = m_slots[static_cast<std::size_t>(index)];
+        bool changed = false;
+        if (slot.chordDeadline != 0 && now >= slot.chordDeadline) {
+            slot.chordDeadline = 0;
+            slot.withheldButtons &= static_cast<quint16>(~sessionChordButtons);
+            changed = true;
+        }
+        if (slot.tappedButtons != 0 && now >= slot.tapReleaseAt) {
+            slot.tappedButtons = 0;
+            changed = true;
+        }
+        if (changed && slot.gamepad && !m_shellCaptureEnabled) publishSlotSnapshot(index);
+    }
     if (!m_shellCaptureEnabled && now - m_lastGamepadSnapshotAt >= gamepadKeepaliveMs) {
         publishConnectedInputs();
         m_lastGamepadSnapshotAt = now;
@@ -715,8 +741,38 @@ void ControllerInput::handleButton(const SDL_GamepadButtonEvent &event, bool pre
         slot.touchpadClick = pressed;
         if (isSonySlot(slotIndex)) publishSonySnapshot(slotIndex);
     } else if (const auto mask = buttonMask(event.button); mask != 0) {
-        if (pressed) slot.buttons |= mask;
-        else slot.buttons &= static_cast<quint16>(~mask);
+        const auto now = m_clock.elapsed();
+        const bool chordButton = (mask & sessionChordButtons) != 0;
+        if (pressed) {
+            if (chordButton && slot.tappedButtons != 0) {
+                slot.tappedButtons = 0;
+                if (!m_shellCaptureEnabled) publishSlotSnapshot(slotIndex);
+            }
+            slot.buttons |= mask;
+            if (chordButton && slot.chordDeadline != 0
+                    && event.timestamp - slot.chordStartedNs
+                        <= static_cast<quint64>(sessionChordWindowMs) * 1'000'000
+                    && (slot.buttons & sessionChordButtons) == sessionChordButtons) {
+                slot.chordDeadline = 0;
+                slot.withheldButtons |= sessionChordButtons;
+                if (!m_shellCaptureEnabled && !m_inputSuspended)
+                    emit localActionRequested(guideLocalAction);
+            } else if (chordButton && (slot.buttons & sessionChordButtons) == mask) {
+                slot.withheldButtons |= mask;
+                slot.chordDeadline = now + sessionChordWindowMs;
+                slot.chordStartedNs = event.timestamp;
+            }
+        } else {
+            slot.buttons &= static_cast<quint16>(~mask);
+            if (slot.chordDeadline != 0 && (slot.withheldButtons & mask) != 0) {
+                slot.chordDeadline = 0;
+                if (!m_shellCaptureEnabled && !m_inputSuspended) {
+                    slot.tappedButtons = mask;
+                    slot.tapReleaseAt = now + sessionChordWindowMs;
+                }
+            }
+            slot.withheldButtons &= static_cast<quint16>(~mask);
+        }
         if (!m_shellCaptureEnabled) publishSlotSnapshot(slotIndex);
     }
 
@@ -809,7 +865,7 @@ void ControllerInput::publishGamepad(int slotIndex, bool neutral)
     const auto right = neutral ? QPair<qint16, qint16>{}
         : radialDeadzone(slot.rawRightX, slot.rawRightY, slot.rightDeadzone);
     emit gamepadSnapshot(static_cast<quint8>(effectiveSlot(slotIndex)), gamepadBitmap(),
-                         neutral ? 0 : slot.buttons,
+                         neutral ? 0 : slot.forwardedButtons(),
                          neutral ? 0 : slot.leftTrigger, neutral ? 0 : slot.rightTrigger,
                          left.first, static_cast<qint16>(-left.second),
                          right.first, static_cast<qint16>(-right.second));
@@ -873,7 +929,7 @@ void ControllerInput::publishSonySnapshot(int slotIndex, bool neutral)
     SonySnapshot snapshot;
     snapshot.slot = static_cast<quint8>(effectiveSlot(slotIndex));
     snapshot.incarnation = slot.incarnation;
-    snapshot.buttons = cleared ? 0 : slot.buttons;
+    snapshot.buttons = cleared ? 0 : slot.forwardedButtons();
     snapshot.leftTrigger = cleared ? 0 : slot.leftTrigger;
     snapshot.rightTrigger = cleared ? 0 : slot.rightTrigger;
     snapshot.leftStickX = left.first;
