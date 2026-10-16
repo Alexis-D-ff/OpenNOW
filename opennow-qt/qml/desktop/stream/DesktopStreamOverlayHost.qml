@@ -87,7 +87,6 @@ FocusScope {
     }
 
     DesktopStreamToasts {
-        id: toasts
         connectionNotificationsEnabled: root.connectionNotificationsEnabled
         controllers: ControllerInput.controllers
         anchors.right: parent.right

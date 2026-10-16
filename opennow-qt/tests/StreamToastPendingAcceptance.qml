@@ -6,8 +6,11 @@ import OpenNOW
 // shown. The colour notice is raised first so it is presented and consumed legitimately, then
 // the HDR notice arrives into a stack that no longer fits. Packet loss is fed throughout, and it
 // is unstable for the second half of the hold, so a claim taken while the stack is hidden would
-// suppress the notice for the rest of the episode. The hold stays inside the colour notice's
-// lifetime, because the stack genuinely fits again once that toast expires.
+// suppress the notice for the rest of the episode.
+//
+// The hold deliberately outlasts the presented colour notice's four seconds. Nothing may expire
+// while the column is hidden, so the stack cannot free itself during the hold and the case does
+// not depend on how fast the harness ticks.
 QtObject {
     id: fixture
     property int key: 0
@@ -17,8 +20,11 @@ QtObject {
     property Item parent: null
     property Item video: null
     property var window: null
-    property int hiddenTicks: 140
+    property int hiddenTicks: 220
     property int lossFeedTicks: 10
+    property int resumeTicks: 10
+    property int releaseTick: 0
+    property real heldColorLifetime: -1
 
     property QtObject settingsClient: QtObject {
         property int serial: 0
@@ -102,6 +108,7 @@ QtObject {
             console.log("PENDING_STATE tick=" + tick + " visible=" + toasts.visible
                 + " pending=" + toasts.pendingNotices + " stack=" + toasts.stackHeight
                 + " hdr=" + toasts.hdrNotice + " hdrLife=" + toasts.hdrLifetime
+                + " colorLife=" + toasts.colorLifetime
                 + " loss=" + toasts.lossNotice + " lossLife=" + toasts.lossLifetime
                 + " lossStatus=" + health().status + " lastNoticeAt=" + health().lastNoticeAt
                 + " y=" + toasts.y + " shown=" + JSON.stringify(shown()))
@@ -113,6 +120,9 @@ QtObject {
             "the loss claim is not consumed while the stack is hidden")
         require(toasts.lossNotice === false, "the loss notice is not raised while the stack is hidden")
         require(toasts.lossLifetime === 0, "the loss display lifetime has not started")
+        if (heldColorLifetime < 0) heldColorLifetime = toasts.colorLifetime
+        require(Math.abs(toasts.colorLifetime - heldColorLifetime) < 0.001,
+            "the interrupted notice's lifetime does not advance while the column is hidden")
         if (tick > lossFeedTicks * 10)
             require(health().status === "unstable",
                 "the loss is sustained, so a claim would be taken if the stack were shown")
@@ -131,6 +141,10 @@ QtObject {
         require(lossToast !== null && lossToast.visible, "the loss notice is presented")
     }
 
+    function resumed() {
+        return column().colorLifetime < heldColorLifetime
+    }
+
     function advance() {
         ++tick
         if (!released) {
@@ -141,14 +155,15 @@ QtObject {
             require(AppController.showOverlay("") === true, "the stats overlay closes")
             feedLoss()
             released = true
+            releaseTick = tick
             return 0
         }
-        assertPresented()
-        return 1
-    }
-
-    function verifyRendered(parent) {
-        assertPresented()
-        return true
+        if (resumed()) {
+            assertPresented()
+            return 1
+        }
+        require(tick - releaseTick < resumeTicks,
+            "the interrupted colour notice resumes once the space returns")
+        return 0
     }
 }
