@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ISS = ROOT / "opennow-qt/packaging/windows/setup.iss"
 BUILD = ROOT / "opennow-qt/packaging/windows/build-setup.ps1"
 WORKFLOWS = ROOT / ".github/workflows"
-INSTALLER = ROOT / "opennow-qt/cmake/WindowsInstaller.cmake"
+PACKAGING = ROOT / "opennow-qt/cmake/Packaging.cmake"
 APPLY = ROOT / "native/opennow-core/src/update_apply"
 
 
@@ -46,17 +46,19 @@ class WindowsSetupTests(unittest.TestCase):
         self.assertIn("9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732", script)
         self.assertIn("innosetup-6.7.3.exe", script)
 
-    def test_release_jobs_keep_wix_and_add_setup_exe(self):
-        installer = INSTALLER.read_text()
-        self.assertIn('set(CPACK_GENERATOR "WIX;ZIP")', installer)
+    def test_release_jobs_ship_setup_exe_and_zip_without_msi(self):
+        packaging = PACKAGING.read_text()
+        self.assertIn('set(CPACK_GENERATOR "ZIP")', packaging)
+        self.assertNotIn("WIX", packaging)
         build = (WORKFLOWS / "qt-build.yml").read_text()
         candidate = (WORKFLOWS / "qt-release-candidate.yml").read_text()
-        self.assertIn('package-generator: "WIX;ZIP"', build)
-        self.assertIn("-G WIX", candidate)
-        self.assertIn("build-setup.ps1", build)
-        self.assertIn("build-setup.ps1", candidate)
+        self.assertIn('package-generator: "ZIP"', build)
+        for workflow in (build, candidate):
+            self.assertNotIn("WIX", workflow)
+            self.assertNotIn(".msi", workflow)
+            self.assertIn("build-setup.ps1", workflow)
         self.assertIn("OpenNOW-Qt-%s-Windows-%s-setup.exe", candidate)
-        self.assertIn('[[ "$assets" -eq 16 ]]', candidate)
+        self.assertIn('[[ "$assets" -eq 14 ]]', candidate)
         self.assertIn('pkexec', (APPLY / "managed.rs").read_text())
         self.assertIn("extract_dmg", (APPLY / "bundle.rs").read_text())
 

@@ -108,7 +108,7 @@ no signing environment. No separate supporter-build workflow is needed.
 After a successful run, download
 `opennow-qt-<version>-complete-unsigned` from the run's **Artifacts** section.
 Versions use `<project-version>-nightly.<run-number>.<attempt>` even when release
-publishing is disabled. The complete archive contains Windows x64/ARM64 MSI installers and
+publishing is disabled. The complete archive contains Windows x64/ARM64 setup.exe installers and
 portable ZIPs, Linux x64/ARM64 AppImages and DEBs, the Apple Silicon macOS DMG, `SHA256SUMS`,
 and source-commit metadata. The macOS ARM64 validation ZIP is a separate artifact.
 Artifacts expire after 14 days.
@@ -279,7 +279,7 @@ dependencies hidden. The Apple Silicon DMG is part of the public nightly invento
 remains a separate CI validation artifact. These applications have no Developer ID signature or
 notarization and require manual updates. See
 [`qt-nightly-release.md`](../docs/qt-nightly-release.md) for installation warnings and the
-Windows MSI/portable ZIP contract. Offscreen tests cover shell and FFI
+Windows setup.exe/portable ZIP contract. Offscreen tests cover shell and FFI
 contracts; real VideoToolbox/Metal presentation, audio, input capture, and login
 still require macOS hardware and a GFN account.
 

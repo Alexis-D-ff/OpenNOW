@@ -356,15 +356,6 @@ jobs:
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install WiX Toolset
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          choco install wixtoolset -y --no-progress
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            throw "WiX Toolset was not added to PATH"
-          }
-
       - name: Install host Qt tools for ARM64
         if: matrix.arch == 'arm64'
         uses: jurplel/install-qt-action@v4
@@ -469,29 +460,13 @@ jobs:
             Invoke-OpenNowSignTool verify /pa /all $file.FullName
           }
 
-      - name: Create MSI and portable ZIP
+      - name: Create portable ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force build/release-artifacts | Out-Null
-          cpack --config build/opennow-qt-release/CPackConfig.cmake -C Release -G WIX -B build/release-artifacts
-          if ($LASTEXITCODE -ne 0) { throw "MSI packaging failed with exit code $LASTEXITCODE" }
           cpack --config build/opennow-qt-release/CPackConfig.cmake -C Release -G ZIP -B build/release-artifacts
           if ($LASTEXITCODE -ne 0) { throw "ZIP packaging failed with exit code $LASTEXITCODE" }
-
-      - name: Authenticode-sign MSI
-        if: inputs.windows_signing_mode == 'authenticode'
-        shell: pwsh
-        env:
-          WINDOWS_PFX_PASSWORD: ${{ secrets.OPENNOW_WINDOWS_SIGNING_PFX_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          . ./opennow-qt/packaging/windows-release.ps1
-          $pfx = Join-Path $env:RUNNER_TEMP "opennow-signing.pfx"
-          $msi = Get-ChildItem build/release-artifacts -Filter *.msi
-          if ($msi.Count -ne 1) { throw "Expected one MSI" }
-          Invoke-OpenNowSignTool sign /f $pfx /p $env:WINDOWS_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $msi.FullName
-          Invoke-OpenNowSignTool verify /pa /all $msi.FullName
 
       - name: Build setup.exe
         shell: pwsh
@@ -522,7 +497,7 @@ jobs:
           Invoke-OpenNowSignTool sign /f $pfx /p $env:WINDOWS_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $setup[0].FullName
           Invoke-OpenNowSignTool verify /pa /all $setup[0].FullName
 
-      - name: Verify MSI and portable ZIP payloads
+      - name: Verify portable ZIP payload
         shell: pwsh
         env:
           WINDOWS_SIGNING_MODE: ${{ inputs.windows_signing_mode }}
@@ -531,15 +506,6 @@ jobs:
           . ./opennow-qt/packaging/windows-release.ps1
           if ($env:WINDOWS_SIGNING_MODE -notin @("unsigned", "authenticode")) {
             throw "Invalid Windows signing mode"
-          }
-          $msi = Get-ChildItem build/release-artifacts -Filter *.msi
-          if ($msi.Count -ne 1) { throw "Expected one MSI" }
-          $msiExpanded = Join-Path $env:RUNNER_TEMP "msi-expanded"
-          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/a `"$($msi.FullName)`" /qn TARGETDIR=`"$msiExpanded`""
-          if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed" }
-          Assert-OpenNowPackagePayload -Root $msiExpanded -DeploymentRoot build/opennow-qt-release/Release
-          if ($env:WINDOWS_SIGNING_MODE -eq "authenticode") {
-            Assert-OpenNowSignedPackage -Root $msiExpanded -SignedRoot build/opennow-qt-release/Release
           }
           $zip = Get-ChildItem build/release-artifacts -Filter *.zip
           if ($zip.Count -ne 1) { throw "Expected one portable ZIP" }
@@ -554,7 +520,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Get-ChildItem build/release-artifacts -File | Where-Object { $_.Extension -eq ".msi" -or $_.Extension -eq ".zip" -or $_.Name -like "*-setup.exe" } | Get-FileHash -Algorithm SHA256 |
+          Get-ChildItem build/release-artifacts -File | Where-Object { $_.Extension -eq ".zip" -or $_.Name -like "*-setup.exe" } | Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
             Set-Content build/release-artifacts/SHA256SUMS
 
@@ -567,7 +533,6 @@ jobs:
         with:
           name: opennow-qt-${{ inputs.version }}-windows-${{ matrix.arch }}-${{ inputs.windows_signing_mode }}
           path: |
-            build/release-artifacts/*.msi
             build/release-artifacts/*.zip
             build/release-artifacts/*-setup.exe
             build/release-artifacts/SHA256SUMS
@@ -844,16 +809,16 @@ jobs:
               "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch"
             printf 'OpenNOW-Qt-%s-Linux-%s.AppImage.zsync\n' "$RELEASE_VERSION" "$arch"
             printf 'OpenNOW-Qt-%s-Linux-%s.flatpak\n' "$RELEASE_VERSION" "$arch"
-            printf 'OpenNOW-Qt-%s-Windows-%s.msi\nOpenNOW-Qt-%s-Windows-%s.zip\nOpenNOW-Qt-%s-Windows-%s-setup.exe\n' \
-              "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch"
+            printf 'OpenNOW-Qt-%s-Windows-%s.zip\nOpenNOW-Qt-%s-Windows-%s-setup.exe\n' \
+              "$RELEASE_VERSION" "$arch" "$RELEASE_VERSION" "$arch"
           done
           printf 'OpenNOW-Qt-%s-Darwin-arm64.dmg\nOpenNOW-Qt-%s-Darwin-arm64.zip\n' \
             "$RELEASE_VERSION" "$RELEASE_VERSION")
           actual=$(find candidate -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort)
           [[ "$actual" == "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ]]
-          assets=$(find candidate -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' \
+          assets=$(find candidate -type f \( -name '*.dmg' -o -name '*.AppImage' \
             -o -name '*.AppImage.zsync' -o -name '*.flatpak' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) | wc -l)
-          [[ "$assets" -eq 16 ]]
+          [[ "$assets" -eq 14 ]]
 
           signing_dir=$(mktemp -d "$RUNNER_TEMP/opennow-update-signing.XXXXXX")
           trap 'rm -rf "$signing_dir"' EXIT
@@ -889,7 +854,7 @@ jobs:
               '{schemaVersion:1,version:$version,asset:$asset,size:$size,sha256:$sha256,signature:$signature}' \
               > "$temporary"
             mv "$temporary" "$manifest"
-          done < <(find candidate -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' \
+          done < <(find candidate -type f \( -name '*.dmg' -o -name '*.AppImage' \
             -o -name '*.AppImage.zsync' -o -name '*.flatpak' -o -name '*.deb' -o -name '*.zip' -o -name '*-setup.exe' \) -print0)
 
           manifests=$(find candidate -type f -name '*.manifest.json' | wc -l)

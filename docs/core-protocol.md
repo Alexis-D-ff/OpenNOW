@@ -1337,9 +1337,10 @@ Windows portable replacement requires a volume with persistent ACL support;
 FAT/exFAT installations are refused before shutdown because private staging
 cannot be enforced there. Preserved portable profile data retains its ownership
 and effective access permissions. Preparation also fails before shutdown if the
-replacement overlaps user data or exceeds the bounded copy limits. MSI packages
-use Windows Installer registration and preserve the registered installation root;
-they are not treated as portable directories.
+replacement overlaps user data or exceeds the bounded copy limits. Installations
+registered with Windows Installer by the retired MSI package are not portable
+directories and are never updated in place: the updater reports `not-available`
+and asks the user to replace the installation once with setup.exe.
 
 `updater.startup.ack` accepts no parameters and returns `{ "acknowledged": true }`
 only for a valid helper-launched update attempt. A normal launch returns

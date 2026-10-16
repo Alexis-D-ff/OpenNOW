@@ -253,7 +253,7 @@ class MacOSCandidateWorkflowTest(unittest.TestCase):
         names = [f"OpenNOW-Qt-1.2.3-{platform}-{arch}.{extension}"
                  for platform, arches, extensions in (
                      ("Linux", ("x64", "arm64"), ("AppImage", "AppImage.zsync", "deb", "flatpak")),
-                     ("Windows", ("x64", "arm64"), ("msi", "zip")),
+                     ("Windows", ("x64", "arm64"), ("zip",)),
                      ("Darwin", ("arm64",), ("dmg", "zip")))
                  for arch in arches for extension in extensions]
         names.extend(f"OpenNOW-Qt-1.2.3-Windows-{arch}-setup.exe" for arch in ("x64", "arm64"))
@@ -262,7 +262,7 @@ class MacOSCandidateWorkflowTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "Inventory uses GNU find on the Linux signing runner")
     def test_exact_platform_artifacts_are_required(self):
         names = self.names()
-        self.assertEqual(len(names), 16)
+        self.assertEqual(len(names), 14)
         self.assertEqual([name for name in names if name.endswith("-setup.exe")], [
             "OpenNOW-Qt-1.2.3-Windows-x64-setup.exe",
             "OpenNOW-Qt-1.2.3-Windows-arm64-setup.exe",

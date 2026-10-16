@@ -74,16 +74,16 @@ upload is made public.
 
 For version `<version>`, the public nightly inventory contains exactly these packages:
 
-- `OpenNOW-Qt-<version>-Windows-x64.msi`
 - `OpenNOW-Qt-<version>-Windows-x64.zip`
 - `OpenNOW-Qt-<version>-Windows-x64-setup.exe`
-- `OpenNOW-Qt-<version>-Windows-arm64.msi`
 - `OpenNOW-Qt-<version>-Windows-arm64.zip`
 - `OpenNOW-Qt-<version>-Windows-arm64-setup.exe`
 - `OpenNOW-Qt-<version>-Linux-x64.AppImage`
 - `OpenNOW-Qt-<version>-Linux-x64.deb`
 - `OpenNOW-Qt-<version>-Linux-arm64.AppImage`
 - `OpenNOW-Qt-<version>-Linux-arm64.deb`
+- `OpenNOW-Qt-<version>-Linux-x64.flatpak`
+- `OpenNOW-Qt-<version>-Linux-arm64.flatpak`
 - `OpenNOW-Qt-<version>-Darwin-arm64.dmg`
 
 Both AppImages also have versioned `.AppImage.zsync` sidecars. `setup.exe` is a
@@ -124,39 +124,31 @@ name, manifest signature, declared size, and SHA-256 digest before atomically st
 anything executable. It re-hashes the staged file immediately before install.
 AppImage replacement keeps a `.previous` rollback copy and restores it if the updated
 image cannot restart; native installers remain responsible for their platform rollback.
-Switching stable/nightly channels on Windows MSI or macOS can require a manual installation:
-MSI upgrade families and macOS signing identities intentionally differ. Do not relax
-those checks to turn cross-channel migration into a silent update.
+Switching stable/nightly channels on macOS can require a manual installation: macOS
+signing identities intentionally differ. Do not relax those checks to turn cross-channel
+migration into a silent update.
 
 ## Windows installation identity
 
-`opennow-qt/cmake/WindowsInstaller.cmake` preserves the existing MSI UpgradeCodes:
+OpenNOW no longer publishes Windows MSI packages. Earlier MSI releases registered these
+UpgradeCodes, shared by x64 and ARM64:
 
 - Stable: `6E81F7AE-B19D-4E87-A94A-2B2F01EBF762`
 - Nightly: `9661F4F8-656C-4B64-9035-01B04F4822B1`
 - Supporter: `B3AF8A40-5F44-445A-AD99-CECE00593601`
 
-Each channel's code is shared by x64 and ARM64 for compatibility with installed
-packages. It identifies an upgrade family, not an architecture. The helper must also
-validate the incoming MSI's SummaryInformation architecture and match an installed
-related product's registered root to the running installation. Portable ZIPs do not
-create an MSI product registration. A product registered elsewhere does not make a
-portable copy an MSI installation.
-
-CPack's WiX generator sets `ARPINSTALLLOCATION` to the resolved `[INSTALL_ROOT]`
-after `CostFinalize`. The installer policy leaves `CPACK_WIX_PROPERTY_ARPINSTALLLOCATION`
-unset so CPack also restores the previous product's registered root through its secure
-`INSTALL_ROOT` property. Do not add a second `SetARPINSTALLLOCATION` action in a product
-patch. Windows Installer stores the resolved value as `InstallLocation`, including
-custom installation paths.
-CPack still generates a new ProductCode for each MSI package and uses its existing
-`MajorUpgrade` behavior. The Windows installer integration test checks the registered
-root and requires exactly one related product after each successful channel upgrade.
+The core treats an installation as MSI-registered only when a related product's registered
+root matches the running installation. It never updates such an installation in place and
+asks the user to replace it once with setup.exe. setup.exe
+(`opennow-qt/packaging/windows/setup.iss`) checks the same codes and offers to uninstall the
+registered product before it installs into `%LOCALAPPDATA%\OpenNOW`. Portable ZIPs and
+setup.exe do not create an MSI product registration. A product registered elsewhere does not
+make a portable copy an MSI installation.
 
 The Windows update helper builds separately in `update-helper-rust-target` with
 `RUSTFLAGS=-C target-feature=+crt-static` and an explicit Rust target. That invocation
 clears inherited encoded Rust flags without changing core or streamer builds. The
 helper is deployed as the usual sibling `opennow-update-helper.exe`. Final Windows
-MSI and ZIP validation rejects helper imports outside an explicit Windows system-DLL
+ZIP validation rejects helper imports outside an explicit Windows system-DLL
 list, so Qt libraries and a separately installed Visual C++ runtime cannot mask a
 dependency that would break the helper when it runs outside the installation.
