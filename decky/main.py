@@ -73,6 +73,8 @@ class Plugin:
         return self.state.to_dict()
 
     async def set_preference(self, key: str, value: bool) -> dict:
+        if key == "nightlyChannel" and value != self.state.preferences.get(key):
+            self.release = None
         return self.state.set_preference(key, value)
 
     async def set_custom_path(self, path: str) -> dict:
@@ -156,13 +158,15 @@ class Plugin:
 
     async def check_update(self) -> dict:
         install = await asyncio.to_thread(self._install)
-        release = await asyncio.to_thread(releases.fetch_latest)
+        release = await asyncio.to_thread(releases.fetch_latest, self.state.preferences["nightlyChannel"])
         self.release = releases.summarize(release, install.version if install else None)
         return self.release
 
-    async def install_opennow(self) -> bool:
+    async def install_opennow(self, nightly: bool | None = None) -> bool:
         if self.install_task and not self.install_task.done():
             return False
+        if nightly is not None:
+            await self.set_preference("nightlyChannel", nightly)
         release = self.release or await self.check_update()
         asset = release.get("asset")
         if not asset:

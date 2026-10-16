@@ -92,14 +92,19 @@ function Notice({ title, body }: { title: string; body: string }) {
 
 function Header({ status }: { status: Status }) {
   const current = phase(status);
-  const install = () => backend.installOpenNOW().then(refresh).catch(report);
+  const install = (nightly?: boolean) => backend.installOpenNOW(nightly).then(refresh).catch(report);
   return (
     <PanelSection>
       {current === "missing" && (
         <>
           <Notice title="OpenNOW isn't installed" body="Install the official OpenNOW Flatpak to play GeForce NOW from Game Mode." />
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={install}>{withIcon(<FaDownload />, "Install OpenNOW")}</ButtonItem>
+            <ButtonItem layout="below" onClick={() => install(false)}>{withIcon(<FaDownload />, "Install OpenNOW")}</ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" description="Newest build from the dev branch. Updates follow nightlies too." onClick={() => install(true)}>
+              {withIcon(<FaDownload />, "Install nightly")}
+            </ButtonItem>
           </PanelSectionRow>
         </>
       )}
@@ -114,7 +119,7 @@ function Header({ status }: { status: Status }) {
       )}
       {current === "update" && (
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={install}>{withIcon(<FaDownload />, "Update to " + status.release?.version)}</ButtonItem>
+          <ButtonItem layout="below" onClick={() => install()}>{withIcon(<FaDownload />, "Update to " + status.release?.version)}</ButtonItem>
         </PanelSectionRow>
       )}
       {current === "running" && (

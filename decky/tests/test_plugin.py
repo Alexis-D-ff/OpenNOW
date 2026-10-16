@@ -122,6 +122,20 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("opennow_decky.releases.fetch_latest", return_value={"tag_name": "v1.0.5", "assets": []}):
             self.assertTrue((await self.plugin.check_update())["updateAvailable"])
 
+    async def test_choosing_nightly_at_install_switches_the_update_channel(self):
+        self.plugin.release = {"version": "1.0.3", "asset": {"url": "https://github.com/x", "size": 1}}
+        nightly = {"tag_name": "v1.0.4-nightly.1201.1", "assets": [
+            {"name": "OpenNOW-Qt-1.0.4-nightly.1201.1-Linux-x64.flatpak", "browser_download_url": "https://github.com/n", "size": 2}]}
+        with mock.patch("opennow_decky.releases.fetch_latest", return_value=nightly) as fetch, \
+                mock.patch("opennow_decky.releases.platform.machine", return_value="x86_64"), \
+                mock.patch("opennow_decky.installer.install_bundle") as install:
+            self.assertTrue(await self.plugin.install_opennow(True))
+            await self.plugin.install_task
+        fetch.assert_called_once_with(True)
+        self.assertEqual(install.call_args.args[0], "https://github.com/n")
+        self.assertTrue((await self.plugin.get_state())["preferences"]["nightlyChannel"])
+        self.assertEqual(self.decky.emitted[-1], ("install_done", (True, "1.0.4-nightly.1201.1")))
+
 
 if __name__ == "__main__":
     unittest.main()

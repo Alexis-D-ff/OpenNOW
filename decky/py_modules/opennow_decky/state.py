@@ -8,6 +8,7 @@ PREFERENCES = {
     "consoleLayout": True,
     "collection": True,
     "gamePageButton": True,
+    "nightlyChannel": False,
 }
 
 
