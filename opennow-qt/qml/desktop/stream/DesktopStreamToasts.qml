@@ -91,6 +91,7 @@ Column {
             lossNotice = false
             return
         }
+        if (!visible) return
         if (!health.claimNotice()) return
         lossNotice = true
         lossAnimation.restart()
