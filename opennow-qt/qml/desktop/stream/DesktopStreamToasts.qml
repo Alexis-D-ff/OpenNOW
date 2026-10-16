@@ -126,7 +126,10 @@ Column {
 
     function presentHdrNotice() {
         if (!visible || !hdrNotice || ShellStore.streamHdrNoticeShown) return
-        ShellStore.claimHdrNotice(hdrDowngrade)
+        if (!ShellStore.claimHdrNotice(hdrDowngrade)) {
+            hdrNotice = false
+            return
+        }
         hdrAnimation.restart()
     }
 
@@ -166,7 +169,18 @@ Column {
             observeHdrDowngrade()
         }
     }
+    function syncLifetimeRunning() {
+        for (const animation of [controllerAnimation, lossAnimation, bugReportAnimation,
+                antiAfkAnimation, hdrAnimation, colorAnimation]) {
+            if (visible) {
+                if (animation.paused) animation.resume()
+            } else if (animation.running && !animation.paused) {
+                animation.pause()
+            }
+        }
+    }
     onVisibleChanged: {
+        syncLifetimeRunning()
         presentColorNotice()
         presentHdrNotice()
     }
