@@ -51,6 +51,7 @@ jobs:
           path: decky/out/OpenNOW.zip
           if-no-files-found: error
 
+
   publish:
     name: Publish plugin ZIP
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -60,16 +61,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: decky/package.json
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           name: OpenNOW-decky
-      - name: Update the decky-plugin prerelease
+      - name: Release this plugin version once
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view decky-plugin --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create decky-plugin --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --prerelease --latest=false --title "OpenNOW Decky plugin" \
-              --notes "Newest OpenNOW plugin for Decky Loader, rebuilt from dev. Install it from Decky's Developer tab with Install Plugin from URL: https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip"
+          tag="decky-v$(jq -r .version decky/package.json)"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already published; bump decky/package.json to publish a new plugin build."
+            exit 0
           fi
-          gh release upload decky-plugin OpenNOW.zip --repo "$GITHUB_REPOSITORY" --clobber
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/OpenNOW.zip"
+          gh release create "$tag" OpenNOW.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "OpenNOW Decky plugin ${tag#decky-v}" \
+            --notes "OpenNOW plugin for Decky Loader. Install it from Decky's Developer tab with Install Plugin from URL: $url"

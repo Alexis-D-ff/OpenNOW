@@ -27,12 +27,12 @@ Skip this step if Decky Loader is already on your Deck.
 4. Open **Developer**, select **Install Plugin from URL** and enter:
 
    ```
-   https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip
+   https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-v0.1.0/OpenNOW.zip
    ```
 
 5. Confirm the install. **OpenNOW** now shows up in Decky's plugin list.
 
-This link always points to the newest plugin build.
+Newer plugin versions are published as their own releases. The [release list](https://github.com/OpenCloudGaming/OpenNOW/releases) shows them as **OpenNOW Decky plugin**.
 
 ### 3. Install OpenNOW and sign in
 
@@ -115,6 +115,6 @@ npx pnpm@9 run package   # writes out/OpenNOW.zip
 
 To install a build on a device, copy `out/OpenNOW.zip` to the device. Then install it from Decky's settings: **Developer → Install plugin from ZIP file**.
 
-Every push to `dev` that changes `decky/` republishes `OpenNOW.zip` to the [`decky-plugin`](https://github.com/OpenCloudGaming/OpenNOW/releases/tag/decky-plugin) prerelease, which is what the install link points to.
+Releases are published by `decky.yml`. When a push to `dev` changes `decky/` and `package.json` has a version that isn't released yet, it publishes a `decky-v<version>` prerelease with `OpenNOW.zip`. Releases are immutable, so bump `version` in `package.json` to publish a new build, then update the install link above.
 
 The backend lives in `main.py`. Its logic lives in `py_modules/opennow_decky`, which has no Decky dependency, so `tests/` exercises it directly. The frontend in `src/` uses Steam's own components from `@decky/ui`.
