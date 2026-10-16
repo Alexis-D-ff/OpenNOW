@@ -85,7 +85,7 @@ The [OpenNOW plugin for Decky Loader](decky/README.md) runs OpenNOW from Game Mo
 installs the OpenNOW Flatpak (stable or nightly), adds GeForce NOW games to your Steam
 library with their artwork, and puts a **Play on OpenNOW** button on supported Steam games.
 Install it from Decky's **Developer → Install Plugin from URL** with
-`https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip`.
+`https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-v0.1.0/OpenNOW.zip`.
 The [plugin guide](decky/README.md) walks through installing Decky Loader and the plugin.
 
 ![OpenNOW streaming a game in Steam Deck Game Mode](decky/docs/screenshots/in-game.jpg)
