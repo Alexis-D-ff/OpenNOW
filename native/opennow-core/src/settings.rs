@@ -167,7 +167,7 @@ impl SettingsStore {
                 .insert(CONSOLE_POLICY_VERSION.to_owned(), json!(1));
         }
         let steam_deck_identity_applied = policy == LoadPolicy::ReadWrite
-            && store.apply_steam_deck_identity_default(is_steam_deck(Path::new(DMI_DIRECTORY)));
+            && store.apply_steam_deck_identity_default(on_steam_deck());
         let codec_before_normalize = store.values["codec"].clone();
         let fallback_before_normalize = store.values["fallbackCodec"].clone();
         store.normalize();
@@ -695,6 +695,10 @@ impl SettingsStore {
         fs::rename(&temporary, &self.path)?;
         Ok(())
     }
+}
+
+pub(crate) fn on_steam_deck() -> bool {
+    is_steam_deck(Path::new(DMI_DIRECTORY))
 }
 
 fn is_steam_deck(dmi_directory: &Path) -> bool {

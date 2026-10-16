@@ -55,6 +55,7 @@ struct LegacyAuthState {
 pub struct CredentialVault {
     metadata_path: PathBuf,
     store: Box<dyn SecretStore>,
+    local_only: bool,
     warnings: Mutex<std::collections::BTreeMap<String, String>>,
     suppressed: Mutex<Vec<String>>,
 }
@@ -101,6 +102,22 @@ impl SecretStore for OsSecretStore {
     }
 }
 
+struct LocalOnlyStore;
+
+impl SecretStore for LocalOnlyStore {
+    fn get(&self, _user_id: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn set(&self, _user_id: &str, _encoded: &str) -> Result<(), String> {
+        Err("Sessions on this device are saved locally".into())
+    }
+
+    fn delete(&self, _user_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl CredentialVault {
     #[cfg(test)]
     pub(crate) fn memory(data_dir: PathBuf) -> Self {
@@ -120,6 +137,9 @@ impl CredentialVault {
         )
     }
     pub fn new(data_dir: PathBuf) -> Self {
+        if crate::settings::on_steam_deck() {
+            return Self::local_only(data_dir);
+        }
         #[cfg(windows)]
         let store = Box::new(encrypted_secret_store::EncryptedSecretStore::new(
             data_dir.join("secure-sessions"),
@@ -137,6 +157,13 @@ impl CredentialVault {
         Self::with_store(data_dir, store)
     }
 
+    fn local_only(data_dir: PathBuf) -> Self {
+        Self {
+            local_only: true,
+            ..Self::with_store(data_dir, Box::new(LocalOnlyStore))
+        }
+    }
+
     fn with_store(data_dir: PathBuf, store: Box<dyn SecretStore>) -> Self {
         let store =
             json_secret_store::JsonFallbackStore::new(data_dir.join("fallback-sessions"), store);
@@ -147,6 +174,7 @@ impl CredentialVault {
         Self {
             metadata_path: data_dir.join("accounts.json"),
             store: Box::new(store),
+            local_only: false,
             warnings: Mutex::new(warnings),
             suppressed: Mutex::new(Vec::new()),
         }
@@ -384,10 +412,12 @@ impl CredentialVault {
     pub fn persistence_state(&self, session: &AuthSession) -> &'static str {
         if !self.durable(session) {
             "migration-pending"
-        } else if self.store.is_plaintext(&session.user.user_id) {
-            "local-file"
-        } else {
+        } else if !self.store.is_plaintext(&session.user.user_id) {
             "secure-store"
+        } else if self.local_only {
+            "device-file"
+        } else {
+            "local-file"
         }
     }
 
@@ -868,6 +898,30 @@ mod tests {
         drop(restored);
         assert!(
             CredentialVault::with_store(directory.path().into(), unavailable())
+                .load_active()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn steam_deck_sessions_live_in_a_device_file_without_the_os_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = CredentialVault::local_only(directory.path().into());
+        let session = sample_session("deck-user");
+        vault.save(&session).unwrap();
+        assert_eq!(vault.persistence_state(&session), "device-file");
+        drop(vault);
+        let restored = CredentialVault::local_only(directory.path().into());
+        assert_eq!(
+            restored.load_active().unwrap().unwrap().user.user_id,
+            "deck-user"
+        );
+        assert_eq!(restored.persistence_state(&session), "device-file");
+        restored.remove("deck-user").unwrap();
+        drop(restored);
+        assert!(
+            CredentialVault::local_only(directory.path().into())
                 .load_active()
                 .unwrap()
                 .is_none()

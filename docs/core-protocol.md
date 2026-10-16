@@ -198,6 +198,11 @@ If the account-index commit fails after JSON is written, persistence remains
 `local-file` and warnings report that account restoration may fail. Interrupted
 JSON temporary files are removed on startup and during account cleanup.
 
+On a Steam Deck (DMI board vendor `Valve`, product `Jupiter` or `Galileo`) the core never
+uses the OS credential store, because Game Mode runs with the desktop keyring locked. Sessions
+are always written to the same per-account JSON file and reported as `device-file`, which the
+shell treats as normal persistence and does not warn about.
+
 `memory-only` never writes a plaintext credential fallback. `migration-pending` means
 a recoverable legacy source remains because migration could not finish. `unavailable`
 means restoration failed. Warnings identify deferred cleanup without containing
