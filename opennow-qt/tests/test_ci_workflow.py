@@ -2,8 +2,6 @@ from pathlib import Path
 import os
 import re
 import subprocess
-import tempfile
-import textwrap
 import unittest
 
 
@@ -71,46 +69,6 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn("name: Package ${{ matrix.label }}", entries["packages"])
         self.assertIn("Create Linux AppImage", entries["packages"])
         self.assertIn("Test relocated bundle without development libraries", entries["packages"])
-
-    def test_windows_packaging_failure_prints_bounded_logs_and_preserves_status(self):
-        workflow = (WORKFLOWS / "qt-build.yml").read_text()
-        step = workflow.split("      - name: Create unsigned package\n", 1)[1].split("      - name:", 1)[0]
-        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for index in range(6):
-                log = root / f"build/qt-packages/log folder {index}/wix.log"
-                log.parent.mkdir(parents=True)
-                log.write_text("first-line-must-be-truncated\n" + ("x" * 1024 + "\n") * 300 + "WiX failure detail\n")
-            prelude = 'cd() { return 0; }\ncpack() { return "$CPACK_STATUS"; }\n'
-            for platform, status in (("Windows", 37), ("Windows", 0), ("Linux", 37)):
-                with self.subTest(platform=platform, status=status):
-                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", prelude + script],
-                                            cwd=root, env={**os.environ, "RUNNER_OS": platform,
-                                                           "CPACK_STATUS": str(status), "PACKAGE_GENERATOR": "WIX;ZIP"},
-                                            capture_output=True, text=True)
-                    self.assertEqual(result.returncode, status, result.stderr)
-                    if platform == "Windows" and status:
-                        self.assertEqual(result.stdout.count("--- WiX packaging log:"), 4)
-                        self.assertEqual(result.stdout.count("WiX failure detail"), 4)
-                        self.assertNotIn("first-line-must-be-truncated", result.stdout)
-                        self.assertLess(len(result.stdout), 4 * 65536 + 4096)
-                    else:
-                        self.assertEqual(result.stdout, "")
-            result = subprocess.run(["bash", "-euo", "pipefail", "-c",
-                                     prelude + 'tail() { return 11; }\n' + script],
-                                    cwd=root, env={**os.environ, "RUNNER_OS": "Windows",
-                                                   "CPACK_STATUS": "37", "PACKAGE_GENERATOR": "WIX;ZIP"},
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 37, result.stderr)
-            for log in root.rglob("wix.log"):
-                log.unlink()
-            result = subprocess.run(["bash", "-euo", "pipefail", "-c", prelude + script],
-                                    cwd=root, env={**os.environ, "RUNNER_OS": "Windows",
-                                                   "CPACK_STATUS": "37", "PACKAGE_GENERATOR": "WIX;ZIP"},
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 37, result.stderr)
-            self.assertIn("No generated WiX logs found.", result.stdout)
 
     def test_all_native_platform_checks_keep_required_status_names(self):
         checks = jobs((WORKFLOWS / "qt-ci.yml").read_text())["checks"]

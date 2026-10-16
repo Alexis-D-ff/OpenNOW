@@ -85,8 +85,8 @@ class CandidatePromotionTest(unittest.TestCase):
             "OpenNOW-Qt-1.2.3-Windows-arm64-setup.exe",
             "OpenNOW-Qt-1.2.3-Windows-x64-setup.exe",
         ])
-        self.assertEqual(len(info["assets"]), 16)
-        self.assertEqual(len(list(self.destination.iterdir())), 34)
+        self.assertEqual(len(info["assets"]), 14)
+        self.assertEqual(len(list(self.destination.iterdir())), 30)
         self.assertEqual([asset["name"] for asset in info["assets"] if asset["name"].endswith(".flatpak")], [
             "OpenNOW-Qt-1.2.3-Linux-arm64.flatpak",
             "OpenNOW-Qt-1.2.3-Linux-x64.flatpak",
@@ -96,7 +96,7 @@ class CandidatePromotionTest(unittest.TestCase):
             self.assertEqual((self.source / "packages" / asset["name"]).read_bytes(),
                              (self.destination / asset["name"]).read_bytes())
         sums = (self.destination / "SHA256SUMS").read_text().splitlines()
-        self.assertEqual(len(sums), 33)
+        self.assertEqual(len(sums), 29)
         for line in sums:
             expected, name = line.split("  ")
             self.assertEqual(digest(self.destination / name), expected)

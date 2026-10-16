@@ -61,7 +61,7 @@ If there's no published Qt nightly, sign in to GitHub and download the artifacts
 
 | Platform | Qt package | How to run it |
 | --- | --- | --- |
-| Windows x64 / ARM64 | `.msi`, portable `.zip` | Install the MSI, or extract the entire ZIP and run `bin/OpenNOW.exe`. |
+| Windows x64 / ARM64 | `-setup.exe`, portable `.zip` | Run setup.exe, or extract the entire ZIP and run `bin/OpenNOW.exe`. MSI installers are no longer published; if you installed OpenNOW from an `.msi`, run setup.exe once to replace it. |
 | Linux x64 / ARM64 | `.AppImage`, recommended | Make the file executable, then launch it. |
 | Linux x64 / ARM64 | `.deb` | Your distribution must provide Qt 6.8+ and SDL3. Use the AppImage on stock Ubuntu 24.04. |
 | macOS Apple Silicon, macOS 13+ | `.dmg`, nightlies | Open the DMG and drag OpenNOW into Applications. Intel Macs are not included. |

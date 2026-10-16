@@ -58,9 +58,9 @@ the update-signing seed, and does not require a manually registered runner.
 - Windows x64/ARM64 packages use the explicit `windows_signing_mode` choice, defaulting to
   `unsigned`. Both modes require the binaries listed in
   `opennow-qt/packaging/windows-release-binaries.txt`, including the capability probe, standalone
-  update helper, and embedded streamer DLL. Extracted MSI and ZIP payloads must match the deployment
+  update helper, and embedded streamer DLL. The extracted ZIP payload must match the deployment
   copies byte-for-byte, and the helper must depend only on system DLLs. In `authenticode` mode,
-  first-party binaries and MSI installers are signed and timestamped, and extracted payloads also
+  first-party binaries and setup.exe are signed and timestamped, and the extracted payload also
   pass signature verification. Every nonzero `signtool` exit fails the workflow. In `unsigned` mode,
   Windows has no verified publisher identity and may show SmartScreen or unknown-publisher warnings.
 - macOS ARM64 candidates use Developer ID signing, notarization, and stapled tickets.
@@ -81,9 +81,9 @@ the update-signing seed, and does not require a manually registered runner.
   packages. This signature authenticates updater downloads; it does not establish a Windows publisher.
 - AppImages embed stable-channel update information and include versioned `.zsync` sidecars
   for external delta-update tools. Both sidecars receive manifests and release checksums.
-- The inventory job fails unless it finds both Windows MSI/ZIP/setup.exe triples, both Linux AppImage/DEB pairs,
+- The inventory job fails unless it finds both Windows ZIP/setup.exe pairs, both Linux AppImage/DEB pairs,
   both Linux Flatpak bundles, both AppImage sidecars, the macOS ARM64 DMG/ZIP pair, and exactly one manifest per asset
-  (fourteen packages plus two sidecars). It records the immutable commit and
+  (twelve packages plus two sidecars). Windows `.msi` installers are no longer produced. It records the immutable commit and
   SHA-256 of every candidate file, plus `windowsSigningMode=unsigned` or
   `windowsSigningMode=authenticode`. Windows artifact bundles use the same mode as their suffix;
   package filenames stay unchanged for updater compatibility.
