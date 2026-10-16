@@ -54,6 +54,7 @@ qt_add_executable(opennow-qt
     src/acceptance/GpuSettingsAcceptance.cpp
     src/acceptance/StreamExitAcceptance.cpp
     src/acceptance/SessionFullscreenAcceptance.cpp
+    src/acceptance/SteamLaunchAcceptance.cpp
     src/acceptance/SessionLaunchAcceptance.cpp
     src/acceptance/ConsoleSessionAcceptance.cpp
     src/app/AppController.cpp

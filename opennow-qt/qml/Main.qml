@@ -82,6 +82,7 @@ ApplicationWindow {
     property int visibilityBeforeFullscreen: ApplicationWindow.Windowed
     property bool sessionWindowModeSaved: false
     property bool sessionFullscreenApplied: false
+    property bool quitAfterSessionArmed: false
     property int visibilityBeforeSession: ApplicationWindow.Windowed
     property int fullscreenRestoreVisibilityBeforeSession: ApplicationWindow.Windowed
     readonly property string configuredStatsShortcut: String(
@@ -233,7 +234,10 @@ ApplicationWindow {
             if (!ShellStore.activeSession
                     || String(ShellStore.activeSession.sessionId || "") !== window.pendingConsoleScreenshotSession)
                 window.pendingConsoleScreenshotSession = ""
+            window.quitIfSessionFinished()
         }
+        function onStreamBusyChanged() { window.quitIfSessionFinished() }
+        function onSessionRecoveryPendingChanged() { window.quitIfSessionFinished() }
         function onBackgroundStreamReminderRequested() {
             AppController.requestWindowAttention(window)
         }
@@ -381,6 +385,18 @@ ApplicationWindow {
         window.visibilityBeforeSession = window.visibility
         window.fullscreenRestoreVisibilityBeforeSession = window.visibilityBeforeFullscreen
         window.sessionWindowModeSaved = true
+    }
+
+    function quitIfSessionFinished() {
+        if (!QuitAfterSession)
+            return
+        if (ShellStore.activeSession) {
+            window.quitAfterSessionArmed = true
+            return
+        }
+        if (window.quitAfterSessionArmed && !ShellStore.streamBusy && !ShellStore.sessionRecoveryPending
+                && !ShellStore.pendingLaunchParams && !ShellStore.pendingDirectLaunch)
+            AppController.quitApplication()
     }
 
     function updateSessionWindowMode() {
@@ -822,7 +838,8 @@ ApplicationWindow {
                 window.initializeStartupMode()
                 window.considerStartupLaunch()
                 window.syncInputOwnership()
-                if (window.geometryRestored || !ShellStore.settings.windowWidth)
+                if (window.geometryRestored || !ShellStore.settings.windowWidth
+                        || window.visibility === ApplicationWindow.FullScreen)
                     return
                 const settings = ShellStore.settings
                 const hasPosition = typeof settings.windowX === "number"

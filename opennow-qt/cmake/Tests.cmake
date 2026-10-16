@@ -1687,6 +1687,13 @@ if(BUILD_TESTING)
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
         endforeach()
     endforeach()
+    foreach(surface desktop console)
+        add_test(NAME "qml-steam-launch-${surface}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --${surface} --route home
+                --fullscreen --quit-after-session --smoke-steam-launch --reduced-motion)
+        set_tests_properties("qml-steam-launch-${surface}" PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 10)
+    endforeach()
     add_test(NAME qml-fullscreen-stream-stats-shortcut
              COMMAND opennow-qt --smoke-test --allow-multiple-instances
                      --desktop --route stream --smoke-fullscreen-stats-shortcut --reduced-motion)
