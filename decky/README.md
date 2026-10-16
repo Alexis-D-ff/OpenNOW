@@ -1,27 +1,105 @@
 # OpenNOW for Decky Loader
 
-A [Decky Loader](https://decky.xyz) plugin that runs OpenNOW from Steam Game Mode on the Steam Deck and other SteamOS devices.
+Play GeForce NOW on your Steam Deck from Game Mode. The OpenNOW plugin for [Decky Loader](https://decky.xyz) installs the OpenNOW app for you, adds GeForce NOW games to your Steam library, and starts them with Steam's own Play button.
 
-## What it does
+![A game streaming through OpenNOW in Game Mode](docs/screenshots/in-game.jpg)
 
-- **Quick Access panel.** A slim launcher: whether OpenNOW is ready, running, signed out or has an update; Launch, Return to and Close OpenNOW; and the five most recent games you added, one press each. A Stream settings row shows the current resolution, frame rate and bitrate and opens the full-screen page.
-- **Full-screen page.** Steam's sidebar layout with Add games, Stream (resolution, frame rate, bitrate, codec, HDR, Steam Deck identity, Steam Big Picture mode), Install, Library and About.
-- **Play on OpenNOW.** Adds a button next to Steam's Install/Play button on the library page of every game on GeForce NOW, installed or not. On Steam games the button matches by Steam app ID. On non-Steam shortcuts it matches by title. Pressing the button creates a Steam shortcut for that game and streams it.
-- **Add games.** Searches the public GeForce NOW catalog and adds any game to your Steam library with its artwork. Each shortcut starts OpenNOW with `--launch-app-id`, so the game goes straight into a session.
-- **Install and update.** Installs the official OpenNOW Flatpak from the latest GitHub release. Updates are offered when a newer release exists.
+## Install
 
-Game Mode only shows apps that Steam starts, so the plugin always launches OpenNOW through Steam shortcuts.
+You need a Steam Deck (or another SteamOS device), an internet connection, and a GeForce NOW account. The plugin isn't in the Decky Plugin Store yet, so you install it from a link.
+
+### 1. Install Decky Loader
+
+Skip this step if Decky Loader is already on your Deck.
+
+1. Press the **Steam** button, then choose **Power → Switch to Desktop**.
+2. If you've never set a password for the `deck` user, open **Konsole**, run `passwd` and choose one. The Decky installer asks for it.
+3. Open a web browser, go to [decky.xyz](https://decky.xyz) and download the installer.
+4. Run the downloaded `decky_installer.desktop`. If the browser can't open it, open it from the **Downloads** folder in Dolphin.
+5. Choose the **release** version and enter your password when asked.
+6. Double-click **Return to Gaming Mode** on the desktop.
+
+### 2. Install the OpenNOW plugin
+
+1. Press the **⋯** (Quick Access) button and open the **plug** tab. That's Decky.
+2. Select the **gear** icon to open Decky's settings.
+3. Under **General**, turn on **Developer mode**. A **Developer** tab appears.
+4. Open **Developer**, select **Install Plugin from URL** and enter:
+
+   ```
+   https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip
+   ```
+
+5. Confirm the install. **OpenNOW** now shows up in Decky's plugin list.
+
+This link always points to the newest plugin build.
+
+### 3. Install OpenNOW and sign in
+
+1. Open **⋯ → plug tab → OpenNOW**.
+2. Select **Install OpenNOW** for the stable release, or **Install nightly** for the newest build. The plugin downloads the official Flatpak from GitHub, so you don't need Desktop Mode. You can switch channels later under **Install → Nightly builds**.
+3. Select **Launch OpenNOW** and sign in with your NVIDIA account. After that, the panel shows you as signed in.
+
+![The Install page with the installed version and update check](docs/screenshots/install-page.jpg)
+
+## Use it
+
+### Add games
+
+Open the plugin's full-screen page and choose **Add games**. Search the GeForce NOW catalog, pick the store you own the game on, and select **Add to Library**. The game shows up in your Steam library with its artwork and in an **OpenNOW** collection.
+
+| Search the catalog | Added to your library |
+| --- | --- |
+| ![Searching the GeForce NOW catalog](docs/screenshots/add-games-search.jpg) | ![The game listed under Added to your library](docs/screenshots/add-games-added.jpg) |
+
+| Steam library | OpenNOW collection |
+| --- | --- |
+| ![Added games under Non-Steam](docs/screenshots/steam-library.jpg) | ![The OpenNOW collection](docs/screenshots/opennow-collection.jpg) |
+
+### Play
+
+Press **Play** on a game you added. OpenNOW opens full screen, requests a rig and goes straight into the game. When the session ends, OpenNOW closes and you're back in Steam.
+
+For Steam games that are also on GeForce NOW, the game's page gets a **Play on OpenNOW** button next to Steam's Install or Play button.
+
+| Game page | Starting a session |
+| --- | --- |
+| ![A game's Steam page with Play](docs/screenshots/steam-game-page.jpg) | ![OpenNOW requesting a rig](docs/screenshots/session-starting.jpg) |
+
+### During a session
+
+Press **View** and **Menu** together to open the session menu (OpenNOW 1.0.4 nightlies and later). From there you can take a screenshot, show stats, manage controllers or end the session. The game doesn't receive the button press.
+
+| Session menu | Ending a session |
+| --- | --- |
+| ![The OpenNOW session menu over a game](docs/screenshots/session-menu.jpg) | ![The end-session confirmation](docs/screenshots/end-session.jpg) |
+
+### Stream settings
+
+The **Stream** page sets resolution, frame rate, bitrate, codec and HDR. Under **Device**, **Steam Deck identity** tells GeForce NOW the device is a Steam Deck, which unlocks 90 fps. OpenNOW turns it on automatically the first time it runs on a Deck. Settings are read-only while OpenNOW is running.
+
+| Picture | Device |
+| --- | --- |
+| ![Resolution, frame rate, bitrate and codec](docs/screenshots/stream-settings.jpg) | ![HDR, Steam Deck identity and Steam Big Picture mode](docs/screenshots/stream-device-settings.jpg) |
+
+## Troubleshooting
+
+- **The plugin doesn't appear after installing.** Open Decky's settings and select **Restart Decky** under **General**, or restart the Deck.
+- **OpenNOW asks you to sign in every time.** Update to the newest OpenNOW. On a Steam Deck, OpenNOW saves your sign-in to a file instead of the desktop keyring, which stays locked in Game Mode.
+- **An old version of OpenNOW starts.** Close every OpenNOW window, including any left open in Desktop Mode, then launch it again. The plugin only uses the copies listed under [How it finds OpenNOW](#how-it-finds-opennow).
 
 ## How it finds OpenNOW
 
 The plugin checks these locations in order:
 
-1. A path you chose under **Settings → OpenNOW location**.
+1. A path you chose under **Install → Location**.
 2. The Flatpak `io.github.opencloudgaming.OpenNOW`, user installation first, then system.
 3. The newest `OpenNOW*.AppImage` in `~/Applications`, `~/AppImages`, `~/Downloads`, `~/Desktop`, `~/.local/bin` or `~`.
 4. `/usr/bin/opennow-qt` from the `.deb`.
 
-Stream settings go to the same `settings.json` that the app reads. That file is `~/.var/app/io.github.opencloudgaming.OpenNOW/config/OpenNOW` for the Flatpak and `~/.config/OpenNOW` for other installs. OpenNOW's core owns the file while the app runs, and the plugin detects this through the core's `core.lock` in `/proc/locks`. While the app runs, the settings are read-only in the panel. The plugin writes the file the same way the core does: an atomic replace that keeps a `.bak` copy, and every key the plugin doesn't edit stays untouched.
+Stream settings go to the same `settings.json` that the app reads. That file is `~/.var/app/io.github.opencloudgaming.OpenNOW/config/OpenNOW` for the Flatpak and `~/.config/OpenNOW` for other installs. OpenNOW's core owns the file while the app runs, and the plugin detects this through the core's `core.lock` in `/proc/locks`. The plugin writes the file the same way the core does: an atomic replace that keeps a `.bak` copy, and every key the plugin doesn't edit stays untouched.
+
+Game Mode only shows apps that Steam starts, so the plugin always launches OpenNOW through Steam shortcuts. **Play on OpenNOW** reuses the plugin's OpenNOW shortcut and passes the game to it, so it doesn't add a shortcut per game.
 
 ## Develop
 
@@ -36,5 +114,7 @@ npx pnpm@9 run package   # writes out/OpenNOW.zip
 ```
 
 To install a build on a device, copy `out/OpenNOW.zip` to the device. Then install it from Decky's settings: **Developer → Install plugin from ZIP file**.
+
+Every push to `dev` that changes `decky/` republishes `OpenNOW.zip` to the [`decky-plugin`](https://github.com/OpenCloudGaming/OpenNOW/releases/tag/decky-plugin) prerelease, which is what the install link points to.
 
 The backend lives in `main.py`. Its logic lives in `py_modules/opennow_decky`, which has no Decky dependency, so `tests/` exercises it directly. The frontend in `src/` uses Steam's own components from `@decky/ui`.
