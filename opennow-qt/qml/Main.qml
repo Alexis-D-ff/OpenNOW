@@ -392,13 +392,16 @@ ApplicationWindow {
     function quitIfSessionFinished() {
         if (!QuitAfterSession)
             return
+        if (ShellStore.forceNewAfterStop || ShellStore.launchInspectRequestId !== ""
+                || ShellStore.pendingDirectLaunch) {
+            window.quitAfterSessionArmed = false
+            return
+        }
         if (ShellStore.activeSession) {
             window.quitAfterSessionArmed = true
             return
         }
-        if (window.quitAfterSessionArmed && !ShellStore.streamBusy && !ShellStore.sessionRecoveryPending
-                && !ShellStore.forceNewAfterStop && ShellStore.launchInspectRequestId === ""
-                && !ShellStore.pendingDirectLaunch)
+        if (window.quitAfterSessionArmed && !ShellStore.streamBusy && !ShellStore.sessionRecoveryPending)
             AppController.quitApplication()
     }
 
