@@ -25,7 +25,6 @@ const AUDIO_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const PIPEWIRE_RESTART_INTERVAL: Duration = Duration::from_secs(5);
 const PIPEWIRE_LEAD_MS: usize = 40;
 const PIPEWIRE_NODE_LATENCY: &str = "10ms";
-const PIPEWIRE_PIPE_BYTES: c_int = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioBackend {
@@ -757,7 +756,6 @@ impl PipeWireProcess {
         let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
         if flags < 0
             || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-            || unsafe { libc::fcntl(descriptor, libc::F_SETPIPE_SZ, PIPEWIRE_PIPE_BYTES) } < 0
         {
             return Err(Error::io(Subsystem::PipeWire, io::Error::last_os_error()));
         }
