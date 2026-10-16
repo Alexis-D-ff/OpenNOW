@@ -62,6 +62,22 @@ function confirmEndSession(title: string, okText: string): Promise<boolean> {
   });
 }
 
+function chooseOpenGame(title: string): Promise<"resume" | "restart" | "cancel"> {
+  return new Promise((resolve) => {
+    showModal(
+      <ConfirmModal
+        strTitle={title + " is open in OpenNOW"}
+        strDescription="Go back to it, or start it again. Starting again ends the stream if it's still running."
+        strOKButtonText="Go to OpenNOW"
+        strMiddleButtonText="Start again"
+        onOK={() => resolve("resume")}
+        onMiddleButton={() => resolve("restart")}
+        onCancel={() => resolve("cancel")}
+      />,
+    );
+  });
+}
+
 const EXIT_TIMEOUT_MS = 15000;
 const START_TIMEOUT_MS = 30000;
 
@@ -99,10 +115,14 @@ export async function playOnOpenNOW(game: CatalogGame, variant: CatalogVariant) 
   const launcher = await ensureLauncher();
   await refresh();
   if (steam.isRunning(launcher) && launcherVariantId === variant.id) {
-    steam.launch(launcher);
-    return;
-  }
-  if (!(await endSessionFor(shortcutName(game, variant)))) return;
+    const choice = await chooseOpenGame(game.title);
+    if (choice === "cancel") return;
+    if (choice === "resume") {
+      steam.launch(launcher);
+      return;
+    }
+    await stopOpenNOW();
+  } else if (!(await endSessionFor(shortcutName(game, variant)))) return;
   steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand(variant.id, game.title));
   try {
     steam.launch(launcher);
