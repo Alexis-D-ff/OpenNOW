@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import host
+
 FLATPAK_ID = "io.github.opencloudgaming.OpenNOW"
 NATIVE_PATHS = ("/usr/bin/opennow-qt", "/usr/local/bin/opennow-qt", "/opt/OpenNOW/bin/opennow-qt")
 APPIMAGE_DIRS = ("Applications", "AppImages", "Downloads", "Desktop", ".local/bin", "")
@@ -31,7 +33,7 @@ class Install:
 
 
 def run_quiet(command: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    return host.run(command, timeout=15)
 
 
 def version_key(version: str | None) -> tuple:

@@ -1,8 +1,8 @@
-import subprocess
 from pathlib import Path
 from threading import Event
 from typing import Callable
 
+from . import host
 from .install import FLATPAK_ID
 from .net import open_url, require_host
 
@@ -38,7 +38,7 @@ def download(url: str, destination: Path, size: int, progress: Progress, cancell
 
 
 def run_checked(command: list[str], message: str) -> None:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
+    result = host.run(command, timeout=900)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
         raise InstallError(f"{message}: {detail[-1] if detail else f'exit {result.returncode}'}")
