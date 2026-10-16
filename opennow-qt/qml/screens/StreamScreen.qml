@@ -382,42 +382,6 @@ FocusScope {
     }
 
     GlassPanel {
-        visible: root.videoReady && AppController.overlay === ""
-        layer.enabled: HdrOutput.chromeRequired
-        layer.effect: HdrChromeEffect {}
-        z: 12
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 34
-        width: streamHints.implicitWidth + 34
-        height: 52
-        panelRadius: 26
-        strong: true
-
-        Row {
-            id: streamHints
-            objectName: "streamControlHints"
-            anchors.centerIn: parent
-            spacing: 22
-            SessionGlyphs.Hint { objectName: "streamSessionHint"; prompts: glyphs; button: "GUIDE"; label: qsTr("Session") }
-            SessionGlyphs.Hint {
-                objectName: "streamStatsKeyHint"
-                visible: glyphs.keyboard && button !== ""
-                prompts: glyphs
-                button: String(ShellStore.settings.shortcutToggleStats ?? "Ctrl+N")
-                label: qsTr("Stats")
-            }
-            SessionGlyphs.Hint {
-                objectName: "streamFullscreenKeyHint"
-                visible: glyphs.keyboard && button !== ""
-                prompts: glyphs
-                button: String(ShellStore.settings.shortcutToggleFullscreen ?? "F11")
-                label: qsTr("Fullscreen")
-            }
-        }
-    }
-
-    GlassPanel {
         MotionProgress {
             id: afkMotion
             shown: root.videoReady && ShellStore.antiAfkIndicatorShown(root.elapsedSeconds)

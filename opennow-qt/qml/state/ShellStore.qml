@@ -1823,7 +1823,10 @@ QtObject {
                 || onboardingSaving || onboardingReplaying || onboardingError !== "")
             return
         if (/^[0-9]+$/.test(pendingDirectLaunch.appId)) {
-            if (!signedIn) { AppController.navigate("sign-in"); return }
+            if (!signedIn) {
+                if (!authRestorePending) AppController.navigate("sign-in")
+                return
+            }
             if (ready && directLookupRequestId === "")
                 directLookupRequestId = CoreClient.request("catalog.game.get", {variantId:pendingDirectLaunch.appId}, 30000)
             return
@@ -1852,7 +1855,7 @@ QtObject {
         }
         selectedGame = match
         if (!signedIn) {
-            AppController.navigate("sign-in")
+            if (!authRestorePending) AppController.navigate("sign-in")
             return
         }
         pendingDirectLaunch = null
@@ -3831,6 +3834,7 @@ QtObject {
                 if (CoreClient.state === "failed") {
                     root.lastError = CoreClient.lastError
                     root.authRestorePending = false
+                    root.resolveDirectLaunch()
                 }
             }
         }
@@ -4304,6 +4308,7 @@ QtObject {
                 root.authState = root.authSession ? "signed-in" : "idle"
                 if (code !== "cancelled")
                     root.authMessage = message
+                root.resolveDirectLaunch()
                 if (root.coreSessionRestoreId !== "" && code !== "cancelled")
                     root.handleStreamPollFailure(code, message)
             } else if (requestId === root.deviceStartRequestId

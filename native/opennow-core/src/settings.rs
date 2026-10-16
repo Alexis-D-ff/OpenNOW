@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 const NATIVE_TRANSPORT: &str = "nvst";
 const CONSOLE_POLICY_VERSION: &str = "qtConsoleModePolicyVersion";
+const STEAM_DECK_IDENTITY_POLICY: &str = "steamDeckIdentityDefaultApplied";
+const DMI_DIRECTORY: &str = "/sys/devices/virtual/dmi/id";
 const WINDOWS_GPU_DEVICE_ID: &str = "windowsGpuDeviceId";
 const MAXIMUM_WINDOWS_GPU_DEVICE_ID_BYTES: usize = 1024;
 const MAXIMUM_BOOTSTRAP_SETTINGS_BYTES: u64 = 1024 * 1024;
@@ -164,6 +166,8 @@ impl SettingsStore {
                 .passthrough
                 .insert(CONSOLE_POLICY_VERSION.to_owned(), json!(1));
         }
+        let steam_deck_identity_applied = policy == LoadPolicy::ReadWrite
+            && store.apply_steam_deck_identity_default(is_steam_deck(Path::new(DMI_DIRECTORY)));
         let codec_before_normalize = store.values["codec"].clone();
         let fallback_before_normalize = store.values["fallbackCodec"].clone();
         store.normalize();
@@ -175,7 +179,10 @@ impl SettingsStore {
                 || store.values["fallbackCodec"] != fallback_before_normalize);
         if policy == LoadPolicy::ReadWrite
             && (recovered_backup
-                || ((migrate_console_policy || migrate_onboarding || codec_color_healed)
+                || ((migrate_console_policy
+                    || migrate_onboarding
+                    || codec_color_healed
+                    || steam_deck_identity_applied)
                     && store.path.exists()))
         {
             store.save()?;
@@ -655,6 +662,17 @@ impl SettingsStore {
         }
     }
 
+    fn apply_steam_deck_identity_default(&mut self, on_steam_deck: bool) -> bool {
+        if !on_steam_deck || self.passthrough.contains_key(STEAM_DECK_IDENTITY_POLICY) {
+            return false;
+        }
+        self.values
+            .insert("identifyAsSteamDeck".to_owned(), json!(true));
+        self.passthrough
+            .insert(STEAM_DECK_IDENTITY_POLICY.to_owned(), json!(true));
+        true
+    }
+
     fn save(&self) -> io::Result<()> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
@@ -677,6 +695,12 @@ impl SettingsStore {
         fs::rename(&temporary, &self.path)?;
         Ok(())
     }
+}
+
+fn is_steam_deck(dmi_directory: &Path) -> bool {
+    let read = |name: &str| fs::read_to_string(dmi_directory.join(name)).unwrap_or_default();
+    read("board_vendor").trim() == "Valve"
+        && matches!(read("product_name").trim(), "Jupiter" | "Galileo")
 }
 
 fn read_persisted_settings(path: &Path, policy: LoadPolicy) -> Option<Map<String, Value>> {
@@ -2806,6 +2830,51 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), oversized);
         assert!(!directory.join("settings.json.corrupt").exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn steam_deck_hardware_is_recognised_from_dmi() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dmi = env::temp_dir().join(format!("opennow-core-dmi-{unique}"));
+        fs::create_dir_all(&dmi).unwrap();
+        assert!(!is_steam_deck(&dmi));
+        for (vendor, product, deck) in [
+            ("Valve\n", "Jupiter\n", true),
+            ("Valve\n", "Galileo\n", true),
+            ("Valve\n", "Index\n", false),
+            ("LENOVO\n", "Jupiter\n", false),
+        ] {
+            fs::write(dmi.join("board_vendor"), vendor).unwrap();
+            fs::write(dmi.join("product_name"), product).unwrap();
+            assert_eq!(is_steam_deck(&dmi), deck, "{vendor:?} {product:?}");
+        }
+        let _ = fs::remove_dir_all(dmi);
+    }
+
+    #[test]
+    fn steam_deck_identity_turns_on_once_and_respects_opting_out() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-core-deck-identity-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        store.set("identifyAsSteamDeck", json!(false)).unwrap();
+        assert!(!store.apply_steam_deck_identity_default(false));
+        assert_eq!(store.all()["identifyAsSteamDeck"], json!(false));
+        assert!(store.apply_steam_deck_identity_default(true));
+        assert_eq!(store.all()["identifyAsSteamDeck"], json!(true));
+        store.save().unwrap();
+        let mut reloaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert_eq!(reloaded.all()["identifyAsSteamDeck"], json!(true));
+        reloaded.set("identifyAsSteamDeck", json!(false)).unwrap();
+        let mut reloaded = SettingsStore::load(Some(directory.clone())).unwrap();
+        assert!(!reloaded.apply_steam_deck_identity_default(true));
+        assert_eq!(reloaded.all()["identifyAsSteamDeck"], json!(false));
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

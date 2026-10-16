@@ -142,6 +142,54 @@ private slots:
         QCOMPARE(snapshots.last().at(2).toUInt(), 0u);
     }
 
+    void viewAndMenuOpenTheSessionMenuWithoutReachingTheGame()
+    {
+        ControllerInput input;
+        QSignalSpy snapshots(&input, &ControllerInput::gamepadSnapshot);
+        QSignalSpy localActions(&input, &ControllerInput::localActionRequested);
+        SDL_VirtualJoystickDesc descriptor{};
+        SDL_INIT_INTERFACE(&descriptor);
+        descriptor.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        descriptor.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        descriptor.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        descriptor.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        descriptor.name = "OpenNOW guideless controller";
+        const auto id = SDL_AttachVirtualJoystick(&descriptor);
+        QVERIFY2(id != 0, SDL_GetError());
+        QTRY_COMPARE_WITH_TIMEOUT(input.controllerCount(), 1, 2000);
+        input.setShellCaptureEnabled(false);
+        auto *joystick = SDL_GetJoystickFromID(id);
+        QVERIFY(joystick);
+        const auto press = [joystick](SDL_GamepadButton button, bool down) {
+            QVERIFY(SDL_SetJoystickVirtualButton(joystick, button, down));
+            SDL_UpdateJoysticks();
+        };
+
+        press(SDL_GAMEPAD_BUTTON_START, true);
+        QTRY_VERIFY_WITH_TIMEOUT(snapshots.last().at(2).toUInt() == 0x0010, 1000);
+        QCOMPARE(localActions.size(), 0);
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        QTRY_COMPARE_WITH_TIMEOUT(localActions.size(), 1, 1000);
+        QCOMPARE(localActions.last().at(0).toUInt(), 1u);
+        QCOMPARE(snapshots.last().at(2).toUInt(), 0u);
+
+        press(SDL_GAMEPAD_BUTTON_SOUTH, true);
+        QTRY_VERIFY_WITH_TIMEOUT(snapshots.last().at(2).toUInt() == 0x1000, 1000);
+        press(SDL_GAMEPAD_BUTTON_SOUTH, false);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        press(SDL_GAMEPAD_BUTTON_START, false);
+        QTRY_VERIFY_WITH_TIMEOUT(snapshots.last().at(2).toUInt() == 0u, 1000);
+
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        QTRY_VERIFY_WITH_TIMEOUT(snapshots.last().at(2).toUInt() == 0x0020, 1000);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        QTRY_VERIFY_WITH_TIMEOUT(snapshots.last().at(2).toUInt() == 0u, 1000);
+        QCOMPARE(localActions.size(), 1);
+
+        QVERIFY(SDL_DetachVirtualJoystick(id));
+        QTRY_COMPARE_WITH_TIMEOUT(input.controllerCount(), 0, 2000);
+    }
+
     void idleMetadataDoesNotInvalidateTheUi()
     {
         ControllerInput input;

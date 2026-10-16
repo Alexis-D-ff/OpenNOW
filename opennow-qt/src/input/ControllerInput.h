@@ -176,6 +176,7 @@ private:
         int vibration = 100;
         bool touchpadClick = false;
         bool guideLatched = false;
+        quint16 withheldButtons = 0;
         std::array<SonyContact, 2> contacts{};
         QHash<int, ShellKeyPress> shellKeys;
         std::array<RepeatingDirection, 4> directions{{
