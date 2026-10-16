@@ -15,6 +15,9 @@ Column {
     readonly property var lossHistory: active ? health.history : []
     readonly property var lastLoss: health.lastLoss
     property bool lossNotice: false
+    property bool decoderNotice: false
+    property string decoderNoticeSessionId: ""
+    property real decoderLifetime: 0
     property real controllerLifetime: 0
     property real lossLifetime: 0
     property var colorFormat: ShellStore.streamColorNotice
@@ -32,6 +35,7 @@ Column {
     spacing: 12
     readonly property int pendingNotices: [
         antiAfkNotice,
+        decoderNotice,
         colorNotice,
         hdrNotice,
         bugReportNotice && bugReport !== null,
@@ -60,6 +64,8 @@ Column {
         antiAfkNotice = false
         controllerNotice = null
         lossNotice = false
+        decoderAnimation.stop()
+        decoderNotice = false
         knownControllerIds = controllers.map(controller => controller.instanceId)
     }
 
@@ -97,10 +103,18 @@ Column {
         lossAnimation.restart()
     }
 
+    function observeDecoder() {
+        if (!active || !visible || !health.decoderLimited || decoderNoticeSessionId === sessionId) return
+        decoderNoticeSessionId = sessionId
+        decoderNotice = true
+        decoderAnimation.restart()
+    }
+
     Connections {
         target: root.health
         function onStatusChanged() { root.observeTelemetry() }
         function onSampleAccepted() { root.observeTelemetry() }
+        function onDecoderLimitedChanged() { root.observeDecoder() }
     }
 
     onControllersChanged: observeControllers()
@@ -165,12 +179,13 @@ Column {
         reset()
         if (active) {
             observeTelemetry()
+            observeDecoder()
             observeColorFormat()
             observeHdrDowngrade()
         }
     }
     function syncLifetimeRunning() {
-        for (const animation of [controllerAnimation, lossAnimation, bugReportAnimation,
+        for (const animation of [controllerAnimation, lossAnimation, decoderAnimation, bugReportAnimation,
                 antiAfkAnimation, hdrAnimation, colorAnimation]) {
             if (visible) {
                 if (animation.paused) animation.resume()
@@ -181,6 +196,7 @@ Column {
     }
     onVisibleChanged: {
         syncLifetimeRunning()
+        observeDecoder()
         presentColorNotice()
         presentHdrNotice()
     }
@@ -189,6 +205,7 @@ Column {
         reset()
         if (active) {
             observeTelemetry()
+            observeDecoder()
             observeColorFormat()
             observeHdrDowngrade()
         }
@@ -205,6 +222,12 @@ Column {
         target: root; property: "lossLifetime"
         from: 1; to: 0; duration: 4000
         onFinished: root.lossNotice = false
+    }
+    NumberAnimation {
+        id: decoderAnimation
+        target: root; property: "decoderLifetime"
+        from: 1; to: 0; duration: 8000
+        onFinished: root.decoderNotice = false
     }
     NumberAnimation {
         id: bugReportAnimation
@@ -241,6 +264,16 @@ Column {
             ? qsTr("A short keypress every 4 minutes keeps the session from timing out.")
             : qsTr("GeForce NOW can end the session after a period of inactivity.")
         lifetimeFraction: root.antiAfkLifetime
+    }
+
+    DesktopStreamToast {
+        objectName: "streamDecoderLimitedToast"
+        width: root.width
+        visible: root.active && root.decoderNotice && !ShellStore.streamerStopExpected
+        warning: true
+        title: qsTr("Decoder can't keep up")
+        subtitle: qsTr("This device is dropping frames while decoding. Lower the resolution or frame rate in Settings.")
+        lifetimeFraction: root.decoderLifetime
     }
 
     DesktopStreamToast {
