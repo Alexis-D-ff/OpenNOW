@@ -40,8 +40,12 @@ export async function recreateLauncher() {
   toaster.toast({ title: "OpenNOW", body: "Re-created OpenNOW in your library" });
 }
 
+let launcherVariantId: string | null = null;
+
 export async function launchOpenNOW() {
-  steam.launch(await ensureLauncher());
+  const launcher = await ensureLauncher();
+  if (!steam.isRunning(launcher)) launcherVariantId = null;
+  steam.launch(launcher);
 }
 
 function confirmEndSession(title: string, okText: string): Promise<boolean> {
@@ -94,6 +98,10 @@ export async function launchGame(appId: number, title: string) {
 export async function playOnOpenNOW(game: CatalogGame, variant: CatalogVariant) {
   const launcher = await ensureLauncher();
   await refresh();
+  if (steam.isRunning(launcher) && launcherVariantId === variant.id) {
+    steam.launch(launcher);
+    return;
+  }
   if (!(await endSessionFor(shortcutName(game, variant)))) return;
   steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand(variant.id, game.title));
   try {
@@ -103,6 +111,8 @@ export async function playOnOpenNOW(game: CatalogGame, variant: CatalogVariant) 
   } finally {
     steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand());
   }
+  if (!(await backend.getStatus()).running) throw new Error("OpenNOW didn't start. Try again.");
+  launcherVariantId = variant.id;
 }
 
 export async function closeOpenNOW() {
