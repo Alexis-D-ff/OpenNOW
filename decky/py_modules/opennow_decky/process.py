@@ -1,7 +1,10 @@
+import fcntl
 import os
 import signal
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 LOCK_NAME = "core.lock"
 
@@ -45,6 +48,24 @@ def lock_holder(data_dir: Path, locks_path: str = "/proc/locks", proc: str = "/p
     return None
 
 
+class CoreRunning(RuntimeError):
+    pass
+
+
+@contextmanager
+def core_lock(data_dir: Path) -> Iterator[None]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with open(data_dir / LOCK_NAME, "a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise CoreRunning("Close OpenNOW to change stream settings") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -81,9 +102,23 @@ def stop(pid: int, grace_seconds: float = 5.0, poll_seconds: float = 0.1) -> boo
     return True
 
 
+def released(data_dir: Path, timeout_seconds: float, poll_seconds: float = 0.1) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while lock_holder(data_dir) is not None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_seconds)
+    return True
+
+
 def terminate(data_dir: Path, grace_seconds: float = 5.0) -> bool:
     core = lock_holder(data_dir)
     if core is None:
         return False
     app = parent_pid(core)
-    return stop(app if app and process_name(app).startswith("opennow") else core, grace_seconds)
+    if app and process_name(app).startswith("opennow"):
+        stop(app, grace_seconds)
+        if released(data_dir, grace_seconds):
+            return True
+    stop(core, grace_seconds)
+    return released(data_dir, grace_seconds)

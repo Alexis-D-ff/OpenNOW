@@ -23,6 +23,10 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(releases.summarize(RELEASE, None, "x86_64")["updateAvailable"])
         self.assertEqual(releases.summarize(RELEASE, None, "x86_64")["version"], "1.0.4")
 
+    def test_an_unknown_installed_version_is_reported_rather_than_called_current(self):
+        self.assertFalse(releases.summarize(RELEASE, None, "x86_64")["installedVersionKnown"])
+        self.assertTrue(releases.summarize(RELEASE, "1.0.4", "x86_64")["installedVersionKnown"])
+
 
 if __name__ == "__main__":
     unittest.main()

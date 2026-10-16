@@ -49,10 +49,39 @@ class LockHolderTests(unittest.TestCase):
         locks.write_text(locks.read_text() + f"3: FLOCK  ADVISORY  WRITE 444 {device}:{status.st_ino} 0 EOF\n")
         self.assertEqual(process.lock_holder(self.data_dir, str(locks)), 444)
 
+    def test_core_lock_refuses_while_the_core_holds_it_and_blocks_the_core_while_writing(self):
+        with open(self.data_dir / "core.lock", "w") as core:
+            fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(process.CoreRunning):
+                with process.core_lock(self.data_dir):
+                    pass
+            fcntl.flock(core, fcntl.LOCK_UN)
+            with process.core_lock(self.data_dir):
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_terminate_waits_until_the_lock_is_released(self):
+        lock = self.data_dir / "core.lock"
+        lock.write_text("")
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import fcntl, signal, sys, time\n"
+                                  "signal.signal(signal.SIGTERM, lambda *a: None)\n"
+                                  "handle = open(sys.argv[1]); fcntl.flock(handle, fcntl.LOCK_EX)\n"
+                                  "print('ready', flush=True); time.sleep(60)", str(lock)],
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        child.stdout.readline()
+        self.assertEqual(process.lock_holder(self.data_dir), child.pid)
+        self.assertTrue(process.terminate(self.data_dir, grace_seconds=0.5))
+        self.assertIsNone(process.lock_holder(self.data_dir))
+        child.wait(timeout=5)
+
     def test_stop_escalates_to_sigkill_when_sigterm_is_swallowed(self):
         child = subprocess.Popen([sys.executable, "-c",
                                   "import signal, time; signal.signal(signal.SIGTERM, lambda *a: None); print('ready', flush=True); time.sleep(60)"],
                                  stdout=subprocess.PIPE)
+        self.addCleanup(child.stdout.close)
         child.stdout.readline()
         started = time.monotonic()
         self.assertTrue(process.stop(child.pid, grace_seconds=0.5))

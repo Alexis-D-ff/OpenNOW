@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+from . import process
 from .files import read_json, write_json_atomic
 
 RESOLUTIONS = (
@@ -76,7 +77,8 @@ def validate(key: str, value: Any, persisted: dict[str, Any]) -> Any:
 
 
 def write(data_dir: Path, key: str, value: Any) -> dict[str, Any]:
-    persisted = read_all(data_dir)
-    persisted[key] = validate(key, value, persisted)
-    write_json_atomic(settings_path(data_dir), persisted, keep_backup=True)
-    return read(data_dir)
+    with process.core_lock(data_dir):
+        persisted = read_all(data_dir)
+        persisted[key] = validate(key, value, persisted)
+        write_json_atomic(settings_path(data_dir), persisted, keep_backup=True)
+        return read(data_dir)

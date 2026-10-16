@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import json
 import shlex
 import subprocess
@@ -50,9 +51,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_settings_lock_while_the_core_holds_its_lock(self):
         with mock.patch("opennow_decky.process.lock_holder", return_value=123):
             self.assertTrue((await self.plugin.get_stream_settings())["locked"])
+            self.assertTrue((await self.plugin.get_status())["running"])
+        self.data_dir.mkdir(parents=True)
+        with open(self.data_dir / "core.lock", "w") as core:
+            fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaises(RuntimeError):
                 await self.plugin.set_stream_setting("fps", 90)
-            self.assertTrue((await self.plugin.get_status())["running"])
         self.assertFalse((self.data_dir / "settings.json").exists())
 
     async def test_install_reports_progress_and_completion(self):

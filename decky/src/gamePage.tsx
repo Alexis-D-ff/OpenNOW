@@ -11,7 +11,7 @@ import {
 import { routerHook, toaster } from "@decky/api";
 import { ReactElement, useEffect, useState } from "react";
 import { backend, CatalogMatch } from "./backend";
-import { addGame, launchGame, ownedShortcutIds, storeLabel } from "./opennow";
+import { addGame, launchGame, ownedShortcutIds, shortcutName, storeLabel } from "./opennow";
 import { refresh, store, useSnapshot } from "./store";
 
 const ROUTE = "/library/app/:appid";
@@ -25,7 +25,8 @@ interface PageApp {
 
 async function play(match: CatalogMatch) {
   const existing = store.get().state?.games.find((game) => game.variantId === match.variant.id);
-  await launchGame(existing?.appId ?? (await addGame(match.game, match.variant)));
+  const appId = existing?.appId ?? (await addGame(match.game, match.variant));
+  await launchGame(appId, existing?.title ?? shortcutName(match.game, match.variant));
 }
 
 function PlayOnOpenNOW({ appId, shortcutTitle }: PageApp) {

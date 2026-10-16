@@ -28,5 +28,6 @@ def summarize(release: dict, installed_version: str | None, machine: str | None 
     return {
         "version": version,
         "asset": flatpak_asset(release, machine),
+        "installedVersionKnown": bool(installed_version),
         "updateAvailable": bool(installed_version) and version_key(version) > version_key(installed_version),
     }

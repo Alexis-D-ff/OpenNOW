@@ -11,11 +11,19 @@ import {
 import { openFilePicker, toaster } from "@decky/api";
 import { FileSelectionType } from "@decky/api";
 import { useEffect, useRef, useState } from "react";
-import { backend, CatalogGame, PreferenceKey } from "../backend";
+import { backend, CatalogGame, PreferenceKey, Status } from "../backend";
 import { addGame, launchGame, removeGame, storeLabel, syncShortcuts } from "../opennow";
 import { ROUTE } from "../routes";
 import { refresh, useSnapshot } from "../store";
 import { statusLine } from "./QuickAccess";
+
+function updateDescription(status: Status | null): string | undefined {
+  const release = status?.release;
+  if (!release) return undefined;
+  if (release.updateAvailable) return "OpenNOW " + release.version + " is available";
+  if (status?.install && !release.installedVersionKnown) return "Latest is " + release.version + ". The installed version is unknown.";
+  return "Up to date";
+}
 
 function report(error: unknown) {
   toaster.toast({ title: "OpenNOW", body: error instanceof Error ? error.message : String(error) });
@@ -83,7 +91,7 @@ function YourGames() {
         <Field key={game.appId} label={game.title} description={storeLabel(game.store)}
           icon={game.art ? <img src={game.art} height={48} /> : undefined}>
           <Focusable style={{ display: "flex", gap: 8 }}>
-            <DialogButton style={{ minWidth: 0, width: "auto", padding: "0 16px" }} onClick={() => launchGame(game.appId).catch(report)}>
+            <DialogButton style={{ minWidth: 0, width: "auto", padding: "0 16px" }} onClick={() => launchGame(game.appId, game.title).catch(report)}>
               Play
             </DialogButton>
             <DialogButton style={{ minWidth: 0, width: "auto", padding: "0 16px" }} onClick={() => removeGame(game.appId).catch(report)}>
@@ -119,7 +127,7 @@ function Settings() {
       {install && <Field label="Location" description={install.path} />}
       <ButtonItem
         label="Updates"
-        description={status?.release ? (status.release.updateAvailable ? "OpenNOW " + status.release.version + " is available" : "Up to date") : undefined}
+        description={updateDescription(status)}
         disabled={checking}
         onClick={() => {
           setChecking(true);
@@ -128,6 +136,16 @@ function Settings() {
       >
         {checking ? "Checking…" : "Check now"}
       </ButtonItem>
+      {install?.kind === "flatpak" && status?.release?.asset && !status.release.installedVersionKnown && (
+        <ButtonItem
+          label={"Install OpenNOW " + status.release.version}
+          description="Replaces the installed Flatpak with the latest release"
+          disabled={!!status.installProgress || status.running}
+          onClick={() => backend.installOpenNOW().then(refresh).catch(report)}
+        >
+          Install
+        </ButtonItem>
+      )}
       <ButtonItem
         label="OpenNOW location"
         description={state?.customPath || "Found automatically"}

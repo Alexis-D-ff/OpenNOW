@@ -1,13 +1,11 @@
 import {
   ButtonItem,
-  ConfirmModal,
   DropdownItem,
   Field,
   Navigation,
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
-  showModal,
   SliderField,
   ToggleField,
 } from "@decky/ui";
@@ -157,15 +155,6 @@ export function QuickAccess() {
     const timer = setInterval(refresh, 3000);
     return () => clearInterval(timer);
   }, []);
-  const confirmClose = () =>
-    showModal(
-      <ConfirmModal
-        strTitle="Close OpenNOW?"
-        strDescription="Any game you're streaming will end."
-        strOKButtonText="Close OpenNOW"
-        onOK={() => closeOpenNOW().catch(report)}
-      />,
-    );
   const games = state?.games.slice(0, QUICK_LAUNCH_LIMIT) ?? [];
   return (
     <>
@@ -186,7 +175,7 @@ export function QuickAccess() {
         )}
         {status?.running && (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={confirmClose}>
+            <ButtonItem layout="below" onClick={() => closeOpenNOW().catch(report)}>
               Close OpenNOW
             </ButtonItem>
           </PanelSectionRow>
@@ -196,7 +185,7 @@ export function QuickAccess() {
         <PanelSection title="Quick launch">
           {games.map((game) => (
             <PanelSectionRow key={game.appId}>
-              <ButtonItem layout="below" onClick={() => launchGame(game.appId).catch(report)}>
+              <ButtonItem layout="below" onClick={() => launchGame(game.appId, game.title).catch(report)}>
                 {game.title}
               </ButtonItem>
             </PanelSectionRow>

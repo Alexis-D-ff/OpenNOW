@@ -1,3 +1,4 @@
+import { ConfirmModal, Navigation, showModal } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { backend, CatalogGame, CatalogVariant, PluginState } from "./backend";
 import * as steam from "./steam";
@@ -31,24 +32,48 @@ export async function launchOpenNOW() {
   steam.launch(await ensureLauncher());
 }
 
-export async function launchGame(appId: number) {
+function confirmEndSession(title: string, okText: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    showModal(
+      <ConfirmModal
+        strTitle={title}
+        strDescription="The game you're streaming in OpenNOW will end."
+        strOKButtonText={okText}
+        onOK={() => resolve(true)}
+        onCancel={() => resolve(false)}
+      />,
+    );
+  });
+}
+
+async function stopOpenNOW() {
   const state = store.get().state;
   const running = state ? runningShortcut(state) : null;
-  if (running === appId) return;
-  if (running !== null) {
-    steam.terminate(running);
-  } else if (store.get().status?.running) {
-    await backend.closeOpenNOW();
+  if (running !== null) steam.terminate(running);
+  if (store.get().status?.running && !(await backend.closeOpenNOW())) {
+    await refresh();
+    if (store.get().status?.running) throw new Error("OpenNOW didn't close. Try again.");
+  }
+  await refresh();
+}
+
+export async function launchGame(appId: number, title: string) {
+  await refresh();
+  const state = store.get().state;
+  const running = state ? runningShortcut(state) : null;
+  if (running === appId) {
+    Navigation.CloseSideMenus();
+    return;
+  }
+  if (store.get().status?.running) {
+    if (!(await confirmEndSession("Switch to " + title + "?", "Switch game"))) return;
+    await stopOpenNOW();
   }
   steam.launch(appId);
 }
 
 export async function closeOpenNOW() {
-  const state = store.get().state;
-  const running = state ? runningShortcut(state) : null;
-  if (running !== null) steam.terminate(running);
-  else await backend.closeOpenNOW();
-  await refresh();
+  if (await confirmEndSession("Close OpenNOW?", "Close OpenNOW")) await stopOpenNOW();
 }
 
 export function shortcutName(game: CatalogGame, variant: CatalogVariant): string {

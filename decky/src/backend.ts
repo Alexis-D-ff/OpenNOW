@@ -16,6 +16,7 @@ export interface Install {
 export interface Release {
   version: string;
   asset: { name: string; url: string; size: number } | null;
+  installedVersionKnown: boolean;
   updateAvailable: boolean;
 }
 

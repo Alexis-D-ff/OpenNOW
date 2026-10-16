@@ -127,9 +127,10 @@ class Plugin:
         data_dir = await asyncio.to_thread(self._data_dir)
         if data_dir is None:
             raise RuntimeError("OpenNOW isn't installed")
-        if process.lock_holder(data_dir) is not None:
-            raise RuntimeError("Close OpenNOW to change stream settings")
-        return stream_settings.write(data_dir, key, value)
+        try:
+            return await asyncio.to_thread(stream_settings.write, data_dir, key, value)
+        except process.CoreRunning as error:
+            raise RuntimeError(str(error)) from None
 
     async def search_catalog(self, query: str) -> list[dict]:
         await self._ensure_catalog()
@@ -178,7 +179,7 @@ class Plugin:
                 installed = await asyncio.to_thread(self._install)
                 if installed and installed.revision:
                     self.state.remember_flatpak_version(installed.revision, release["version"])
-                self.release = {**release, "updateAvailable": False}
+                self.release = {**release, "updateAvailable": False, "installedVersionKnown": True}
                 await decky.emit("install_done", True, release["version"])
             except (OSError, ValueError, installer.InstallError) as error:
                 decky.logger.error(f"Install failed: {error}")
