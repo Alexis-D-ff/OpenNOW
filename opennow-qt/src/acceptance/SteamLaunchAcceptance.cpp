@@ -44,19 +44,27 @@ int AcceptanceSession::startSteamLaunchWorkload()
         if (m_qmlWarningOccurred) return fail("QML warning");
         switch (current) {
         case 0:
+            store->setProperty("forceNewAfterStop", true);
             store->setProperty("streamStopRequestId", u"steam-launch-stop"_s);
-            store->setProperty("activeSession", QVariant{});
             return;
         case 1:
-            store->setProperty("forceNewAfterStop", true);
             store->setProperty("streamStopRequestId", QString{});
+            store->setProperty("activeSession", QVariant{});
+            store->setProperty("forceNewAfterStop", false);
             return;
         case 2:
             if (window->visibility() != QWindow::FullScreen) return fail("the window left fullscreen");
-            store->setProperty("activeSession", session(u"steam-launch-replacement"_s));
-            store->setProperty("forceNewAfterStop", false);
+            store->setProperty("launchInspectRequestId", u"steam-launch-inspect"_s);
             return;
         case 3:
+            store->setProperty("launchInspectRequestId", QString{});
+            store->setProperty("streamCreateRequestId", u"steam-launch-create"_s);
+            return;
+        case 4:
+            store->setProperty("streamCreateRequestId", QString{});
+            store->setProperty("activeSession", session(u"steam-launch-replacement"_s));
+            return;
+        case 5:
             *quitExpected = true;
             store->setProperty("activeSession", QVariant{});
             return;
