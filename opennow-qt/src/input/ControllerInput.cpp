@@ -532,6 +532,7 @@ void ControllerInput::updateShellInputDrain()
 void ControllerInput::setInputSuspended(bool suspended)
 {
     if (m_inputSuspended == suspended) return;
+    cancelChordReplays();
     if (suspended) {
         stopRumble();
         publishConnectedInputs(true);
@@ -552,6 +553,7 @@ void ControllerInput::setInputSuspended(bool suspended)
 void ControllerInput::setShellCaptureEnabled(bool enabled)
 {
     if (m_shellCaptureEnabled == enabled) return;
+    cancelChordReplays();
     if (enabled) {
         stopRumble();
         publishConnectedInputs(true);
@@ -570,6 +572,14 @@ void ControllerInput::setShellCaptureEnabled(bool enabled)
     }
     updatePollInterval();
     emit shellCaptureEnabledChanged();
+}
+
+void ControllerInput::cancelChordReplays()
+{
+    for (auto &slot : m_slots) {
+        slot.chordDeadline = 0;
+        slot.tappedButtons = 0;
+    }
 }
 
 void ControllerInput::poll()
@@ -735,8 +745,13 @@ void ControllerInput::handleButton(const SDL_GamepadButtonEvent &event, bool pre
         const bool chordButton = (mask & sessionChordButtons) != 0;
         if (pressed) {
             slot.buttons |= mask;
-            slot.tappedButtons &= static_cast<quint16>(~mask);
+            if (chordButton && slot.tappedButtons != 0) {
+                slot.tappedButtons = 0;
+                if (!m_shellCaptureEnabled) publishSlotSnapshot(slotIndex);
+            }
             if (chordButton && slot.chordDeadline != 0
+                    && event.timestamp - slot.chordStartedNs
+                        <= static_cast<quint64>(sessionChordWindowMs) * 1'000'000
                     && (slot.buttons & sessionChordButtons) == sessionChordButtons) {
                 slot.chordDeadline = 0;
                 slot.withheldButtons |= sessionChordButtons;
@@ -745,13 +760,16 @@ void ControllerInput::handleButton(const SDL_GamepadButtonEvent &event, bool pre
             } else if (chordButton && (slot.buttons & sessionChordButtons) == mask) {
                 slot.withheldButtons |= mask;
                 slot.chordDeadline = now + sessionChordWindowMs;
+                slot.chordStartedNs = event.timestamp;
             }
         } else {
             slot.buttons &= static_cast<quint16>(~mask);
             if (slot.chordDeadline != 0 && (slot.withheldButtons & mask) != 0) {
                 slot.chordDeadline = 0;
-                slot.tappedButtons |= mask;
-                slot.tapReleaseAt = now + sessionChordWindowMs;
+                if (!m_shellCaptureEnabled && !m_inputSuspended) {
+                    slot.tappedButtons = mask;
+                    slot.tapReleaseAt = now + sessionChordWindowMs;
+                }
             }
             slot.withheldButtons &= static_cast<quint16>(~mask);
         }

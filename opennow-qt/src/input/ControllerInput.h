@@ -179,6 +179,7 @@ private:
         quint16 withheldButtons = 0;
         quint16 tappedButtons = 0;
         qint64 chordDeadline = 0;
+        quint64 chordStartedNs = 0;
         qint64 tapReleaseAt = 0;
         [[nodiscard]] quint16 forwardedButtons() const
         {
@@ -202,6 +203,7 @@ private:
     void publishConnectedInputs(bool neutral = false);
     void publishSlotSnapshot(int slotIndex, bool neutral = false);
     void releaseSonyContacts(int slotIndex);
+    void cancelChordReplays();
     [[nodiscard]] int effectiveSlot(int slotIndex) const;
     bool updateDirection(RepeatingDirection &direction, bool active);
     void reportActivity(int slot, const QString &control, int value);
