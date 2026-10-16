@@ -30,6 +30,22 @@ Column {
     property real antiAfkLifetime: 0
     width: Math.min(384, parent ? Math.max(0, parent.width - 48) : 384)
     spacing: 12
+    readonly property int pendingNotices: [
+        antiAfkNotice,
+        colorNotice,
+        hdrNotice,
+        bugReportNotice && bugReport !== null,
+        connectionNotificationsEnabled && controllerNotice !== null,
+        connectionNotificationsEnabled && lossNotice
+    ].filter(pending => pending).length
+    readonly property real tallestNotice: {
+        let tallest = 0
+        for (let index = 0; index < children.length; ++index)
+            tallest = Math.max(tallest, children[index].height)
+        return tallest
+    }
+    readonly property real stackHeight: pendingNotices === 0 ? 0
+        : pendingNotices * tallestNotice + spacing * (pendingNotices - 1)
 
     function reset() {
         controllerAnimation.stop()
@@ -90,15 +106,26 @@ Column {
     function observeColorFormat() {
         if (!active || !colorFormat || colorFormat.sessionId !== sessionId
                 || ShellStore.streamColorNoticeShown || ShellStore.streamerStopExpected) return
-        ShellStore.streamColorNoticeShown = true
         colorNotice = true
+        presentColorNotice()
+    }
+
+    function presentColorNotice() {
+        if (!visible || !colorNotice || ShellStore.streamColorNoticeShown) return
+        ShellStore.streamColorNoticeShown = true
         colorAnimation.restart()
     }
 
     function observeHdrDowngrade() {
         if (!active || !hdrDowngrade || hdrDowngrade.sessionId !== sessionId
-                || ShellStore.streamerStopExpected || !ShellStore.claimHdrNotice(hdrDowngrade)) return
+                || ShellStore.streamerStopExpected || ShellStore.streamHdrNoticeShown) return
         hdrNotice = true
+        presentHdrNotice()
+    }
+
+    function presentHdrNotice() {
+        if (!visible || !hdrNotice || ShellStore.streamHdrNoticeShown) return
+        ShellStore.claimHdrNotice(hdrDowngrade)
         hdrAnimation.restart()
     }
 
@@ -137,6 +164,10 @@ Column {
             observeColorFormat()
             observeHdrDowngrade()
         }
+    }
+    onVisibleChanged: {
+        presentColorNotice()
+        presentHdrNotice()
     }
     onSessionIdChanged: reset()
     Component.onCompleted: {

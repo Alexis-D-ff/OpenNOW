@@ -869,6 +869,8 @@ if(BUILD_TESTING)
         set_tests_properties("qml-color-format-menu-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
+    qt_add_resources(opennow-qt "stream-toast-pending-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/StreamToastPendingAcceptance.qml)
     qt_add_resources(opennow-qt "hdr-downgrade-acceptance"
         PREFIX "/acceptance" BASE tests FILES tests/HdrDowngradeAcceptance.qml)
     foreach(mode windowed fullscreen)
@@ -882,6 +884,13 @@ if(BUILD_TESTING)
         set_tests_properties("qml-hdr-downgrade-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
+    add_test(NAME "qml-stream-toast-pending-stats-overlay"
+        COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+            --route stream --smoke-stream-toast-pending
+            --overlay desktop-stream-stats-expanded
+            --smoke-width 960 --smoke-height 540 --reduced-motion)
+    set_tests_properties("qml-stream-toast-pending-stats-overlay" PROPERTIES
+        ENVIRONMENT "${color_format_environment}" TIMEOUT 30)
     foreach(minimum_fixture color-format hdr-downgrade)
         add_test(NAME "qml-${minimum_fixture}-minimum-stats-overlay"
             COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop

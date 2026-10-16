@@ -719,6 +719,7 @@ int AcceptanceSession::startSmokeWorkload()
                      || m_arguments.contains(u"--smoke-queue-drops"_s)
                      || m_arguments.contains(u"--smoke-color-format"_s)
                      || m_arguments.contains(u"--smoke-hdr-downgrade"_s)
+                     || m_arguments.contains(u"--smoke-stream-toast-pending"_s)
                      || m_arguments.contains(u"--smoke-stream-recovery"_s))) {
         QQmlComponent component(&m_engine, QUrl(m_arguments.contains(u"--smoke-library-error"_s)
             ? u"qrc:/acceptance/LibraryErrorAcceptance.qml"_s
@@ -734,6 +735,8 @@ int AcceptanceSession::startSmokeWorkload()
             ? u"qrc:/acceptance/ColorFormatAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-hdr-downgrade"_s)
             ? u"qrc:/acceptance/HdrDowngradeAcceptance.qml"_s
+            : m_arguments.contains(u"--smoke-stream-toast-pending"_s)
+            ? u"qrc:/acceptance/StreamToastPendingAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-ownership"_s)
             ? u"qrc:/acceptance/OwnershipAcceptance.qml"_s
             : m_arguments.contains(u"--smoke-game-labels"_s)
@@ -877,6 +880,7 @@ int AcceptanceSession::startSmokeWorkload()
                 });
             }
             if (ok && (m_arguments.contains(u"--smoke-command-search"_s)
+                       || m_arguments.contains(u"--smoke-stream-toast-pending"_s)
                        || m_arguments.contains(u"--smoke-stream-controllers"_s)
                        || m_arguments.contains(u"--smoke-flight-controls"_s)
                        || m_arguments.contains(u"--smoke-shortcuts"_s)

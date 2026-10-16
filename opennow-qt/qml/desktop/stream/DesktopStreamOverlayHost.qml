@@ -87,6 +87,7 @@ FocusScope {
     }
 
     DesktopStreamToasts {
+        id: toasts
         connectionNotificationsEnabled: root.connectionNotificationsEnabled
         controllers: ControllerInput.controllers
         anchors.right: parent.right
@@ -94,7 +95,7 @@ FocusScope {
         y: statsView.topRightInset
         active: root.notificationsEnabled && !root.inputBlocking
             && telemetry.status === "streaming"
-        visible: active && y + implicitHeight <= root.height - 24
+        visible: active && y + stackHeight <= root.height - 24
     }
 
     Keys.onPressed: event => {
