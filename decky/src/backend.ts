@@ -2,7 +2,7 @@ import { callable } from "@decky/api";
 
 export type InstallKind = "flatpak" | "appimage" | "native" | "custom";
 export type Codec = "auto" | "av1" | "h265" | "h264";
-export type PreferenceKey = "consoleLayout" | "collection" | "gamePageButton";
+export type PreferenceKey = "consoleLayout" | "collection" | "gamePageButton" | "nightlyChannel";
 
 export interface Install {
   kind: InstallKind;
@@ -116,7 +116,7 @@ export const backend = {
   gamePageMatches: callable<[steamAppId: number, shortcutTitle: string], CatalogMatch[]>("game_page_matches"),
   artwork: callable<[url: string], { data: string; type: "png" | "jpg" }>("artwork"),
   checkUpdate: callable<[], Release>("check_update"),
-  installOpenNOW: callable<[], boolean>("install_opennow"),
+  installOpenNOW: callable<[nightly?: boolean], boolean>("install_opennow"),
   cancelInstall: callable<[], boolean>("cancel_install"),
   closeOpenNOW: callable<[], boolean>("close_opennow"),
 };

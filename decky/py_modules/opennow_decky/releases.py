@@ -4,11 +4,25 @@ from .install import version_key
 from .net import http_json
 
 LATEST_RELEASE = "https://api.github.com/repos/OpenCloudGaming/OpenNOW/releases/latest"
+RECENT_RELEASES = "https://api.github.com/repos/OpenCloudGaming/OpenNOW/releases?per_page=30"
 ARCHITECTURES = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}
+GITHUB_JSON = {"Accept": "application/vnd.github+json"}
 
 
-def fetch_latest(timeout: float = 20) -> dict:
-    return http_json(LATEST_RELEASE, headers={"Accept": "application/vnd.github+json"}, timeout=timeout)
+def fetch_latest(nightly: bool = False, timeout: float = 20) -> dict:
+    if not nightly:
+        return http_json(LATEST_RELEASE, headers=GITHUB_JSON, timeout=timeout)
+    release = latest_nightly(http_json(RECENT_RELEASES, headers=GITHUB_JSON, timeout=timeout))
+    if not release:
+        raise ValueError("No nightly with a Flatpak for this device has been published")
+    return release
+
+
+def latest_nightly(releases: list, machine: str | None = None) -> dict | None:
+    return next((release for release in releases
+                 if release.get("prerelease") and not release.get("draft")
+                 and "-nightly." in (release.get("tag_name") or "")
+                 and flatpak_asset(release, machine)), None)
 
 
 def flatpak_asset(release: dict, machine: str | None = None) -> dict | None:

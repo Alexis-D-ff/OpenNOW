@@ -354,6 +354,17 @@ function Install() {
             <FaRedo size={12} /> {checking ? "Checking…" : "Check now"}
           </DialogButton>
         </Field>
+        <ToggleField
+          label="Nightly builds"
+          description="Installs and updates to the newest nightly from the dev branch instead of the stable release."
+          checked={state?.preferences.nightlyChannel ?? false}
+          disabled={checking || !!status.installProgress}
+          onChange={(value) => {
+            setChecking(true);
+            backend.setPreference("nightlyChannel", value).then(() => backend.checkUpdate()).then(refresh).catch(report)
+              .finally(() => setChecking(false));
+          }}
+        />
       </Section>
     </>
   );

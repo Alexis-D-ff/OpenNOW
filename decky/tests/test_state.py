@@ -36,7 +36,8 @@ class PluginStateTests(unittest.TestCase):
         }))
         state = self.make().to_dict()
         self.assertEqual((state["customPath"], state["launcherAppId"], state["games"]), ("", None, []))
-        self.assertEqual(state["preferences"], {"consoleLayout": True, "collection": False, "gamePageButton": True})
+        self.assertEqual(state["preferences"], {"consoleLayout": True, "collection": False, "gamePageButton": True,
+                                                 "nightlyChannel": False})
 
     def test_unknown_preferences_and_bad_games_are_refused(self):
         state = self.make()
