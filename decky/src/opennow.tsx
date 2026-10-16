@@ -1,4 +1,4 @@
-import { ConfirmModal, Navigation, showModal } from "@decky/ui";
+import { ConfirmModal, Navigation, showModal, sleep } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { backend, CatalogGame, CatalogVariant, PluginState } from "./backend";
 import * as steam from "./steam";
@@ -98,7 +98,8 @@ export async function playOnOpenNOW(game: CatalogGame, variant: CatalogVariant) 
   steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand(variant.id, game.title));
   try {
     steam.launch(launcher);
-    await steam.waitForStart(launcher, START_TIMEOUT_MS);
+    const deadline = Date.now() + START_TIMEOUT_MS;
+    while (Date.now() < deadline && !(await backend.getStatus()).running) await sleep(1000);
   } finally {
     steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand());
   }

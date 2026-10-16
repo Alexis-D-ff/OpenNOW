@@ -36,7 +36,7 @@ export function applyLaunchCommand(appId: number, name: string, command: LaunchC
   SteamClient.Apps.SetShortcutName(appId, name);
   SteamClient.Apps.SetShortcutExe(appId, command.exe);
   SteamClient.Apps.SetShortcutStartDir(appId, command.startDir);
-  SteamClient.Apps.SetAppLaunchOptions(appId, command.options);
+  SteamClient.Apps.SetShortcutLaunchOptions(appId, command.options);
 }
 
 export async function createShortcut(name: string, command: LaunchCommand): Promise<number> {
@@ -92,10 +92,6 @@ export function launch(appId: number) {
 export function terminate(appId: number) {
   const app = overview(appId);
   if (app) SteamClient.Apps.TerminateApp(app.gameid, false);
-}
-
-export async function waitForStart(appId: number, timeoutMs: number): Promise<boolean> {
-  return waitFor(() => isRunning(appId), Math.ceil(timeoutMs / 200), 200);
 }
 
 export async function waitForExit(appId: number, timeoutMs: number): Promise<boolean> {
