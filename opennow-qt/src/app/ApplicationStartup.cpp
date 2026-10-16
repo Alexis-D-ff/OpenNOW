@@ -288,6 +288,8 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
         u"LaunchModeOverride"_s,
         arguments.contains(u"--desktop"_s) ? u"desktop"_s
             : arguments.contains(u"--console"_s) ? u"console"_s : QString{});
+    engine.rootContext()->setContextProperty(
+        u"QuitAfterSession"_s, arguments.contains(u"--quit-after-session"_s));
     acceptance.configureContext();
     QObject::connect(&localization, &Localization::localeChanged,
                      &engine, &QQmlApplicationEngine::retranslate);
@@ -316,7 +318,8 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
     }
 #endif
     if (acceptance.prepareWindow() != EXIT_SUCCESS) return EXIT_FAILURE;
-    if (rootWindow && !rootWindow->isVisible()) rootWindow->show();
+    if (rootWindow && arguments.contains(u"--fullscreen"_s)) rootWindow->showFullScreen();
+    else if (rootWindow && !rootWindow->isVisible()) rootWindow->show();
     const auto qmlReadyMs = startupTimer.elapsed();
     controller.handleArguments(arguments);
     QObject::connect(&controller, &AppController::activationRequested,

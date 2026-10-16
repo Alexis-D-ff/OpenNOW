@@ -408,6 +408,8 @@ int AcceptanceSession::startSmokeWorkload()
         return startConsoleSessionWorkload();
     if (m_smokeTest && m_arguments.contains(u"--smoke-session-fullscreen"_s))
         return startSessionFullscreenWorkload();
+    if (m_smokeTest && m_arguments.contains(u"--smoke-steam-launch"_s))
+        return startSteamLaunchWorkload();
     if (m_smokeTest && m_arguments.contains(u"--smoke-stream-exit"_s))
         return startStreamExitWorkload();
     if (m_smokeTest && m_arguments.contains(u"--smoke-frame-generation-stats"_s))

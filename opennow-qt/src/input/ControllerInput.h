@@ -176,6 +176,15 @@ private:
         int vibration = 100;
         bool touchpadClick = false;
         bool guideLatched = false;
+        quint16 withheldButtons = 0;
+        quint16 tappedButtons = 0;
+        qint64 chordDeadline = 0;
+        quint64 chordStartedNs = 0;
+        qint64 tapReleaseAt = 0;
+        [[nodiscard]] quint16 forwardedButtons() const
+        {
+            return static_cast<quint16>((buttons | tappedButtons) & ~withheldButtons);
+        }
         std::array<SonyContact, 2> contacts{};
         QHash<int, ShellKeyPress> shellKeys;
         std::array<RepeatingDirection, 4> directions{{
@@ -194,6 +203,7 @@ private:
     void publishConnectedInputs(bool neutral = false);
     void publishSlotSnapshot(int slotIndex, bool neutral = false);
     void releaseSonyContacts(int slotIndex);
+    void cancelChordReplays();
     [[nodiscard]] int effectiveSlot(int slotIndex) const;
     bool updateDirection(RepeatingDirection &direction, bool active);
     void reportActivity(int slot, const QString &control, int value);

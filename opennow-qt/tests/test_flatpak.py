@@ -159,6 +159,10 @@ class FlatpakTests(unittest.TestCase):
         self.assertFalse({"--filesystem=host", "--filesystem=home",
                           "--socket=session-bus", "--socket=system-bus"} & permissions)
 
+    def test_platform_selection_ignores_host_qt_qpa_platform(self):
+        manifest = json.loads((PACKAGING / "io.github.opencloudgaming.OpenNOW.json").read_text())
+        self.assertIn("--env=QT_QPA_PLATFORM=wayland;xcb", manifest["finish-args"])
+
     def test_vendor_uses_both_lockfiles_and_sandbox_relative_sources(self):
         config = '[source.crates-io]\nreplace-with = "vendored-sources"\n' \
                  '[source.vendored-sources]\ndirectory = "vendor"\n'
