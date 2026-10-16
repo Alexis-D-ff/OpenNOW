@@ -209,6 +209,20 @@ private slots:
         for (const auto &snapshot : snapshots)
             QVERIFY((snapshot.at(2).toUInt() & 0x0030) != 0x0030);
 
+        snapshots.clear();
+        press(SDL_GAMEPAD_BUTTON_BACK, true);
+        press(SDL_GAMEPAD_BUTTON_BACK, false);
+        press(SDL_GAMEPAD_BUTTON_START, true);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0x0010, 1000);
+        bool startForwarded = false;
+        for (const auto &snapshot : snapshots) {
+            const bool start = (snapshot.at(2).toUInt() & 0x0010) != 0;
+            QVERIFY(start || !startForwarded);
+            startForwarded = startForwarded || start;
+        }
+        press(SDL_GAMEPAD_BUTTON_START, false);
+        QTRY_VERIFY_WITH_TIMEOUT(lastButtons() == 0u, 1000);
+
         input.setShellCaptureEnabled(true);
         press(SDL_GAMEPAD_BUTTON_BACK, true);
         press(SDL_GAMEPAD_BUTTON_BACK, false);

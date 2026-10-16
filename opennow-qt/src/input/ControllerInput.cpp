@@ -744,11 +744,11 @@ void ControllerInput::handleButton(const SDL_GamepadButtonEvent &event, bool pre
         const auto now = m_clock.elapsed();
         const bool chordButton = (mask & sessionChordButtons) != 0;
         if (pressed) {
-            slot.buttons |= mask;
             if (chordButton && slot.tappedButtons != 0) {
                 slot.tappedButtons = 0;
                 if (!m_shellCaptureEnabled) publishSlotSnapshot(slotIndex);
             }
+            slot.buttons |= mask;
             if (chordButton && slot.chordDeadline != 0
                     && event.timestamp - slot.chordStartedNs
                         <= static_cast<quint64>(sessionChordWindowMs) * 1'000'000
