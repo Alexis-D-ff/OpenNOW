@@ -1,17 +1,16 @@
 import {
   afterPatch,
-  appDetailsClasses,
   createReactTreePatcher,
   DialogButton,
+  findClassModule,
   findInReactTree,
   Menu,
   MenuItem,
-  playSectionClasses,
   showContextMenu,
   SteamSpinner,
 } from "@decky/ui";
 import { routerHook, toaster } from "@decky/api";
-import { ReactElement, useEffect, useState, useSyncExternalStore } from "react";
+import { ReactElement, useEffect, useState } from "react";
 import { FaCloud } from "react-icons/fa";
 import { backend, CatalogMatch } from "./backend";
 import { errorText } from "./format";
@@ -29,10 +28,11 @@ const STYLE = `
   display: flex !important;
   align-items: center;
   gap: 14px;
-  min-height: 60px;
-  min-width: 240px !important;
+  align-self: stretch;
+  min-height: 0;
+  min-width: 220px !important;
   width: auto !important;
-  margin: 0 0 0 12px !important;
+  margin: 0 0 0 16px !important;
   padding: 0 20px !important;
   border-radius: 2px !important;
   text-align: left;
@@ -40,33 +40,14 @@ const STYLE = `
   overflow: hidden;
 }
 .opennow-play .opennow-play-text { display: flex; flex-direction: column; line-height: 1.15; }
-.opennow-play .opennow-play-title { font-size: 18px; font-weight: 500; }
-.opennow-play .opennow-play-detail { font-size: 13px; opacity: 0.75; }
+.opennow-play .opennow-play-title { font-size: 16px; font-weight: 500; }
+.opennow-play .opennow-play-detail { font-size: 12px; opacity: 0.75; }
 .opennow-play .opennow-play-progress { position: absolute; left: 0; bottom: 0; height: 5px; background: #1a9fff; }
 `;
 
 interface PageApp {
   appId: number;
   shortcutTitle: string;
-}
-
-const inPlayBar = new Set<number>();
-const playBarListeners = new Set<() => void>();
-
-function setInPlayBar(appId: number, present: boolean) {
-  if (present) inPlayBar.add(appId);
-  else inPlayBar.delete(appId);
-  playBarListeners.forEach((listener) => listener());
-}
-
-function useInPlayBar(appId: number): boolean {
-  return useSyncExternalStore(
-    (listener) => {
-      playBarListeners.add(listener);
-      return () => playBarListeners.delete(listener);
-    },
-    () => inPlayBar.has(appId),
-  );
 }
 
 async function play(match: CatalogMatch) {
@@ -91,17 +72,10 @@ function detailLabel(matches: CatalogMatch[], busy: boolean, installed: boolean,
   return storeLabel(matches[0].variant.store) + " version";
 }
 
-function PlayOnOpenNOW({ appId, shortcutTitle, placement }: PageApp & { placement: "bar" | "row" }) {
+function PlayOnOpenNOW({ appId, shortcutTitle }: PageApp) {
   const matches = useMatches(appId, shortcutTitle);
   const [busy, setBusy] = useState(false);
   const { status, state } = useSnapshot();
-  const inBar = useInPlayBar(appId);
-  useEffect(() => {
-    if (placement !== "bar") return;
-    setInPlayBar(appId, true);
-    return () => setInPlayBar(appId, false);
-  }, [appId, placement]);
-  if (placement === "row" && inBar) return null;
   if (!matches.length || !state?.preferences.gamePageButton || ownedShortcutIds(state).includes(appId)) return null;
   const run = (task: () => Promise<unknown>) => {
     setBusy(true);
@@ -138,7 +112,7 @@ function PlayOnOpenNOW({ appId, shortcutTitle, placement }: PageApp & { placemen
       (event.currentTarget as EventTarget | null) ?? window,
     );
   };
-  const button = (
+  return (
     <DialogButton className="opennow-play" disabled={busy || !!progress} onClick={onClick} style={{ position: "relative" }}>
       <style>{STYLE}</style>
       {busy ? <SteamSpinner style={{ width: 22, height: 22, minHeight: 0, background: "none" }} /> : <FaCloud size={22} />}
@@ -149,8 +123,6 @@ function PlayOnOpenNOW({ appId, shortcutTitle, placement }: PageApp & { placemen
       {progress?.phase === "download" && <span className="opennow-play-progress" style={{ width: progress.fraction * 100 + "%" }} />}
     </DialogButton>
   );
-  if (placement === "bar") return button;
-  return <div style={{ padding: "0 2.8vw", marginTop: 16, display: "flex" }}>{button}</div>;
 }
 
 function pageApp(overview: any): PageApp | undefined {
@@ -166,40 +138,36 @@ function hasClass(node: any, className: string): boolean {
   return typeof node?.props?.className === "string" && node.props.className.split(" ").includes(className);
 }
 
-function insertOnce(children: unknown, element: ReactElement, index: (list: any[]) => number) {
-  if (!Array.isArray(children) || children.some((child: any) => child?.key === BUTTON_KEY)) return;
-  const at = index(children);
-  children.splice(at < 0 ? children.length : at, 0, element);
+function rendersClass(node: any, key: string): boolean {
+  return typeof node?.type?.render === "function" && node.type.render.toString().includes("." + key + ",");
 }
 
 export function patchGamePage(): () => void {
+  const actionRow = findClassModule((module: any) => module.ActionRow && module.AppButtons && module.PlaySection)?.ActionRow;
+  if (!actionRow) return () => {};
+  const sectionsPatcher = createReactTreePatcher([
+    (section: any) => section,
+    (rendered: any) => findInReactTree(rendered, (node: any) => rendersClass(node, "PlaySection")),
+    (rendered: any) => findInReactTree(rendered, (node: any) => rendersClass(node, "ActionRow")),
+  ], ([props]: any[], rendered?: ReactElement) => {
+    const app = pageApp(props?.overview);
+    const row = app && findInReactTree(rendered, (node: any) => Array.isArray(node?.props?.children) && hasClass(node, actionRow));
+    if (!row || row.props.children.some((child: any) => child?.key === BUTTON_KEY)) return rendered;
+    row.props.children.splice(1, 0, <PlayOnOpenNOW key={BUTTON_KEY} {...app} />);
+    return rendered;
+  }, "OpenNOW play bar");
   const patch = routerHook.addPatch(ROUTE, (tree: any) => {
     const routeProps = findInReactTree(tree, (node: any) => node?.renderFunc);
     if (!routeProps) return tree;
-    let app: PageApp | undefined;
-    const patcher = createReactTreePatcher([
-      (inner: any) => {
-        const children = findInReactTree(inner, (node: any) => node?.props?.children?.props?.overview)?.props?.children;
-        app = pageApp(children?.props?.overview);
-        return children;
-      },
-      (rendered: any) => {
-        if (!app) return null;
-        const container = findInReactTree(rendered, (node: any) =>
-          Array.isArray(node?.props?.children) && hasClass(node, appDetailsClasses.InnerContainer));
-        if (container) {
-          insertOnce(container.props.children, <PlayOnOpenNOW key={BUTTON_KEY} {...app} placement="row" />, (children) =>
-            children.findIndex((child: any) => child?.props?.overview && child?.props?.onShowLaunchingDetails) + 1);
-        }
-        return findInReactTree(rendered, (node: any) => node?.props?.overview && node?.props?.onShowLaunchingDetails);
-      },
-    ], (_: unknown, rendered?: ReactElement) => {
-      if (!app) return rendered;
-      const buttons = findInReactTree(rendered, (node: any) => hasClass(node, playSectionClasses.AppButtonsContainer));
-      if (buttons) insertOnce(buttons.props.children, <PlayOnOpenNOW key={BUTTON_KEY} {...app} placement="bar" />, () => 1);
+    afterPatch(routeProps, "renderFunc", (_: unknown, rendered: any) => {
+      const sections = findInReactTree(rendered, (node: any) =>
+        typeof node?.props?.value === "function" && node?.props?.children?.props?.overview);
+      if (!sections) return rendered;
+      const section = { type: sections.props.value };
+      sectionsPatcher([], section);
+      sections.props.value = section.type;
       return rendered;
-    }, "OpenNOW game page");
-    afterPatch(routeProps, "renderFunc", patcher);
+    });
     return tree;
   });
   return () => routerHook.removePatch(ROUTE, patch);
