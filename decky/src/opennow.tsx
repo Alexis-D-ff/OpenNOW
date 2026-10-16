@@ -59,6 +59,7 @@ function confirmEndSession(title: string, okText: string): Promise<boolean> {
 }
 
 const EXIT_TIMEOUT_MS = 15000;
+const START_TIMEOUT_MS = 30000;
 
 async function stopOpenNOW() {
   const state = store.get().state;
@@ -72,19 +73,35 @@ async function stopOpenNOW() {
   if (store.get().status?.running) throw new Error("OpenNOW didn't close. Try again.");
 }
 
+async function endSessionFor(title: string): Promise<boolean> {
+  const state = store.get().state;
+  if ((state ? runningShortcut(state) : null) === null && !store.get().status?.running) return true;
+  if (!(await confirmEndSession("Switch to " + title + "?", "Switch game"))) return false;
+  await stopOpenNOW();
+  return true;
+}
+
 export async function launchGame(appId: number, title: string) {
   await refresh();
   const state = store.get().state;
-  const running = state ? runningShortcut(state) : null;
-  if (running === appId) {
+  if (state && runningShortcut(state) === appId) {
     Navigation.CloseSideMenus();
     return;
   }
-  if (running !== null || store.get().status?.running) {
-    if (!(await confirmEndSession("Switch to " + title + "?", "Switch game"))) return;
-    await stopOpenNOW();
+  if (await endSessionFor(title)) steam.launch(appId);
+}
+
+export async function playOnOpenNOW(game: CatalogGame, variant: CatalogVariant) {
+  const launcher = await ensureLauncher();
+  await refresh();
+  if (!(await endSessionFor(shortcutName(game, variant)))) return;
+  steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand(variant.id, game.title));
+  try {
+    steam.launch(launcher);
+    await steam.waitForStart(launcher, START_TIMEOUT_MS);
+  } finally {
+    steam.applyLaunchCommand(launcher, LAUNCHER_NAME, await backend.launchCommand());
   }
-  steam.launch(appId);
 }
 
 export async function closeOpenNOW() {

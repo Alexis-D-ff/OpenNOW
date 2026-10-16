@@ -94,6 +94,10 @@ export function terminate(appId: number) {
   if (app) SteamClient.Apps.TerminateApp(app.gameid, false);
 }
 
+export async function waitForStart(appId: number, timeoutMs: number): Promise<boolean> {
+  return waitFor(() => isRunning(appId), Math.ceil(timeoutMs / 200), 200);
+}
+
 export async function waitForExit(appId: number, timeoutMs: number): Promise<boolean> {
   return waitFor(() => !isRunning(appId), Math.ceil(timeoutMs / 200), 200);
 }

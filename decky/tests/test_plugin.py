@@ -30,13 +30,18 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command["exe"], '"/usr/bin/flatpak"')
         self.assertEqual(shlex.split(command["options"]), [
             "run", "--user", "io.github.opencloudgaming.OpenNOW", "--console",
-            "--launch-app-id=102279111", "--launch-title=Tower of \"Fantasy\" & Co",
+            "--fullscreen", "--quit-after-session", "--launch-app-id=102279111", "--launch-title=Tower of \"Fantasy\" & Co",
         ])
 
     async def test_desktop_layout_preference_drops_the_console_flag(self):
         await self.plugin.set_preference("consoleLayout", False)
         command = await self.plugin.launch_command()
         self.assertNotIn("--console", shlex.split(command["options"]))
+
+    async def test_plain_launcher_keeps_its_window_and_stays_open(self):
+        options = shlex.split((await self.plugin.launch_command())["options"])
+        self.assertNotIn("--fullscreen", options)
+        self.assertNotIn("--quit-after-session", options)
 
     async def test_non_numeric_variant_is_refused(self):
         with self.assertRaises(ValueError):

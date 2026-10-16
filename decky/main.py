@@ -14,6 +14,7 @@ from opennow_decky.install import Install, detect
 from opennow_decky.state import PluginState
 
 CONSOLE_FLAG = "--console"
+GAME_LAUNCH_FLAGS = ["--fullscreen", "--quit-after-session"]
 
 
 def quoted(path: str) -> str:
@@ -98,6 +99,7 @@ class Plugin:
         if variant_id:
             if not variant_id.isdigit():
                 raise ValueError("Invalid GeForce NOW variant id")
+            arguments.extend(GAME_LAUNCH_FLAGS)
             arguments.append(f"--launch-app-id={variant_id}")
             if title:
                 arguments.append(f"--launch-title={title}")

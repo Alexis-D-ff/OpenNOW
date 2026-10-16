@@ -14,8 +14,8 @@ import { ReactElement, useEffect, useState } from "react";
 import { FaCloud } from "react-icons/fa";
 import { backend, CatalogMatch } from "./backend";
 import { errorText } from "./format";
-import { addGame, launchGame, ownedShortcutIds, shortcutName } from "./opennow";
-import { refresh, store, useSnapshot } from "./store";
+import { ownedShortcutIds, playOnOpenNOW } from "./opennow";
+import { refresh, useSnapshot } from "./store";
 import { StoreIcon, storeLabel } from "./stores";
 
 const ROUTE = "/library/app/:appid";
@@ -48,12 +48,6 @@ const STYLE = `
 interface PageApp {
   appId: number;
   shortcutTitle: string;
-}
-
-async function play(match: CatalogMatch) {
-  const existing = store.get().state?.games.find((game) => game.variantId === match.variant.id);
-  const appId = existing?.appId ?? (await addGame(match.game, match.variant));
-  await launchGame(appId, existing?.title ?? shortcutName(match.game, match.variant));
 }
 
 function useMatches(appId: number, shortcutTitle: string): CatalogMatch[] {
@@ -90,13 +84,13 @@ function PlayOnOpenNOW({ appId, shortcutTitle }: PageApp) {
       return;
     }
     if (matches.length === 1) {
-      run(() => play(matches[0]));
+      run(() => playOnOpenNOW(matches[0].game, matches[0].variant));
       return;
     }
     showContextMenu(
       <Menu label={"Stream " + matches[0].game.title + " from"}>
         {matches.map((match) => (
-          <MenuItem key={match.variant.id} onSelected={() => run(() => play(match))}>
+          <MenuItem key={match.variant.id} onSelected={() => run(() => playOnOpenNOW(match.game, match.variant))}>
             <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <StoreIcon store={match.variant.store} size={18} />
               <span style={{ display: "flex", flexDirection: "column" }}>
