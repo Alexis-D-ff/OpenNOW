@@ -358,7 +358,7 @@ function Install() {
           label="Nightly builds"
           description="Installs and updates to the newest nightly from the dev branch instead of the stable release."
           checked={state?.preferences.nightlyChannel ?? false}
-          disabled={checking}
+          disabled={checking || !!status.installProgress}
           onChange={(value) => {
             setChecking(true);
             backend.setPreference("nightlyChannel", value).then(() => backend.checkUpdate()).then(refresh).catch(report)

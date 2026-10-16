@@ -190,7 +190,8 @@ class Plugin:
                 installed = await asyncio.to_thread(self._install)
                 if installed and installed.revision:
                     self.state.remember_flatpak_version(installed.revision, release["version"])
-                self.release = {**release, "updateAvailable": False, "installedVersionKnown": True}
+                if self.release is release:
+                    self.release = {**release, "updateAvailable": False, "installedVersionKnown": True}
                 await decky.emit("install_done", True, release["version"])
             except installer.Cancelled:
                 await decky.emit("install_done", False, "")

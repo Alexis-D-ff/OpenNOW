@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -121,6 +122,26 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((await self.plugin.check_update())["updateAvailable"])
         with mock.patch("opennow_decky.releases.fetch_latest", return_value={"tag_name": "v1.0.5", "assets": []}):
             self.assertTrue((await self.plugin.check_update())["updateAvailable"])
+
+    async def test_an_install_from_the_old_channel_does_not_replace_the_new_channel_release(self):
+        stable = {"version": "1.0.3", "asset": {"url": "https://github.com/s", "size": 1}, "updateAvailable": False}
+        nightly = {"version": "1.0.4-nightly.1201.1", "asset": {"url": "https://github.com/n", "size": 1}, "updateAvailable": True}
+        self.plugin.release = stable
+        started, release_install = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def held_install(url, size, work_dir, progress, cancelled):
+            loop.call_soon_threadsafe(started.set)
+            release_install.wait(5)
+
+        with mock.patch("opennow_decky.installer.install_bundle", side_effect=held_install):
+            await self.plugin.install_opennow()
+            await started.wait()
+            await self.plugin.set_preference("nightlyChannel", True)
+            self.plugin.release = nightly
+            release_install.set()
+            await self.plugin.install_task
+        self.assertIs(self.plugin.release, nightly)
 
     async def test_choosing_nightly_at_install_switches_the_update_channel(self):
         self.plugin.release = {"version": "1.0.3", "asset": {"url": "https://github.com/x", "size": 1}}
