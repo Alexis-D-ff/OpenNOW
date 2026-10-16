@@ -246,8 +246,9 @@ message integrity. Each receiver tracks at most 64 probes. ICE statistics only r
 the sample when the pair's response count changes; rereading old statistics cannot keep
 an old measurement alive.
 
-The bundle remembers up to 64 emitted ICE transactions and forwards each authenticated
-success response to the ICE library only once. Delayed duplicate replies must not overwrite
+The NVST bundle and the WebRTC transport each remember up to 64 emitted ICE transactions
+and forward each authenticated success response to the ICE library only once. Delayed
+duplicate replies must not overwrite
 the original completion time and turn the age of an old probe into the displayed network RTT.
 This does not cap genuine network latency or filter first replies based on their timing.
 
