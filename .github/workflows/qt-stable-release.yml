@@ -136,6 +136,7 @@ jobs:
 
           Intel macOS is not included. Windows ARM64 is cross-built, not runtime-tested by CI. Hardware-specific gameplay acceptance is not implied by CI passing.
           **Known issue: Alliance Partners may not work correctly.**
+          **Known issue: YUV 4:4:4 is marked Coming soon because it is not working correctly. Use a 4:2:0 color profile.**
           SHA256SUMS detects corrupted downloads; update manifests authenticate the exact asset bytes.
 
           Source commit: \`$SOURCE_SHA\`. Production candidate run: \`$CANDIDATE_RUN_ID\`.
