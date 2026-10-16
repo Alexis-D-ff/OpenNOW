@@ -79,6 +79,17 @@ candidate workflow builds Windows and Linux, each on x64 and ARM64, and macOS
 on ARM64; see the [release-candidate guide](docs/qt-release-candidate.md). The separate
 [OpenNOW-Mac](https://github.com/OpenCloudGaming/OpenNOW-Mac) project is also available.
 
+### Steam Deck
+
+The [OpenNOW plugin for Decky Loader](decky/README.md) runs OpenNOW from Game Mode. It
+installs the OpenNOW Flatpak (stable or nightly), adds GeForce NOW games to your Steam
+library with their artwork, and puts a **Play on OpenNOW** button on supported Steam games.
+Install it from Decky's **Developer → Install Plugin from URL** with
+`https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip`.
+The [plugin guide](decky/README.md) walks through installing Decky Loader and the plugin.
+
+![OpenNOW streaming a game in Steam Deck Game Mode](decky/docs/screenshots/in-game.jpg)
+
 ### Other platforms
 
 These projects are separate from the Qt desktop app.

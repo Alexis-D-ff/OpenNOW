@@ -50,3 +50,26 @@ jobs:
           name: OpenNOW-decky
           path: decky/out/OpenNOW.zip
           if-no-files-found: error
+
+  publish:
+    name: Publish plugin ZIP
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: plugin
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OpenNOW-decky
+      - name: Update the decky-plugin prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view decky-plugin --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create decky-plugin --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --latest=false --title "OpenNOW Decky plugin" \
+              --notes "Newest OpenNOW plugin for Decky Loader, rebuilt from dev. Install it from Decky's Developer tab with Install Plugin from URL: https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-plugin/OpenNOW.zip"
+          fi
+          gh release upload decky-plugin OpenNOW.zip --repo "$GITHUB_REPOSITORY" --clobber
