@@ -43,6 +43,8 @@ def lock_holder(data_dir: Path, locks_path: str = "/proc/locks", proc: str = "/p
         if inode != str(status.st_ino):
             continue
         pid = int(fields[4])
+        if pid == os.getpid():
+            continue
         if lock_device.lower() == device or process_name(pid, proc).startswith("opennow"):
             return pid
     return None
@@ -115,6 +117,8 @@ def terminate(data_dir: Path, grace_seconds: float = 5.0) -> bool:
     core = lock_holder(data_dir)
     if core is None:
         return False
+    if not process_name(core).startswith("opennow"):
+        return released(data_dir, grace_seconds)
     app = parent_pid(core)
     if app and process_name(app).startswith("opennow"):
         stop(app, grace_seconds)

@@ -2,12 +2,13 @@ import asyncio
 import base64
 import os
 import shlex
+import threading
 from dataclasses import replace
 from pathlib import Path
 
 import decky
 
-from opennow_decky import installer, process, releases, stream_settings
+from opennow_decky import account, installer, process, releases, stream_settings
 from opennow_decky.catalog import Catalog, CatalogError, fetch_artwork
 from opennow_decky.install import Install, detect
 from opennow_decky.state import PluginState
@@ -28,11 +29,11 @@ class Plugin:
         self.release: dict | None = None
         self.install_task: asyncio.Task | None = None
         self.install_progress: dict | None = None
+        self.install_cancel = threading.Event()
         asyncio.get_running_loop().create_task(self._warm_catalog())
 
     async def _unload(self):
-        if self.install_task:
-            self.install_task.cancel()
+        self.install_cancel.set()
 
     async def _warm_catalog(self):
         try:
@@ -56,10 +57,11 @@ class Plugin:
 
     async def get_status(self) -> dict:
         install = await asyncio.to_thread(self._install)
-        running = bool(install) and process.lock_holder(Path(install.data_dir)) is not None
+        data_dir = Path(install.data_dir) if install else None
         return {
             "install": install.to_dict() if install else None,
-            "running": running,
+            "running": data_dir is not None and process.lock_holder(data_dir) is not None,
+            "signedIn": data_dir is not None and account.signed_in(data_dir),
             "release": self.release,
             "installProgress": self.install_progress,
             "pluginVersion": decky.DECKY_PLUGIN_VERSION,
@@ -163,6 +165,8 @@ class Plugin:
         if not asset:
             raise RuntimeError("This release has no Flatpak for this device")
         loop = asyncio.get_running_loop()
+        self.install_cancel = threading.Event()
+        cancelled = self.install_cancel
 
         def report(phase: str, fraction: float):
             previous = self.install_progress
@@ -175,12 +179,14 @@ class Plugin:
         async def run():
             try:
                 await asyncio.to_thread(installer.install_bundle, asset["url"], asset["size"],
-                                        Path(decky.DECKY_PLUGIN_RUNTIME_DIR), report)
+                                        Path(decky.DECKY_PLUGIN_RUNTIME_DIR), report, cancelled)
                 installed = await asyncio.to_thread(self._install)
                 if installed and installed.revision:
                     self.state.remember_flatpak_version(installed.revision, release["version"])
                 self.release = {**release, "updateAvailable": False, "installedVersionKnown": True}
                 await decky.emit("install_done", True, release["version"])
+            except installer.Cancelled:
+                await decky.emit("install_done", False, "")
             except (OSError, ValueError, installer.InstallError) as error:
                 decky.logger.error(f"Install failed: {error}")
                 await decky.emit("install_done", False, str(error))
@@ -188,6 +194,12 @@ class Plugin:
                 self.install_progress = None
 
         self.install_task = loop.create_task(run())
+        return True
+
+    async def cancel_install(self) -> bool:
+        if not self.install_task or self.install_task.done():
+            return False
+        self.install_cancel.set()
         return True
 
     async def close_opennow(self) -> bool:

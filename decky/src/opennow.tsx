@@ -2,6 +2,7 @@ import { ConfirmModal, Navigation, showModal } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { backend, CatalogGame, CatalogVariant, PluginState } from "./backend";
 import * as steam from "./steam";
+import { storeLabel } from "./stores";
 import { refresh, store } from "./store";
 
 const LAUNCHER_NAME = "OpenNOW";
@@ -15,7 +16,7 @@ export function runningShortcut(state: PluginState): number | null {
 }
 
 export async function ensureLauncher(): Promise<number> {
-  const state = store.get().state ?? (await backend.getState());
+  const state = await backend.getState();
   const command = await backend.launchCommand();
   if (state.launcherAppId !== null && steam.overview(state.launcherAppId) !== null) {
     steam.applyLaunchCommand(state.launcherAppId, LAUNCHER_NAME, command);
@@ -26,6 +27,17 @@ export async function ensureLauncher(): Promise<number> {
   await backend.setLauncher(appId);
   await refresh();
   return appId;
+}
+
+export async function recreateLauncher() {
+  const state = store.get().state ?? (await backend.getState());
+  if (state.launcherAppId !== null) {
+    await steam.removeShortcut(state.launcherAppId);
+    await backend.setLauncher(null);
+    await refresh();
+  }
+  await ensureLauncher();
+  toaster.toast({ title: "OpenNOW", body: "Re-created OpenNOW in your library" });
 }
 
 export async function launchOpenNOW() {
@@ -46,15 +58,18 @@ function confirmEndSession(title: string, okText: string): Promise<boolean> {
   });
 }
 
+const EXIT_TIMEOUT_MS = 15000;
+
 async function stopOpenNOW() {
   const state = store.get().state;
   const running = state ? runningShortcut(state) : null;
   if (running !== null) steam.terminate(running);
-  if (store.get().status?.running && !(await backend.closeOpenNOW())) {
-    await refresh();
-    if (store.get().status?.running) throw new Error("OpenNOW didn't close. Try again.");
+  await backend.closeOpenNOW();
+  if (running !== null && !(await steam.waitForExit(running, EXIT_TIMEOUT_MS))) {
+    throw new Error("OpenNOW didn't close. Try again.");
   }
   await refresh();
+  if (store.get().status?.running) throw new Error("OpenNOW didn't close. Try again.");
 }
 
 export async function launchGame(appId: number, title: string) {
@@ -65,7 +80,7 @@ export async function launchGame(appId: number, title: string) {
     Navigation.CloseSideMenus();
     return;
   }
-  if (store.get().status?.running) {
+  if (running !== null || store.get().status?.running) {
     if (!(await confirmEndSession("Switch to " + title + "?", "Switch game"))) return;
     await stopOpenNOW();
   }
@@ -118,21 +133,4 @@ export async function syncShortcuts() {
     steam.applyLaunchCommand(state.launcherAppId, LAUNCHER_NAME, await backend.launchCommand());
   }
   await refresh();
-}
-
-const STORES: Record<string, string> = {
-  STEAM: "Steam",
-  EPIC: "Epic",
-  UPLAY: "Ubisoft",
-  ORIGIN: "EA",
-  EA_APP: "EA",
-  GOG: "GOG",
-  BATTLENET: "Battle.net",
-  XBOX: "Xbox",
-  MICROSOFT: "Xbox",
-  NONE: "Free to play",
-};
-
-export function storeLabel(store: string): string {
-  return STORES[store] ?? store.charAt(0) + store.slice(1).toLowerCase().split("_").join(" ");
 }

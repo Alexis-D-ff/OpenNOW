@@ -29,6 +29,7 @@ export interface InstallProgress {
 export interface Status {
   install: Install | null;
   running: boolean;
+  signedIn: boolean;
   release: Release | null;
   installProgress: InstallProgress | null;
   pluginVersion: string;
@@ -116,5 +117,6 @@ export const backend = {
   artwork: callable<[url: string], { data: string; type: "png" | "jpg" }>("artwork"),
   checkUpdate: callable<[], Release>("check_update"),
   installOpenNOW: callable<[], boolean>("install_opennow"),
+  cancelInstall: callable<[], boolean>("cancel_install"),
   closeOpenNOW: callable<[], boolean>("close_opennow"),
 };

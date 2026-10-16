@@ -59,11 +59,36 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 await self.plugin.set_stream_setting("fps", 90)
         self.assertFalse((self.data_dir / "settings.json").exists())
 
+    async def test_status_reports_whether_opennow_has_a_signed_in_account(self):
+        self.assertFalse((await self.plugin.get_status())["signedIn"])
+        self.data_dir.mkdir(parents=True)
+        (self.data_dir / "accounts.json").write_text(json.dumps({"accounts": [{"userId": "a"}]}))
+        self.assertTrue((await self.plugin.get_status())["signedIn"])
+
+    async def test_cancelled_install_reports_no_error(self):
+        self.plugin.release = {"version": "1.0.4", "asset": {"url": "https://github.com/x", "size": 1}, "updateAvailable": True}
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_install(url, size, work_dir, progress, cancelled):
+            loop.call_soon_threadsafe(started.set)
+            cancelled.wait(5)
+            from opennow_decky import installer
+            raise installer.Cancelled("Install cancelled")
+
+        with mock.patch("opennow_decky.installer.install_bundle", side_effect=slow_install):
+            await self.plugin.install_opennow()
+            await started.wait()
+            self.assertTrue(await self.plugin.cancel_install())
+            await self.plugin.install_task
+        self.assertEqual(self.decky.emitted[-1], ("install_done", (False, "")))
+        self.assertFalse(await self.plugin.cancel_install())
+
     async def test_install_reports_progress_and_completion(self):
         release = {"version": "1.0.4", "asset": {"url": "https://github.com/x", "size": 1}, "updateAvailable": True}
         self.plugin.release = release
 
-        def fake_install(url, size, work_dir, progress):
+        def fake_install(url, size, work_dir, progress, cancelled):
             progress("download", 0.5)
             progress("install", 1.0)
 

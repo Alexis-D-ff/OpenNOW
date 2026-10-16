@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = "OpenNOW"
-FILES = ["plugin.json", "package.json", "main.py", "LICENSE", "README.md", "dist/index.js"]
+FILES = ["plugin.json", "package.json", "main.py", "LICENSE", "README.md"]
 
 
 def package() -> Path:
@@ -11,9 +11,10 @@ def package() -> Path:
         raise SystemExit("Run the build first")
     output = ROOT / "out" / f"{NAME}.zip"
     output.parent.mkdir(exist_ok=True)
-    modules = [path for path in (ROOT / "py_modules").rglob("*.py")]
+    modules = list((ROOT / "py_modules").rglob("*.py"))
+    built = [path for path in (ROOT / "dist").rglob("*") if path.is_file() and path.suffix != ".map"]
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in [ROOT / name for name in FILES] + modules:
+        for path in [ROOT / name for name in FILES] + modules + built:
             archive.write(path, f"{NAME}/{path.relative_to(ROOT)}")
     return output
 

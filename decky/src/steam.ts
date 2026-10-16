@@ -94,6 +94,10 @@ export function terminate(appId: number) {
   if (app) SteamClient.Apps.TerminateApp(app.gameid, false);
 }
 
+export async function waitForExit(appId: number, timeoutMs: number): Promise<boolean> {
+  return waitFor(() => !isRunning(appId), Math.ceil(timeoutMs / 200), 200);
+}
+
 export function onAppLifetime(callback: (appId: number, running: boolean) => void): () => void {
   const registration = SteamClient.GameSessions.RegisterForAppLifetimeNotifications((notification) => {
     callback(notification.unAppID, notification.bRunning);

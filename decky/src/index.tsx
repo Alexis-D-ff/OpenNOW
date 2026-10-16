@@ -1,8 +1,8 @@
-import { staticClasses } from "@decky/ui";
 import { addEventListener, definePlugin, removeEventListener, routerHook, toaster } from "@decky/api";
 import { InstallProgress } from "./backend";
 import { OpenNOWPage } from "./components/Page";
 import { QuickAccess } from "./components/QuickAccess";
+import { TitleView } from "./components/TitleView";
 import { patchGamePage } from "./gamePage";
 import { ownedShortcutIds, syncShortcuts } from "./opennow";
 import { ROUTE } from "./routes";
@@ -18,7 +18,8 @@ export default definePlugin(() => {
     if (status) store.set({ status: { ...status, installProgress } });
   });
   const done = addEventListener<[boolean, string]>("install_done", (ok, detail) => {
-    toaster.toast({ title: "OpenNOW", body: ok ? "OpenNOW " + detail + " is installed" : detail });
+    if (ok || detail) toaster.toast({ title: "OpenNOW", body: ok ? "OpenNOW " + detail + " is installed" : detail });
+    refresh();
     syncShortcuts().catch(console.error);
   });
   const stopLifetime = onAppLifetime((appId) => {
@@ -28,7 +29,7 @@ export default definePlugin(() => {
   syncShortcuts().catch(console.error);
   return {
     name: "OpenNOW",
-    titleView: <div className={staticClasses.Title}>OpenNOW</div>,
+    titleView: <TitleView />,
     content: <QuickAccess />,
     icon: <OpenNOWIcon />,
     onDismount() {

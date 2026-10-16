@@ -17,12 +17,19 @@ class LockHolderTests(unittest.TestCase):
         self.data_dir = Path(tempfile.mkdtemp())
 
     def test_reads_a_real_flock_from_the_kernel(self):
-        with open(self.data_dir / "core.lock", "w") as handle:
-            self.assertIsNone(process.lock_holder(self.data_dir))
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.assertEqual(process.lock_holder(self.data_dir), os.getpid())
-            fcntl.flock(handle, fcntl.LOCK_UN)
-            self.assertIsNone(process.lock_holder(self.data_dir))
+        lock = self.data_dir / "core.lock"
+        lock.write_text("")
+        self.assertIsNone(process.lock_holder(self.data_dir))
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import fcntl, sys\n"
+                                  "handle = open(sys.argv[1]); fcntl.flock(handle, fcntl.LOCK_EX)\n"
+                                  "print('ready', flush=True); sys.stdin.readline()", str(lock)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        child.stdout.readline()
+        self.assertEqual(process.lock_holder(self.data_dir), child.pid)
+        child.communicate("\n", timeout=5)
+        self.assertIsNone(process.lock_holder(self.data_dir))
 
     def test_checking_does_not_take_the_lock(self):
         lock = self.data_dir / "core.lock"
@@ -61,11 +68,31 @@ class LockHolderTests(unittest.TestCase):
                     fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(core, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    def test_the_plugins_own_settings_lock_is_never_reported_or_killed(self):
+        with process.core_lock(self.data_dir):
+            self.assertIsNone(process.lock_holder(self.data_dir))
+            self.assertFalse(process.terminate(self.data_dir, grace_seconds=0.2))
+
+    def test_a_holder_that_is_not_opennow_is_waited_for_not_killed(self):
+        lock = self.data_dir / "core.lock"
+        lock.write_text("")
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import fcntl, sys, time\n"
+                                  "handle = open(sys.argv[1]); fcntl.flock(handle, fcntl.LOCK_EX)\n"
+                                  "print('ready', flush=True); time.sleep(2)", str(lock)],
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        child.stdout.readline()
+        self.assertFalse(process.terminate(self.data_dir, grace_seconds=0.3))
+        self.assertIsNone(child.poll())
+        self.assertEqual(child.wait(timeout=5), 0)
+
     def test_terminate_waits_until_the_lock_is_released(self):
         lock = self.data_dir / "core.lock"
         lock.write_text("")
         child = subprocess.Popen([sys.executable, "-c",
                                   "import fcntl, signal, sys, time\n"
+                                  "open('/proc/self/comm', 'w').write('opennow-core')\n"
                                   "signal.signal(signal.SIGTERM, lambda *a: None)\n"
                                   "handle = open(sys.argv[1]); fcntl.flock(handle, fcntl.LOCK_EX)\n"
                                   "print('ready', flush=True); time.sleep(60)", str(lock)],

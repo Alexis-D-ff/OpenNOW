@@ -146,7 +146,8 @@ class Catalog:
         if not match:
             return []
         game, steam = match
-        return [{"game": game, "variant": steam}]
+        others = [variant for variant in game["variants"] if variant is not steam]
+        return [{"game": game, "variant": variant} for variant in [steam, *others]]
 
 
     def title_matches(self, title: str) -> list[dict]:

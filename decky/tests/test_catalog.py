@@ -52,6 +52,15 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(match["game"]["art"]["grid"], "https://img.nvidiagrid.net/a.jpg")
         self.assertEqual(games.steam_matches("1"), [])
 
+    def test_a_steam_page_offers_every_store_version_with_steam_first(self):
+        game = {"id": "g", "title": "Cyberpunk 2077", "images": {}, "variants": [
+            {"id": "1", "appStore": "GOG", "storeId": ""},
+            {"id": "2", "appStore": "STEAM", "storeId": "1091500"},
+            {"id": "3", "appStore": "EPIC", "storeId": ""}]}
+        games = self.make(FakeApi([[game]]))
+        games.ensure()
+        self.assertEqual([m["variant"]["store"] for m in games.steam_matches("1091500")], ["STEAM", "GOG", "EPIC"])
+
     def test_shortcut_titles_match_every_store_version_of_the_game(self):
         game = {"id": "g", "title": "Assassin's Creed Mirage", "images": {},
                 "variants": [{"id": "1", "appStore": "UPLAY", "storeId": ""}, {"id": "2", "appStore": "EPIC", "storeId": ""}]}

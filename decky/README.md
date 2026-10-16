@@ -4,8 +4,9 @@ A [Decky Loader](https://decky.xyz) plugin that runs OpenNOW from Steam Game Mod
 
 ## What it does
 
-- **Quick Access panel.** Shows whether OpenNOW is installed and running, launches it in its controller layout, and closes it. The panel also lists the GeForce NOW games you added and edits OpenNOW's stream settings: resolution, frame rate, bitrate, codec, HDR, Steam Deck identity and Steam Big Picture mode.
-- **Play on OpenNOW.** Adds a button to the library page of every game on GeForce NOW, installed or not. On Steam games the button matches by Steam app ID. On non-Steam shortcuts it matches by title. Pressing the button creates a Steam shortcut for that game and streams it.
+- **Quick Access panel.** A slim launcher: whether OpenNOW is ready, running, signed out or has an update; Launch, Return to and Close OpenNOW; and the five most recent games you added, one press each. A Stream settings row shows the current resolution, frame rate and bitrate and opens the full-screen page.
+- **Full-screen page.** Steam's sidebar layout with Add games, Stream (resolution, frame rate, bitrate, codec, HDR, Steam Deck identity, Steam Big Picture mode), Install, Library and About.
+- **Play on OpenNOW.** Adds a button next to Steam's Install/Play button on the library page of every game on GeForce NOW, installed or not. On Steam games the button matches by Steam app ID. On non-Steam shortcuts it matches by title. Pressing the button creates a Steam shortcut for that game and streams it.
 - **Add games.** Searches the public GeForce NOW catalog and adds any game to your Steam library with its artwork. Each shortcut starts OpenNOW with `--launch-app-id`, so the game goes straight into a session.
 - **Install and update.** Installs the official OpenNOW Flatpak from the latest GitHub release. Updates are offered when a newer release exists.
 

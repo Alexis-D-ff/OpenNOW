@@ -1,147 +1,189 @@
-import {
-  ButtonItem,
-  DropdownItem,
-  Field,
-  Navigation,
-  PanelSection,
-  PanelSectionRow,
-  ProgressBarWithInfo,
-  SliderField,
-  ToggleField,
-} from "@decky/ui";
+import { ButtonItem, Field, Navigation, PanelSection, PanelSectionRow, ProgressBarWithInfo } from "@decky/ui";
 import { toaster } from "@decky/api";
-import { useEffect, useState } from "react";
-import { backend, Codec, Status, StreamSettings, StreamValues } from "../backend";
+import { ReactElement, useEffect, useState } from "react";
+import { FaChevronRight, FaDownload, FaExternalLinkAlt, FaInfoCircle, FaPlay, FaSlidersH, FaTimes } from "react-icons/fa";
+import { backend, InstallProgress, Status, StreamValues } from "../backend";
+import { errorText, installSummary, phase, streamSummary } from "../format";
 import { closeOpenNOW, launchGame, launchOpenNOW } from "../opennow";
-import { refresh, useSnapshot } from "../store";
 import { ROUTE } from "../routes";
+import { refresh, useSnapshot } from "../store";
+import { StoreIcon } from "../stores";
+import { Labelled } from "./StatusDot";
 
 const QUICK_LAUNCH_LIMIT = 5;
-const CODEC_LABELS: Record<Codec, string> = { auto: "Auto", av1: "AV1", h265: "H.265", h264: "H.264" };
 
 function report(error: unknown) {
-  toaster.toast({ title: "OpenNOW", body: error instanceof Error ? error.message : String(error) });
+  toaster.toast({ title: "OpenNOW", body: errorText(error) });
 }
 
-export function statusLine(status: Status | null): string {
-  if (!status) return "Checking…";
-  if (status.installProgress) return "Installing " + status.installProgress.version + "…";
-  if (!status.install) return "Not installed";
-  const kind = status.install.kind === "flatpak" ? "Flatpak" : status.install.kind === "appimage" ? "AppImage" : "Installed";
-  const version = status.install.version ? " · " + status.install.version : "";
-  return (status.running ? "Running · " : "") + kind + version;
-}
-
-function openPage(page: string) {
+export function openPage(page: string) {
   Navigation.Navigate(ROUTE + "/" + page);
   Navigation.CloseSideMenus();
 }
 
-function InstallSection({ status }: { status: Status }) {
-  const progress = status.installProgress;
-  if (progress) {
-    return (
+function withIcon(icon: ReactElement, label: string) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+      {icon}
+      {label}
+    </span>
+  );
+}
+
+function Chevron({ label, description, onActivate, icon }: { label: string; description?: string; onActivate: () => void; icon?: ReactElement }) {
+  return (
+    <Field label={label} description={description} icon={icon} onActivate={onActivate} highlightOnFocus focusable>
+      <FaChevronRight size={14} style={{ opacity: 0.7 }} />
+    </Field>
+  );
+}
+
+export function InstallProgressRows({ progress }: { progress: InstallProgress }) {
+  const downloading = progress.phase === "download";
+  return (
+    <>
       <PanelSectionRow>
         <ProgressBarWithInfo
-          nProgress={progress.fraction * 100}
-          sOperationText={progress.phase === "download" ? "Downloading OpenNOW " + progress.version : "Installing"}
+          nProgress={downloading ? progress.fraction * 100 : undefined}
+          indeterminate={!downloading}
+          sOperationText={downloading ? "Downloading OpenNOW " + progress.version : "Installing OpenNOW " + progress.version}
+          sTimeRemaining={downloading ? Math.round(progress.fraction * 100) + "%" : undefined}
           bottomSeparator="none"
         />
       </PanelSectionRow>
+      {downloading && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => backend.cancelInstall().then(refresh).catch(report)}>
+            {withIcon(<FaTimes />, "Cancel")}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+    </>
+  );
+}
+
+function StatusRow({ status }: { status: Status }) {
+  const current = phase(status);
+  const install = status.install;
+  if (current === "update" && install) {
+    return (
+      <Field label={<Labelled dot="blue">Update available</Labelled>} bottomSeparator="none">
+        {install.version} → {status.release?.version}
+      </Field>
     );
   }
-  const update = status.install && status.release?.updateAvailable && status.install.kind === "flatpak";
-  if (status.install && !update) return null;
+  const labels = { running: ["green", "Running"], signedOut: ["yellow", "Not signed in"], ready: ["green", "Ready"] } as const;
+  if (!install || !(current in labels)) return null;
+  const [dot, text] = labels[current as keyof typeof labels];
+  return (
+    <Field label={<Labelled dot={dot}>{text}</Labelled>} bottomSeparator="none">
+      {installSummary(install)}
+    </Field>
+  );
+}
+
+function Notice({ title, body }: { title: string; body: string }) {
   return (
     <PanelSectionRow>
-      <ButtonItem layout="below" onClick={() => backend.installOpenNOW().then(refresh).catch(report)}>
-        {update ? "Update to " + status.release?.version : "Install OpenNOW"}
-      </ButtonItem>
+      <Field label={title} description={body} icon={<FaInfoCircle />} bottomSeparator="none" />
     </PanelSectionRow>
   );
 }
 
-function StreamSection() {
-  const [settings, setSettings] = useState<StreamSettings | null>(null);
-  const { status } = useSnapshot();
-  useEffect(() => {
-    backend.getStreamSettings().then(setSettings).catch(report);
-  }, [status?.running, status?.install?.data_dir]);
-  if (!settings || !status?.install) return null;
-  const { values, options, locked } = settings;
-  const change = <K extends keyof StreamValues>(key: K, value: StreamValues[K]) => {
-    setSettings({ ...settings, values: { ...values, [key]: value } });
-    backend.setStreamSetting(key, value).then((next) => setSettings({ ...settings, values: next })).catch((error) => {
-      report(error);
-      backend.getStreamSettings().then(setSettings);
-    });
-  };
+function Header({ status }: { status: Status }) {
+  const current = phase(status);
+  const install = () => backend.installOpenNOW().then(refresh).catch(report);
   return (
-    <PanelSection title="Stream">
-      {locked && (
+    <PanelSection>
+      {current === "missing" && (
+        <>
+          <Notice title="OpenNOW isn't installed" body="Install the official OpenNOW Flatpak to play GeForce NOW from Game Mode." />
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={install}>{withIcon(<FaDownload />, "Install OpenNOW")}</ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
+      {current === "installing" && status.installProgress && <InstallProgressRows progress={status.installProgress} />}
+      {status.install && current !== "installing" && (
         <PanelSectionRow>
-          <Field description={settings.error ?? "OpenNOW is open. Close it to change stream settings."} />
+          <StatusRow status={status} />
         </PanelSectionRow>
       )}
+      {current === "signedOut" && (
+        <Notice title="Sign in from OpenNOW" body="OpenNOW handles your NVIDIA account. Launch it once and sign in there." />
+      )}
+      {current === "update" && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={install}>{withIcon(<FaDownload />, "Update to " + status.release?.version)}</ButtonItem>
+        </PanelSectionRow>
+      )}
+      {current === "running" && (
+        <>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => Navigation.CloseSideMenus()}>
+              {withIcon(<FaExternalLinkAlt />, "Return to OpenNOW")}
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" description="Stream settings are locked while OpenNOW runs." onClick={() => closeOpenNOW().catch(report)}>
+              {withIcon(<FaTimes />, "Close OpenNOW")}
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
+      {(current === "ready" || current === "signedOut" || current === "update") && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => launchOpenNOW().catch(report)}>{withIcon(<FaPlay />, "Launch OpenNOW")}</ButtonItem>
+        </PanelSectionRow>
+      )}
+    </PanelSection>
+  );
+}
+
+function QuickLaunch() {
+  const { state } = useSnapshot();
+  const games = state?.games ?? [];
+  return (
+    <PanelSection title="Quick launch">
+      {games.length === 0 && (
+        <>
+          <PanelSectionRow>
+            <Field label="No games yet" description="Add GeForce NOW games to stream them straight from your library." bottomSeparator="none" />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Chevron label="Add games" onActivate={() => openPage("add")} />
+          </PanelSectionRow>
+        </>
+      )}
+      {games.slice(0, QUICK_LAUNCH_LIMIT).map((game) => (
+        <PanelSectionRow key={game.appId}>
+          <Field label={game.title} onActivate={() => launchGame(game.appId, game.title).catch(report)} highlightOnFocus focusable>
+            <StoreIcon store={game.store} />
+          </Field>
+        </PanelSectionRow>
+      ))}
+      {games.length > 0 && (
+        <PanelSectionRow>
+          <Chevron label={"See all (" + games.length + ")"} onActivate={() => openPage("library")} />
+        </PanelSectionRow>
+      )}
+    </PanelSection>
+  );
+}
+
+function StreamRow() {
+  const [values, setValues] = useState<StreamValues | null>(null);
+  useEffect(() => {
+    backend.getStreamSettings().then((settings) => setValues(settings.values)).catch(() => setValues(null));
+  }, []);
+  return (
+    <PanelSection>
       <PanelSectionRow>
-        <DropdownItem
-          label="Resolution"
-          disabled={locked}
-          rgOptions={options.resolutions.map((value) => ({ data: value, label: value.replace("x", " × ") }))}
-          selectedOption={values.resolution}
-          onChange={(option) => change("resolution", option.data)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <DropdownItem
-          label="Frame rate"
-          disabled={locked}
-          rgOptions={options.frameRates.map((value) => ({ data: value, label: value + " FPS" }))}
-          selectedOption={values.fps}
-          onChange={(option) => change("fps", option.data)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <SliderField
-          label="Max bitrate"
-          disabled={locked}
-          value={values.maxBitrateMbps}
-          min={options.bitrate[0]}
-          max={options.bitrate[1]}
-          step={5}
-          showValue
-          valueSuffix=" Mbps"
-          onChange={(value) => change("maxBitrateMbps", value)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <DropdownItem
-          label="Codec"
-          disabled={locked}
-          rgOptions={options.codecs.map((value) => ({ data: value, label: CODEC_LABELS[value] }))}
-          selectedOption={values.codec}
-          onChange={(option) => change("codec", option.data)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ToggleField label="HDR" disabled={locked} checked={values.enableHdr} onChange={(value) => change("enableHdr", value)} />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ToggleField
-          label="Steam Deck identity"
-          description="Unlocks Deck resolutions and 90 FPS"
-          disabled={locked}
-          checked={values.identifyAsSteamDeck}
-          onChange={(value) => change("identifyAsSteamDeck", value)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ToggleField
-          label="Steam Big Picture mode"
-          description="Ask game launchers for their controller UI"
-          disabled={locked}
-          checked={values.steamBigPictureMode}
-          onChange={(value) => change("steamBigPictureMode", value)}
+        <Chevron
+          label="Stream settings"
+          icon={<FaSlidersH />}
+          description={values ? streamSummary(values) : undefined}
+          onActivate={() => openPage("stream")}
         />
       </PanelSectionRow>
     </PanelSection>
@@ -149,62 +191,19 @@ function StreamSection() {
 }
 
 export function QuickAccess() {
-  const { status, state } = useSnapshot();
+  const { status } = useSnapshot();
   useEffect(() => {
     refresh();
     const timer = setInterval(refresh, 3000);
     return () => clearInterval(timer);
   }, []);
-  const games = state?.games.slice(0, QUICK_LAUNCH_LIMIT) ?? [];
+  if (!status) return null;
+  const current = phase(status);
   return (
     <>
-      <PanelSection>
-        <PanelSectionRow>
-          <Field label="OpenNOW" description={statusLine(status)} />
-        </PanelSectionRow>
-        {status && <InstallSection status={status} />}
-        {status?.install && (
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => (status.running ? Navigation.CloseSideMenus() : launchOpenNOW().catch(report))}
-            >
-              {status.running ? "Return to OpenNOW" : "Launch OpenNOW"}
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        {status?.running && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => closeOpenNOW().catch(report)}>
-              Close OpenNOW
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-      {status?.install && (
-        <PanelSection title="Quick launch">
-          {games.map((game) => (
-            <PanelSectionRow key={game.appId}>
-              <ButtonItem layout="below" onClick={() => launchGame(game.appId, game.title).catch(report)}>
-                {game.title}
-              </ButtonItem>
-            </PanelSectionRow>
-          ))}
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => openPage("add")}>
-              {games.length ? "Add more games" : "Add games to your library"}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-      <StreamSection />
-      <PanelSection>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => openPage("settings")}>
-            Settings
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
+      <Header status={status} />
+      {(current === "ready" || current === "running" || current === "update") && <QuickLaunch />}
+      {(current === "ready" || current === "update") && <StreamRow />}
     </>
   );
 }
