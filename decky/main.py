@@ -145,6 +145,7 @@ class Plugin:
         return len(self.catalog.games)
 
     async def game_page_matches(self, steam_app_id: int, shortcut_title: str = "") -> list[dict]:
+        await self._ensure_catalog()
         if shortcut_title:
             return self.catalog.title_matches(shortcut_title)
         return self.catalog.steam_matches(str(steam_app_id))

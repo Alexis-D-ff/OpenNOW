@@ -43,6 +43,16 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--fullscreen", options)
         self.assertNotIn("--quit-after-session", options)
 
+    async def test_game_page_waits_for_the_first_catalog_load(self):
+        game = {"id": "g", "title": "Silksong", "variants": [{"id": "1", "store": "STEAM", "storeId": "1030300"}], "art": {}}
+
+        def load(force=False):
+            self.plugin.catalog._index([game], self.plugin.catalog.clock())
+
+        with mock.patch.object(self.plugin.catalog, "ensure", side_effect=load):
+            matches = await self.plugin.game_page_matches(1030300)
+        self.assertEqual([match["variant"]["id"] for match in matches], ["1"])
+
     async def test_non_numeric_variant_is_refused(self):
         with self.assertRaises(ValueError):
             await self.plugin.launch_command("1; rm -rf ~")
