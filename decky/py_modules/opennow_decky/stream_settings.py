@@ -22,6 +22,11 @@ DEFAULTS: dict[str, Any] = {
     "steamBigPictureMode": False,
 }
 
+# The core turns `identifyAsSteamDeck` on once on Steam Deck hardware and records this marker so it
+# never overrides the choice again. A write from the plugin is that choice, so it carries the marker;
+# without it the core re-applies its default at the next start and discards what the user picked.
+IDENTITY_DECIDED_MARKER = "steamDeckIdentityDefaultApplied"
+
 
 class SettingsError(ValueError):
     pass
@@ -80,5 +85,7 @@ def write(data_dir: Path, key: str, value: Any) -> dict[str, Any]:
     with process.core_lock(data_dir):
         persisted = read_all(data_dir)
         persisted[key] = validate(key, value, persisted)
+        if key == "identifyAsSteamDeck":
+            persisted[IDENTITY_DECIDED_MARKER] = True
         write_json_atomic(settings_path(data_dir), persisted, keep_backup=True)
         return read(data_dir)
