@@ -1344,31 +1344,7 @@ fn open_decoder(
         DecoderBackend::Vulkan => open_ffmpeg_decoder(config.codec, format, backend),
         DecoderBackend::Cuda => open_ffmpeg_decoder(config.codec, format, backend),
         DecoderBackend::Ffmpeg => open_ffmpeg_decoder(config.codec, format, backend),
-        DecoderBackend::V4l2 if config.codec == VideoCodec::H264 => {
-            open_v4l2(format, config.v4l2_device.clone())
-        }
-        #[cfg(feature = "ffmpeg")]
-        DecoderBackend::V4l2 if config.codec == VideoCodec::H265 => {
-            if !config.embedded_presentation || config.v4l2_device.is_some() {
-                return Err(Error::unavailable(
-                    Subsystem::V4l2,
-                    "HEVC request decode requires embedded Vulkan presentation and automatic media-device selection",
-                ));
-            }
-            crate::video::FfmpegDecoder::open(
-                config.codec,
-                format,
-                crate::video::FfmpegMode::V4l2Request,
-            )
-            .map(|decoder| Box::new(decoder) as Box<dyn VideoDecoder>)
-        }
-        DecoderBackend::V4l2 => Err(Error::unavailable(
-            Subsystem::V4l2,
-            format!(
-                "{} decode is not implemented by the V4L2 backend",
-                config.codec.label()
-            ),
-        )),
+        DecoderBackend::V4l2 => open_v4l2_decoder(config, format),
         DecoderBackend::VaApi => {
             #[cfg(feature = "ffmpeg")]
             if config.codec != VideoCodec::H264
@@ -1403,6 +1379,55 @@ fn open_decoder(
                 ))
             }
         }
+    }
+}
+
+fn open_v4l2_decoder(
+    config: &SessionConfig,
+    format: StreamFormat,
+) -> Result<Box<dyn VideoDecoder>> {
+    if config.codec != VideoCodec::H264 {
+        return open_v4l2_request_decoder(config, format);
+    }
+    let stateful = match open_v4l2(format, config.v4l2_device.clone()) {
+        Ok(decoder) => return Ok(decoder),
+        Err(error) if config.v4l2_device.is_some() => return Err(error),
+        Err(error) => error,
+    };
+    open_v4l2_request_decoder(config, format).map_err(|request| {
+        Error::unavailable(
+            Subsystem::V4l2,
+            format!("stateful: {stateful}; request: {request}"),
+        )
+    })
+}
+
+fn open_v4l2_request_decoder(
+    config: &SessionConfig,
+    format: StreamFormat,
+) -> Result<Box<dyn VideoDecoder>> {
+    if !config.embedded_presentation || config.v4l2_device.is_some() {
+        return Err(Error::unavailable(
+            Subsystem::V4l2,
+            "V4L2 request decode requires embedded Vulkan presentation and automatic media-device selection",
+        ));
+    }
+    #[cfg(feature = "ffmpeg")]
+    {
+        crate::video::FfmpegDecoder::open(
+            config.codec,
+            format,
+            crate::video::FfmpegMode::V4l2Request,
+        )
+        .map(|decoder| Box::new(decoder) as Box<dyn VideoDecoder>)
+    }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = format;
+        Err(Error::unavailable(
+            Subsystem::V4l2,
+            "crate was built without the ffmpeg feature",
+        ))
     }
 }
 

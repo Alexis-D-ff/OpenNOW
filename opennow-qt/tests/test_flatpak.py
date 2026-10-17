@@ -110,20 +110,17 @@ class FlatpakTests(unittest.TestCase):
                         "bundle": f"build/flatpak/OpenNOW-Qt-{resolved}-Linux-{package_arch}.flatpak",
                     })
 
-    def test_each_architecture_uses_its_native_ffmpeg_source(self):
+    def test_every_architecture_uses_the_ffmpeg_release_the_request_patches_target(self):
         manifest = json.loads((PACKAGING / "io.github.opencloudgaming.OpenNOW.json").read_text())
         sources = manifest["modules"][-1]["sources"]
         archives = [source for source in sources if source.get("dest-filename") == "ffmpeg-source.tar"]
-        self.assertEqual(len(archives), 2)
-        by_arch = {source["only-arches"][0]: source for source in archives}
-        self.assertEqual(set(by_arch), {"x86_64", "aarch64"})
-        self.assertEqual(by_arch["x86_64"]["url"], "https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz")
-        arm = by_arch["aarch64"]
-        self.assertTrue(arm["url"].startswith("https://codeload.github.com/jc-kynesim/rpi-ffmpeg/tar.gz/"))
-        revision = arm["url"].rsplit("/", 1)[-1]
-        build = (ROOT / "native/opennow-streamer/vendor/ffmpeg-sys-next/build.rs").read_text()
-        self.assertIn(f'const RPI_FFMPEG_REVISION: &str = "{revision}";', build)
-        self.assertEqual(len(arm["sha256"]), 64)
+        self.assertEqual(len(archives), 1)
+        archive = archives[0]
+        self.assertNotIn("only-arches", archive)
+        self.assertEqual(archive["url"], "https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz")
+        self.assertEqual(len(archive["sha256"]), 64)
+        patches = ROOT / "native/opennow-streamer/vendor/ffmpeg-sys-next/patches/v4l2-request"
+        self.assertTrue(sorted(patches.glob("*.patch")))
 
     def test_export_excludes_oversized_icons_and_preserves_supported_icons(self):
         manifest = json.loads((PACKAGING / "io.github.opencloudgaming.OpenNOW.json").read_text())

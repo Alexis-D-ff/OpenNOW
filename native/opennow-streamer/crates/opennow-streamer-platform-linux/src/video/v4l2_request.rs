@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 
 use super::v4l2::ffi::*;
 use super::v4l2::{enum_formats, ioctl, open_device, set_format, zeroed};
+use crate::VideoCodec;
 
-const HEVC_SLICE: u32 = u32::from_le_bytes(*b"S265");
-const SAND_NV12: [u32; 2] = [u32::from_le_bytes(*b"NC12"), u32::from_le_bytes(*b"Nc12")];
+const PRESENTABLE_CAPTURE: [u32; 3] = [
+    u32::from_le_bytes(*b"NV12"),
+    u32::from_le_bytes(*b"NC12"),
+    u32::from_le_bytes(*b"Nc12"),
+];
 const MEDIA_IOC_REQUEST_ALLOC: vidioc::_IOC_TYPE =
     ((2_u64 << 30) | (4 << 16) | ((b'|' as u64) << 8) | 5) as vidioc::_IOC_TYPE;
 const MEDIA_IOC_G_TOPOLOGY: vidioc::_IOC_TYPE =
@@ -46,13 +50,30 @@ struct MediaInterface {
     devnode: [u32; 16],
 }
 
-struct HevcDevice {
+struct RequestDevice {
     file: fs::File,
     output_type: u32,
     capture_type: u32,
 }
 
-pub(super) fn probe() -> std::result::Result<String, String> {
+const fn coded_format(codec: VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::H264 => u32::from_le_bytes(*b"S264"),
+        VideoCodec::H265 => u32::from_le_bytes(*b"S265"),
+        VideoCodec::Av1 => u32::from_le_bytes(*b"AV1F"),
+    }
+}
+
+fn fourcc(format: u32) -> String {
+    String::from_utf8_lossy(&format.to_le_bytes()).into_owned()
+}
+
+pub(super) fn probe(
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+) -> std::result::Result<String, String> {
+    let coded = coded_format(codec);
     let videos = device_paths(Path::new("/dev"), "video")
         .map_err(|error| format!("enumerating /dev/video* failed: {error}"))?;
     let media = device_paths(Path::new("/dev"), "media")
@@ -60,7 +81,7 @@ pub(super) fn probe() -> std::result::Result<String, String> {
     let mut failures = Vec::new();
     let mut discovery_failures = Vec::new();
     for path in videos {
-        let video = match open_hevc(&path) {
+        let video = match open_decoder(&path, coded) {
             Ok(Some(video)) => video,
             Ok(None) => continue,
             Err(error) => {
@@ -70,10 +91,12 @@ pub(super) fn probe() -> std::result::Result<String, String> {
                 continue;
             }
         };
-        match inspect(&video, &media) {
-            Ok(media) => {
+        match inspect(&video, coded, (width, height), &media) {
+            Ok((capture, media)) => {
                 return Ok(format!(
-                    "HEVC request decode with SAND128 NV12 via {} and {}",
+                    "{} request decode to {} via {} and {}",
+                    codec.label(),
+                    fourcc(capture),
                     path.display(),
                     media.display()
                 ));
@@ -89,10 +112,15 @@ pub(super) fn probe() -> std::result::Result<String, String> {
         failures = discovery_failures;
     }
     if failures.is_empty() {
-        Err("no accessible streaming HEVC_SLICE (S265) decoder under /dev/video*".to_owned())
+        Err(format!(
+            "no accessible streaming {} stateless ({}) decoder under /dev/video*",
+            codec.label(),
+            fourcc(coded)
+        ))
     } else {
         Err(format!(
-            "HEVC request discovery failed: {}",
+            "{} request discovery failed: {}",
+            codec.label(),
             failures.join("; ")
         ))
     }
@@ -123,7 +151,7 @@ fn device_paths(directory: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
     Ok(paths.into_iter().map(|(_, path)| path).collect())
 }
 
-fn open_hevc(path: &Path) -> std::result::Result<Option<HevcDevice>, String> {
+fn open_decoder(path: &Path, coded: u32) -> std::result::Result<Option<RequestDevice>, String> {
     let video = open_device(path).map_err(|error| format!("open failed: {error}"))?;
     let fd = video.as_raw_fd();
     let mut capability: v4l2_capability = zeroed();
@@ -153,29 +181,42 @@ fn open_hevc(path: &Path) -> std::result::Result<Option<HevcDevice>, String> {
     };
     let formats = enum_formats(fd, output_type)
         .map_err(|error| format!("VIDIOC_ENUM_FMT output failed: {error}"))?;
-    Ok(formats.contains(&HEVC_SLICE).then_some(HevcDevice {
+    Ok(formats.contains(&coded).then_some(RequestDevice {
         file: video,
         output_type,
         capture_type,
     }))
 }
 
-fn inspect(video: &HevcDevice, media_paths: &[PathBuf]) -> std::result::Result<PathBuf, String> {
+fn inspect(
+    video: &RequestDevice,
+    coded: u32,
+    (width, height): (u32, u32),
+    media_paths: &[PathBuf],
+) -> std::result::Result<(u32, PathBuf), String> {
     let fd = video.file.as_raw_fd();
-    set_format(
+    let negotiated = set_format(
         fd,
         video.output_type,
-        HEVC_SLICE,
-        1920,
-        1080,
+        coded,
+        width,
+        height,
         Some(1024 * 1024),
     )
-    .map_err(|error| format!("VIDIOC_S_FMT HEVC_SLICE failed: {error}"))?;
+    .map_err(|error| format!("VIDIOC_S_FMT {} failed: {error}", fourcc(coded)))?;
+    if negotiated.width < width || negotiated.height < height {
+        return Err(format!(
+            "decoder limits {} to {}x{}, below {width}x{height}",
+            fourcc(coded),
+            negotiated.width,
+            negotiated.height
+        ));
+    }
     let formats = enum_formats(fd, video.capture_type)
         .map_err(|error| format!("VIDIOC_ENUM_FMT capture failed: {error}"))?;
-    if !supports_capture(&formats) {
-        return Err("capture formats lack 8-bit SAND128 NC12/Nc12".to_owned());
-    }
+    let Some(capture) = presentable_capture(&formats) else {
+        return Err("capture formats lack 8-bit NV12 or SAND128 NC12/Nc12".to_owned());
+    };
     let metadata = video
         .file
         .metadata()
@@ -203,7 +244,7 @@ fn inspect(video: &HevcDevice, media_paths: &[PathBuf]) -> std::result::Result<P
             Ok(Some(path.clone()))
         })();
         match result {
-            Ok(Some(path)) => return Ok(path),
+            Ok(Some(path)) => return Ok((capture, path)),
             Ok(None) => {}
             Err(error) => {
                 if failures.len() < MAX_FAILURES {
@@ -262,8 +303,11 @@ fn media_contains_video(
     ))
 }
 
-fn supports_capture(formats: &[u32]) -> bool {
-    formats.iter().any(|format| SAND_NV12.contains(format))
+fn presentable_capture(formats: &[u32]) -> Option<u32> {
+    formats
+        .iter()
+        .copied()
+        .find(|format| PRESENTABLE_CAPTURE.contains(format))
 }
 
 #[cfg(test)]
@@ -443,12 +487,28 @@ mod tests {
     }
 
     #[test]
-    fn request_capture_requires_eight_bit_sand() {
-        assert!(supports_capture(&[u32::from_le_bytes(*b"NC12")]));
-        assert!(supports_capture(&[u32::from_le_bytes(*b"Nc12")]));
-        assert!(!supports_capture(&[u32::from_le_bytes(*b"NC30")]));
-        assert!(!supports_capture(&[u32::from_le_bytes(*b"Nc30")]));
-        assert!(!supports_capture(&[u32::from_le_bytes(*b"NV12")]));
-        assert!(!supports_capture(&[]));
+    fn request_capture_requires_eight_bit_linear_or_sand_nv12() {
+        let format = |name: &[u8; 4]| u32::from_le_bytes(*name);
+        for accepted in [b"NV12", b"NC12", b"Nc12"] {
+            assert_eq!(
+                presentable_capture(&[format(accepted)]),
+                Some(format(accepted))
+            );
+        }
+        for rejected in [b"NC30", b"Nc30", b"NV15", b"NV16", b"ST12"] {
+            assert_eq!(presentable_capture(&[format(rejected)]), None);
+        }
+        assert_eq!(
+            presentable_capture(&[format(b"NV15"), format(b"NV12")]),
+            Some(format(b"NV12"))
+        );
+        assert_eq!(presentable_capture(&[]), None);
+    }
+
+    #[test]
+    fn coded_formats_match_the_stateless_uapi_fourccs() {
+        assert_eq!(fourcc(coded_format(VideoCodec::H264)), "S264");
+        assert_eq!(fourcc(coded_format(VideoCodec::H265)), "S265");
+        assert_eq!(fourcc(coded_format(VideoCodec::Av1)), "AV1F");
     }
 }
