@@ -107,6 +107,12 @@ class FlatpakStepTests(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallError, "no space"):
             self.install()
 
+    def test_a_stalled_droiddeck_helper_is_killed_and_reported(self):
+        self.helper("sleep 30\n")
+        with mock.patch.object(installer, "INSTALL_TIMEOUT", 0.5), \
+                self.assertRaisesRegex(installer.InstallError, "didn't finish within 0.5 seconds"):
+            self.install()
+
     def test_missing_flatpak_on_droiddeck_points_at_its_store(self):
         self.helper("exit 0\n")
         installer.shutil.which.return_value = None

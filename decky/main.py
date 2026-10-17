@@ -159,7 +159,7 @@ class Plugin:
     async def check_update(self) -> dict:
         install = await asyncio.to_thread(self._install)
         release = await asyncio.to_thread(releases.fetch_latest, self.state.preferences["nightlyChannel"])
-        self.release = releases.summarize(release, install.version if install else None)
+        self.release = await asyncio.to_thread(releases.summarize, release, install.version if install else None)
         return self.release
 
     async def install_opennow(self, nightly: bool | None = None) -> bool:
