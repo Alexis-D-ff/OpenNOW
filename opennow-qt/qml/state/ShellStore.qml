@@ -183,6 +183,18 @@ QtObject {
         ? (providers.length ? providers[0] : null)
         : (providers.find(provider => provider.idpId === selectedProviderIdpId) || null)
     property bool providerDiscoveryDegraded: false
+    property var clockSkewMs: null
+    property bool clockSkewDismissed: false
+    readonly property string clockSkewMessage: {
+        if (clockSkewMs === null)
+            return ""
+        const minutes = Math.ceil(Math.abs(clockSkewMs) / 60000)
+        const amount = minutes >= 90 ? qsTr("about %1 hours").arg(Math.round(minutes / 60)) : qsTr("%1 minutes").arg(minutes)
+        const offset = clockSkewMs > 0
+            ? qsTr("Your computer's clock is %1 ahead of GeForce NOW.").arg(amount)
+            : qsTr("Your computer's clock is %1 behind GeForce NOW.").arg(amount)
+        return offset + " " + qsTr("Signing in, your library and server list need the correct time. Turn on automatic date and time in your system settings, then restart OpenNOW.")
+    }
     property int providerRetryAttempts: 0
     property Timer providerRetryTimer: Timer {
         interval: 31000
@@ -3891,6 +3903,10 @@ QtObject {
                 if (Number(result.generation || 0) > root.authGeneration && root.authSessionRequestId === "")
                     root.authSessionRequestId = CoreClient.request("auth.session.get", {})
                 root.providerDiscoveryDegraded = Boolean(result.discovery && result.discovery.state === "degraded")
+                const clockSkew = result.clockSkewMs ?? null
+                if (clockSkew !== null && root.clockSkewMs === null)
+                    root.clockSkewDismissed = false
+                root.clockSkewMs = clockSkew
                 if (root.providerDiscoveryDegraded)
                     root.scheduleProviderRetry(result.discovery.retryAfterMs)
                 else if (!root.providerDiscoveryDegraded) {
@@ -4320,6 +4336,11 @@ QtObject {
                 root.cancelDeviceLogin()
                 root.authState = code === "cancelled" ? "idle" : "error"
                 root.authMessage = code === "cancelled" ? "" : message
+                if (code === "system_clock_wrong") {
+                    root.authMessage = qsTr("Your computer's clock is wrong, so you can't sign in yet. Turn on automatic date and time in your system settings, then try again.")
+                    root.clockSkewDismissed = false
+                    root.refreshProviders()
+                }
             } else if (requestId === root.logoutRequestId) {
                 root.logoutRequestId = ""
                 root.authMessage = message

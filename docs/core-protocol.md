@@ -176,6 +176,9 @@ account generation.
 
 `auth.device.start` returns `attemptId`, `userCode`, verification URLs, `qrRows`,
 `expiresAt`, and `intervalSeconds`. Poll, complete, and cancel use `attemptId` only.
+The core compares the device authorization response's HTTP `Date` header with the
+local clock. When they differ by more than five minutes, start fails with
+`system_clock_wrong` and no attempt is created.
 The core retains the device grant and enforces the deadline, one in-flight poll,
 and cumulative five-second `slow_down` increments. Pending poll replies include
 `retryAfterMs`; the shell schedules one subsequent poll from that reply.
@@ -708,7 +711,10 @@ session after a discovery failure.
 ### Provider routing and account scope
 
 `auth.providers.list` returns `providers`, `defaultProviderIdpId`, `generation`, and
-`discovery: {state, message, retryAfterMs}`. Successful discovery is fresh for
+`discovery: {state, message, retryAfterMs}`, and `clockSkewMs`. `clockSkewMs` is the
+local clock minus the server's HTTP `Date` from the latest discovery or device
+authorization response; it is null unless the offset exceeds five minutes.
+Successful discovery is fresh for
 15 minutes. A failed refresh retains the last known providers and reports
 `state: "degraded"`. Without a discovered list, the response includes the restored
 provider, when present, and an explicit NVIDIA fallback. This fallback is not
