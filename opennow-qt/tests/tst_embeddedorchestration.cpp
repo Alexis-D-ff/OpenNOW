@@ -2576,6 +2576,23 @@ private slots:
         QVERIFY(!main.contains(QStringLiteral("StreamSurfaceController")));
     }
 
+    void quitStopsTheCoreBeforeBoundedPresentationTeardown()
+    {
+        const auto main = source(QStringLiteral("src/app/ApplicationStartup.cpp"));
+        const auto exec = main.indexOf(QStringLiteral("const auto exitCode = application.exec();"));
+        const auto deadline = main.indexOf(QStringLiteral("armTeardownDeadline(exitCode);"));
+        const auto core = main.indexOf(QStringLiteral("coreClient.stop();"));
+        const auto roots = main.indexOf(QStringLiteral("for (auto *root : roots) delete root;"));
+        const auto streamer = main.indexOf(QStringLiteral("nativeStreamRuntime.shutdown()"), exec);
+        QVERIFY(exec >= 0);
+        QVERIFY(deadline > exec);
+        QVERIFY(core > deadline);
+        QVERIFY(roots > core);
+        QVERIFY(streamer > roots);
+        QVERIFY(main.contains(QStringLiteral("TerminateProcess(GetCurrentProcess(), UINT(exitCode));")));
+        QVERIFY(main.contains(QStringLiteral("std::_Exit(exitCode);")));
+    }
+
     void windowsUpdateSchedulingIsConfiguredBeforeApplicationCreation()
     {
         const auto main = source(QStringLiteral("src/app/ApplicationStartup.cpp"));
