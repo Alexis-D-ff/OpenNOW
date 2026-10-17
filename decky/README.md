@@ -27,7 +27,7 @@ Skip this step if Decky Loader is already on your Deck.
 4. Open **Developer**, select **Install Plugin from URL** and enter:
 
    ```
-   https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-v0.1.0/OpenNOW.zip
+   https://github.com/OpenCloudGaming/OpenNOW/releases/download/decky-v0.1.1/OpenNOW.zip
    ```
 
 5. Confirm the install. **OpenNOW** now shows up in Decky's plugin list.
@@ -86,6 +86,7 @@ The **Stream** page sets resolution, frame rate, bitrate, codec and HDR. Under *
 
 - **The plugin doesn't appear after installing.** Open Decky's settings and select **Restart Decky** under **General**, or restart the Deck.
 - **OpenNOW asks you to sign in every time.** Update to the newest OpenNOW. On a Steam Deck, OpenNOW saves your sign-in to a file instead of the desktop keyring, which stays locked in Game Mode.
+- **On DroidDeck, Install OpenNOW says to set up Flatpak.** Set up Flatpak from DroidDeck's Store, then select **Install OpenNOW** again. The plugin installs the ARM64 build through DroidDeck's Flatpak helper. The first install also downloads the KDE runtime, which can take a while.
 - **An old version of OpenNOW starts.** Close every OpenNOW window, including any left open in Desktop Mode, then launch it again. The plugin only uses the copies listed under [How it finds OpenNOW](#how-it-finds-opennow).
 
 ## How it finds OpenNOW
@@ -93,9 +94,10 @@ The **Stream** page sets resolution, frame rate, bitrate, codec and HDR. Under *
 The plugin checks these locations in order:
 
 1. A path you chose under **Install → Location**.
-2. The Flatpak `io.github.opencloudgaming.OpenNOW`, user installation first, then system.
-3. The newest `OpenNOW*.AppImage` in `~/Applications`, `~/AppImages`, `~/Downloads`, `~/Desktop`, `~/.local/bin` or `~`.
-4. `/usr/bin/opennow-qt` from the `.deb`.
+2. The Flatpak `io.github.opencloudgaming.OpenNOW`, user installation first, then system. On DroidDeck, the plugin starts it through `droiddeck-flatpak-run`, so the window opens in gamescope.
+3. On DroidDeck, the newest OpenNOW AppImage imported through DroidDeck, under `/opt/appimages/user`.
+4. The newest `OpenNOW*.AppImage` in `~/Applications`, `~/AppImages`, `~/Downloads`, `~/Desktop`, `~/.local/bin` or `~`.
+5. `/usr/bin/opennow-qt` from the `.deb`.
 
 Stream settings go to the same `settings.json` that the app reads. That file is `~/.var/app/io.github.opencloudgaming.OpenNOW/config/OpenNOW` for the Flatpak and `~/.config/OpenNOW` for other installs. OpenNOW's core owns the file while the app runs, and the plugin detects this through the core's `core.lock` in `/proc/locks`. The plugin writes the file the same way the core does: an atomic replace that keeps a `.bak` copy, and every key the plugin doesn't edit stays untouched.
 

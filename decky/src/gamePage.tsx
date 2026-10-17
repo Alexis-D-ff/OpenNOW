@@ -59,7 +59,7 @@ function useMatches(appId: number, shortcutTitle: string): CatalogMatch[] {
 }
 
 function detailLabel(matches: CatalogMatch[], busy: boolean, installed: boolean, progress?: { phase: string; fraction: number } | null): string {
-  if (progress) return progress.phase === "download" ? "Installing " + Math.round(progress.fraction * 100) + "%" : "Installing…";
+  if (progress) return progress.phase === "download" || progress.fraction > 0 ? "Installing " + Math.round(progress.fraction * 100) + "%" : "Installing…";
   if (!installed) return "Install OpenNOW";
   if (busy) return "Starting…";
   if (matches.length > 1) return "Choose a version";

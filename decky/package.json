@@ -1,6 +1,6 @@
 {
   "name": "opennow-decky",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Launch and manage OpenNOW from Steam Game Mode",
   "type": "module",
   "private": true,

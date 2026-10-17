@@ -40,14 +40,15 @@ function Chevron({ label, description, onActivate, icon }: { label: string; desc
 
 export function InstallProgressRows({ progress }: { progress: InstallProgress }) {
   const downloading = progress.phase === "download";
+  const measured = downloading || progress.fraction > 0;
   return (
     <>
       <PanelSectionRow>
         <ProgressBarWithInfo
-          nProgress={downloading ? progress.fraction * 100 : undefined}
-          indeterminate={!downloading}
+          nProgress={measured ? progress.fraction * 100 : undefined}
+          indeterminate={!measured}
           sOperationText={downloading ? "Downloading OpenNOW " + progress.version : "Installing OpenNOW " + progress.version}
-          sTimeRemaining={downloading ? Math.round(progress.fraction * 100) + "%" : undefined}
+          sTimeRemaining={measured ? Math.round(progress.fraction * 100) + "%" : undefined}
           bottomSeparator="none"
         />
       </PanelSectionRow>
