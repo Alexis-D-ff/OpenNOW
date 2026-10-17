@@ -226,6 +226,11 @@ QtObject {
     property var authChallenge: null
     property string authState: "idle"
     property string authMessage: ""
+    function settledAuthState(session) {
+        if (session)
+            return "signed-in"
+        return authState === "error" ? "error" : "idle"
+    }
     property bool addingAccount: false
     property string accountMessage: ""
     property Connections accountNavigation: Connections {
@@ -3916,7 +3921,7 @@ QtObject {
             } else if (requestId === root.authSessionRequestId) {
                 root.authSession = result.session || null
                 root.sessionPersistence = result.persistence || "none"
-                root.authState = root.authSession ? "signed-in" : "idle"
+                root.authState = root.settledAuthState(root.authSession)
                 root.authSessionRequestId = ""
                 root.authRestorePending = false
                 if (root.sessionPersistenceMessage !== "")
@@ -4321,7 +4326,7 @@ QtObject {
             } else if (requestId === root.authSessionRequestId) {
                 root.authSessionRequestId = ""
                 root.authRestorePending = false
-                root.authState = root.authSession ? "signed-in" : "idle"
+                root.authState = root.settledAuthState(root.authSession)
                 if (code !== "cancelled")
                     root.authMessage = message
                 root.resolveDirectLaunch()
@@ -4498,7 +4503,7 @@ QtObject {
             else if (name === "auth.session.changed") {
                 if (!root.acceptAuthEnvelope(payload))
                     return
-                root.authState = root.authSession ? "signed-in" : "idle"
+                root.authState = root.settledAuthState(root.authSession)
                 if (root.authSession)
                     root.refreshRemoteSessions()
                 else
