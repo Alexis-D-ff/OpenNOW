@@ -4329,5 +4329,11 @@
     "shows_the_live_status": "shows the live status",
     "in_a_session_shows_what_really_applies": "in a session shows what really applies",
     "dlss_overrides": "DLSS overrides"
+  },
+  "windowControls": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "close": "Close"
   }
 }

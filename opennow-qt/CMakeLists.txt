@@ -96,7 +96,8 @@ target_link_libraries(opennow-qt PRIVATE
     SDL3::SDL3
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(opennow-qt PRIVATE Vulkan::Vulkan)
+    target_link_libraries(opennow-qt PRIVATE Vulkan::Vulkan PkgConfig::WAYLAND_CLIENT)
+    target_compile_definitions(opennow-qt PRIVATE OPENNOW_WAYLAND_DECORATIONS)
 elseif(APPLE)
     target_link_libraries(opennow-qt PRIVATE Qt6::Svg)
 endif()

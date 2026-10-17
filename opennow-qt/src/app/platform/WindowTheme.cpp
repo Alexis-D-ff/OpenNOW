@@ -16,6 +16,11 @@
 #include <dwmapi.h>
 #endif
 
+#ifdef OPENNOW_WAYLAND_DECORATIONS
+#include <QtGui/qguiapplication_platform.h>
+#include <wayland-client.h>
+#endif
+
 namespace {
 void applyNativeTheme(QWindow *window, bool darkMode)
 {
@@ -33,6 +38,47 @@ void applyNativeTheme(QWindow *window, bool darkMode)
 #else
     Q_UNUSED(window);
     Q_UNUSED(darkMode);
+#endif
+}
+
+#ifdef OPENNOW_WAYLAND_DECORATIONS
+bool compositorOffersServerDecorations()
+{
+    auto *wayland = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
+    if (!wayland || !wayland->display()) return true;
+    wl_display *display = wayland->display();
+    wl_event_queue *queue = wl_display_create_queue(display);
+    auto *wrapper = static_cast<wl_display *>(wl_proxy_create_wrapper(display));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(wrapper), queue);
+    wl_registry *registry = wl_display_get_registry(wrapper);
+    bool offered = false;
+    static const wl_registry_listener listener{
+        [](void *data, wl_registry *, uint32_t, const char *interface, uint32_t) {
+            if (QByteArrayView(interface) == "zxdg_decoration_manager_v1")
+                *static_cast<bool *>(data) = true;
+        },
+        [](void *, wl_registry *, uint32_t) {}};
+    wl_registry_add_listener(registry, &listener, &offered);
+    wl_display_roundtrip_queue(display, queue);
+    wl_registry_destroy(registry);
+    wl_proxy_wrapper_destroy(wrapper);
+    wl_event_queue_destroy(queue);
+    return offered;
+}
+#endif
+
+bool needsClientDecorations(QWindow *window)
+{
+#ifdef OPENNOW_WAYLAND_DECORATIONS
+    if (!QGuiApplication::platformName().startsWith(QStringLiteral("wayland"))
+            || window->surfaceType() != QSurface::VulkanSurface
+            || window->flags().testFlag(Qt::FramelessWindowHint))
+        return false;
+    static const bool serverDecorations = compositorOffersServerDecorations();
+    return !serverDecorations;
+#else
+    Q_UNUSED(window);
+    return false;
 #endif
 }
 }
@@ -82,5 +128,10 @@ bool WindowTheme::eventFilter(QObject *watched, QEvent *event)
 
 void WindowTheme::apply()
 {
-    if (m_window && m_window->handle()) m_applyTheme(m_window, m_darkMode);
+    if (!m_window || !m_window->handle()) return;
+    m_applyTheme(m_window, m_darkMode);
+    const bool clientDecorations = needsClientDecorations(m_window);
+    if (m_clientDecorations == clientDecorations) return;
+    m_clientDecorations = clientDecorations;
+    emit clientDecorationsChanged();
 }
