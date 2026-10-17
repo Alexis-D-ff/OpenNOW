@@ -1262,6 +1262,14 @@ ApplicationWindow {
         onDismissed: ShellStore.updaterFailureMessage = ""
     }
 
+    ClockSkewDialog {
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        message: ShellStore.clockSkewDismissed ? "" : ShellStore.clockSkewMessage
+        sessionSafe: window.desktopSurfaceActive && ShellStore.updaterSessionSafe
+        onDismissed: ShellStore.clockSkewDismissed = true
+    }
+
     Component { id: desktopAppScreen; DesktopApp {} }
     Component { id: onboardingScreen; DesktopOnboardingScreen {} }
     Component { id: homeScreen; HomeScreen {} }
