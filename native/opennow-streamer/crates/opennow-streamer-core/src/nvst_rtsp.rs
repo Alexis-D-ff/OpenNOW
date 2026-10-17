@@ -25,7 +25,7 @@ mod negotiation;
 #[path = "nvst_rtsp_transport_diagnostics.rs"]
 mod transport_diagnostics;
 use color::announce_color_lines;
-use negotiation::{microphone_handoff, negotiated_announce, offered_bool, recovery_policy};
+use negotiation::{negotiated_announce, offered_bool, recovery_policy};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 // A rig whose video streamer is still starting answers SETUP with 200 but no
@@ -1320,7 +1320,6 @@ fn prepare_on_endpoint(
     handoff["bundlePeerIp"] = json!(bundle_peer.ip().to_string());
     handoff["bundlePeerPort"] = json!(bundle_peer.port());
     handoff["recoveryPolicy"] = json!(recovery_policy(&describe.body));
-    microphone_handoff(&describe.body, &mut handoff);
 
     // Only log transport shape, never SDP, runtime keys, or ICE credentials.
     opennow_streamer_protocol::log::log_line(
