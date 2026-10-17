@@ -48,7 +48,6 @@ ControllerInput::ControllerInput(QObject *parent, std::shared_ptr<GenericHidBack
         updatePollInterval();
         poll();
     }, Qt::QueuedConnection);
-    connect(m_genericHid.get(), &GenericHidInput::diagnostic, this, &ControllerInput::inputDiagnostic, Qt::QueuedConnection);
 
     int count = 0;
     if (auto *ids = m_sdlReady ? SDL_GetGamepads(&count) : nullptr) {
@@ -595,6 +594,7 @@ void ControllerInput::poll()
 {
     if (m_genericHid) {
         auto batch = m_genericHid->drain();
+        for (const auto &message : std::as_const(batch.diagnostics)) emit inputDiagnostic(message);
         if (batch.inventoryChanged) {
             updatePollInterval();
             emit genericDeviceClaimsChanged();

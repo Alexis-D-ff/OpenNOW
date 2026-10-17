@@ -479,6 +479,9 @@ GenericHidInput::Batch GenericHidInput::drain(int limit)
     QMutexLocker lock(&m_mutex);
     Batch batch;
     batch.inventoryChanged = std::exchange(m_inventoryChanged, false);
+    batch.diagnostics = std::exchange(m_diagnostics, {});
+    if (m_droppedDiagnostics)
+        batch.diagnostics.append(QStringLiteral("generic-hid %1 diagnostics dropped").arg(std::exchange(m_droppedDiagnostics, 0)));
     for (const auto &lane : m_lanes) if (lane.claim.incarnation) batch.claims.append(lane.claim);
     limit = std::clamp(limit, 0, 32);
     int empty = 0;
@@ -534,6 +537,16 @@ bool GenericHidInput::append(const GenericHidReport &report)
     return true;
 }
 
+void GenericHidInput::diagnose(const QString &message)
+{
+    QMutexLocker lock(&m_mutex);
+    if (m_diagnostics.size() >= 32) {
+        ++m_droppedDiagnostics;
+        return;
+    }
+    m_diagnostics.append(message);
+}
+
 void GenericHidInput::submitOutput(const GenericHidReport &report)
 {
     QMutexLocker lock(&m_mutex);
@@ -561,7 +574,7 @@ void GenericHidInput::run()
 {
     if (!m_backend->initialize()) {
         qWarning("Generic HID initialization failed; allowlisted devices remain excluded from gamepad emulation");
-        emit diagnostic(QStringLiteral("generic-hid initialization failed; allowlisted devices are not forwarded"));
+        diagnose(QStringLiteral("generic-hid initialization failed; allowlisted devices are not forwarded"));
         return;
     }
     QHash<QByteArray, Source> sources;
@@ -583,7 +596,7 @@ void GenericHidInput::run()
         }
         if (suppress) {
             suppressed.insert(key, it->devices);
-            emit diagnostic(QStringLiteral("generic-hid %1 slot=%2 removed after a read, output, or queue failure")
+            diagnose(QStringLiteral("generic-hid %1 slot=%2 removed after a read, output, or queue failure")
                 .arg(vidPid(it->claim.vendor, it->claim.product)).arg(it->claim.slot));
         }
         for (const auto &collection : it->collections) m_backend->close(collection.handle);
@@ -635,7 +648,7 @@ void GenericHidInput::run()
                 if (key.isEmpty() || device.instanceKey.isEmpty()) {
                     if (!rejectedPaths.contains(device.path)) {
                         qWarning("Generic HID physical or arrival identity unresolved; refusing device");
-                        emit diagnostic(QStringLiteral("generic-hid %1 refused: physical or arrival identity unresolved for %2")
+                        diagnose(QStringLiteral("generic-hid %1 refused: physical or arrival identity unresolved for %2")
                             .arg(vidPid(device.vendor, device.product), QString::fromLocal8Bit(device.path)));
                     }
                     unresolved.insert(device.path);
@@ -662,7 +675,7 @@ void GenericHidInput::run()
                         [&](const auto &device) { return m_backend->accessDenied(device); });
                 if (accessRestored) {
                     const auto &device = groups[key].first();
-                    emit diagnostic(QStringLiteral("generic-hid %1 access granted; retrying").arg(vidPid(device.vendor, device.product)));
+                    diagnose(QStringLiteral("generic-hid %1 access granted; retrying").arg(vidPid(device.vendor, device.product)));
                 }
                 if (changed || accessRestored) {
                     suppressed.remove(key);
@@ -707,7 +720,7 @@ void GenericHidInput::run()
                         collection.descriptor.clear();
                         collection.reportIds.clear();
                         qWarning("Generic HID descriptor cannot be parsed; using capture-detach fallback");
-                        emit diagnostic(QStringLiteral("generic-hid %1 descriptor cannot be parsed on interface %2; using capture-detach fallback")
+                        diagnose(QStringLiteral("generic-hid %1 descriptor cannot be parsed on interface %2; using capture-detach fallback")
                             .arg(vidPid(candidate.vendor, candidate.product)).arg(candidate.interfaceNumber));
                     }
                     source.collections.append(collection);
@@ -737,11 +750,11 @@ void GenericHidInput::run()
                     if (!deniedPath.isEmpty()) {
                         noAccess.insert(it.key());
                         qWarning("Generic HID device has no read/write access; refusing device");
-                        emit diagnostic(QStringLiteral("generic-hid %1 refused: no read/write access to %2; grant it with a udev rule")
+                        diagnose(QStringLiteral("generic-hid %1 refused: no read/write access to %2; grant it with a udev rule")
                             .arg(vidPid(device.vendor, device.product), QString::fromLocal8Bit(deniedPath)));
                     } else {
                         qWarning("Generic HID interface, descriptor, or collection routing unavailable; refusing device");
-                        emit diagnostic(QStringLiteral("generic-hid %1 refused: interface, descriptor, or collection routing unavailable")
+                        diagnose(QStringLiteral("generic-hid %1 refused: interface, descriptor, or collection routing unavailable")
                             .arg(vidPid(device.vendor, device.product)));
                     }
                     continue;
@@ -757,7 +770,7 @@ void GenericHidInput::run()
                     m_lanes[source.claim.slot].claim = source.claim;
                     markInventoryChangedLocked();
                 }
-                emit diagnostic(QStringLiteral("generic-hid %1 opened slot=%2 interfaces=%3 collections=%4")
+                diagnose(QStringLiteral("generic-hid %1 opened slot=%2 interfaces=%3 collections=%4")
                     .arg(vidPid(source.claim.vendor, source.claim.product)).arg(source.claim.slot)
                     .arg(source.claim.interfaces.size()).arg(source.collections.size()));
                 sources.insert(it.key(), source);
