@@ -114,6 +114,7 @@ struct ActiveSession {
     zone: String,
     app_id: String,
     info: Value,
+    lowest_queue_position: Option<i64>,
     client: Client,
 }
 
@@ -1323,11 +1324,20 @@ impl CloudMatchService {
             }
             return Ok(());
         }
+        let mut lowest_queue_position = None;
         if let Some(previous) = active.as_ref() {
             preserve_session_profile(info, &previous.info);
-            if previous.session_id == session_id && info["keyboardLayout"].is_null() {
-                info["keyboardLayout"] = previous.info["keyboardLayout"].clone();
+            if previous.session_id == session_id {
+                if info["keyboardLayout"].is_null() {
+                    info["keyboardLayout"] = previous.info["keyboardLayout"].clone();
+                }
+                lowest_queue_position = previous.lowest_queue_position;
             }
+        }
+        if let Some(position) = info["queuePosition"].as_i64() {
+            let shown = lowest_queue_position.map_or(position, |lowest| lowest.min(position));
+            info["queuePosition"] = json!(shown);
+            lowest_queue_position = Some(shown);
         }
         *active = Some(ActiveSession {
             session_id,
@@ -1338,6 +1348,7 @@ impl CloudMatchService {
             zone: zone.to_owned(),
             app_id: app_id.to_owned(),
             info: info.clone(),
+            lowest_queue_position,
             client,
         });
         Ok(())
@@ -2654,14 +2665,14 @@ fn normalize_ice_servers(session: &Value) -> Vec<Value> {
 
 fn queue_position(session: &Value) -> Option<i64> {
     [
-        &session["queuePosition"],
         &session["seatSetupInfo"]["queuePosition"],
+        &session["queuePosition"],
         &session["sessionProgress"]["queuePosition"],
         &session["progressInfo"]["queuePosition"],
     ]
     .into_iter()
-    .find_map(value_i64)
-    .filter(|value| *value > 0)
+    .filter_map(value_i64)
+    .find(|value| *value > 0)
 }
 
 fn first_string(value: &Value) -> Option<String> {
@@ -6629,6 +6640,64 @@ mod tests {
             .store_active(&mut different, &base, "auto", "123", client)
             .unwrap();
         assert!(different["keyboardLayout"].is_null());
+    }
+
+    #[test]
+    fn queue_position_prefers_seat_setup_info_and_skips_empty_containers() {
+        assert_eq!(
+            queue_position(&json!({"queuePosition":96,"seatSetupInfo":{"queuePosition":13}})),
+            Some(13)
+        );
+        assert_eq!(
+            queue_position(
+                &json!({"queuePosition":0,"seatSetupInfo":{"queuePosition":0},
+                "sessionProgress":{"queuePosition":7}})
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            queue_position(&json!({"seatSetupInfo":{"queuePosition":0}})),
+            None
+        );
+    }
+
+    #[test]
+    fn active_queue_position_never_rises_for_the_same_session() {
+        let client = Client::new();
+        let service = CloudMatchService::new(client.clone());
+        let base = Url::parse("https://prod.cloudmatchbeta.nvidiagrid.net/").unwrap();
+        let mut shown = Vec::new();
+        for (session_id, position) in [
+            ("seat-one", json!(96)),
+            ("seat-one", json!(13)),
+            ("seat-one", json!(96)),
+            ("seat-one", Value::Null),
+            ("seat-one", json!(96)),
+            ("seat-one", json!(4)),
+            ("seat-two", json!(96)),
+        ] {
+            let mut polled = json!({"sessionId":session_id,"status":1,"queuePosition":position});
+            service
+                .store_active(&mut polled, &base, "auto", "123", client.clone())
+                .unwrap();
+            assert_eq!(
+                service.active.lock().unwrap().as_ref().unwrap().info,
+                polled
+            );
+            shown.push(polled["queuePosition"].clone());
+        }
+        assert_eq!(
+            shown,
+            [
+                json!(96),
+                json!(13),
+                json!(13),
+                Value::Null,
+                json!(13),
+                json!(4),
+                json!(96)
+            ]
+        );
     }
 
     #[test]
