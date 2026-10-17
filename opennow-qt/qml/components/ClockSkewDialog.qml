@@ -17,6 +17,14 @@ Dialog {
     closePolicy: Popup.CloseOnEscape
     onAccepted: dismissed()
     onRejected: dismissed()
+    onOpened: Qt.callLater(root.claimKeyboard)
+    onActiveFocusChanged: if (visible && !activeFocus) Qt.callLater(root.claimKeyboard)
+    function claimKeyboard() {
+        const button = standardButton(Dialog.Ok)
+        if (button && visible && !activeFocus)
+            button.forceActiveFocus()
+    }
+    Shortcut { sequences: ["Return", "Enter"]; enabled: root.visible; onActivated: root.accept() }
 
     contentItem: Label {
         text: root.message
