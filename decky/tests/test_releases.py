@@ -1,4 +1,6 @@
+import subprocess
 import unittest
+from unittest import mock
 
 from tests import support  # noqa: F401
 from opennow_decky import releases
@@ -16,6 +18,18 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(releases.flatpak_asset(RELEASE, "x86_64")["url"], "https://github.com/x64")
         self.assertEqual(releases.flatpak_asset(RELEASE, "aarch64")["url"], "https://github.com/arm")
         self.assertIsNone(releases.flatpak_asset(RELEASE, "riscv64"))
+
+    def test_flatpaks_architecture_wins_over_an_emulated_python(self):
+        flatpak = subprocess.CompletedProcess([], 0, "aarch64\n", "")
+        with mock.patch.object(releases.host, "run", return_value=flatpak) as run, \
+                mock.patch.object(releases.platform, "machine", return_value="x86_64"):
+            self.assertEqual(releases.flatpak_asset(RELEASE)["url"], "https://github.com/arm")
+        run.assert_called_once_with(["flatpak", "--default-arch"], timeout=15)
+
+    def test_architecture_falls_back_to_the_machine_without_flatpak(self):
+        with mock.patch.object(releases.host, "run", side_effect=FileNotFoundError("flatpak")), \
+                mock.patch.object(releases.platform, "machine", return_value="x86_64"):
+            self.assertEqual(releases.flatpak_asset(RELEASE)["url"], "https://github.com/x64")
 
     def test_update_is_offered_only_for_a_newer_installed_version(self):
         self.assertTrue(releases.summarize(RELEASE, "1.0.3", "x86_64")["updateAvailable"])

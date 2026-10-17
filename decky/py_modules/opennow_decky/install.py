@@ -11,6 +11,9 @@ from . import host
 FLATPAK_ID = "io.github.opencloudgaming.OpenNOW"
 NATIVE_PATHS = ("/usr/bin/opennow-qt", "/usr/local/bin/opennow-qt", "/opt/OpenNOW/bin/opennow-qt")
 APPIMAGE_DIRS = ("Applications", "AppImages", "Downloads", "Desktop", ".local/bin", "")
+DROIDDECK_FLATPAK_RUN = "/usr/local/bin/droiddeck-flatpak-run"
+DROIDDECK_APPIMAGE_RUN = "/usr/local/bin/droiddeck-appimage-run"
+DROIDDECK_APPIMAGES = Path("/opt/appimages/user")
 APPIMAGE_VERSION = re.compile(r"OpenNOW(?:-Qt)?-(\d+\.\d+\.\d+(?:-(?:nightly|rc|beta|alpha)[0-9A-Za-z.]*)?)", re.IGNORECASE)
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
@@ -70,13 +73,14 @@ def detect_flatpak(home: Path, run: Runner) -> Install | None:
         for line in result.stdout.splitlines():
             key, _, value = line.strip().partition(":")
             fields[key] = value.strip()
+        droiddeck = os.access(DROIDDECK_FLATPAK_RUN, os.X_OK)
         return Install(
             kind="flatpak",
             path=FLATPAK_ID,
             version=fields.get("Version") or None,
             revision=fields.get("Commit") or None,
-            exe="/usr/bin/flatpak",
-            args=("run", scope, FLATPAK_ID),
+            exe=DROIDDECK_FLATPAK_RUN if droiddeck else "/usr/bin/flatpak",
+            args=(FLATPAK_ID,) if droiddeck else ("run", scope, FLATPAK_ID),
             data_dir=str(flatpak_data_dir(home)),
         )
     return None
@@ -113,6 +117,36 @@ def appimage_install(path: str, home: Path) -> Install:
     )
 
 
+def detect_droiddeck_appimage(home: Path) -> Install | None:
+    if not os.access(DROIDDECK_APPIMAGE_RUN, os.X_OK):
+        return None
+
+    def text(directory: Path, name: str) -> str:
+        try:
+            return (directory / name).read_text().strip()
+        except OSError:
+            return ""
+
+    candidates = [
+        directory for directory in DROIDDECK_APPIMAGES.glob("*")
+        if (directory / "app" / "AppRun").exists()
+        and "opennow" in " ".join((directory.name, text(directory, "name"), text(directory, "github-repo"))).lower()
+    ]
+    if not candidates:
+        return None
+    versions = {directory: text(directory, "github-tag").removeprefix("v") or None for directory in candidates}
+    newest = max(candidates, key=lambda directory: (version_key(versions[directory]), directory.stat().st_mtime))
+    return Install(
+        kind="appimage",
+        path=str(newest),
+        version=versions[newest],
+        revision=None,
+        exe=DROIDDECK_APPIMAGE_RUN,
+        args=(str(newest),),
+        data_dir=str(native_data_dir(home)),
+    )
+
+
 def detect_native(home: Path) -> Install | None:
     for path in NATIVE_PATHS:
         if os.access(path, os.X_OK):
@@ -131,4 +165,5 @@ def custom_install(path: str, home: Path) -> Install | None:
 def detect(home: Path, custom_path: str = "", run: Runner | None = None) -> Install | None:
     if custom_path:
         return custom_install(custom_path, home)
-    return detect_flatpak(home, run or run_quiet) or detect_appimage(home) or detect_native(home)
+    return (detect_flatpak(home, run or run_quiet) or detect_droiddeck_appimage(home)
+            or detect_appimage(home) or detect_native(home))

@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import support  # noqa: F401
 from opennow_decky import install
@@ -92,6 +93,36 @@ class InstallDetectionTests(unittest.TestCase):
             raise FileNotFoundError("flatpak")
 
         self.assertIsNone(install.detect_flatpak(self.home, missing))
+
+    def test_droiddeck_flatpak_launches_through_its_gamescope_wrapper(self):
+        wrapper = executable(self.home / "droiddeck-flatpak-run")
+        with mock.patch.object(install, "DROIDDECK_FLATPAK_RUN", str(wrapper)):
+            found = install.detect(self.home, run=runner())
+        self.assertEqual((found.exe, found.args), (str(wrapper), (install.FLATPAK_ID,)))
+
+    def test_droiddeck_imported_appimage_runs_through_droiddeck(self):
+        imported = self.home / "opt/appimages/user"
+        executable(imported / "opennow/app/AppRun")
+        (imported / "opennow/github-tag").write_text("v1.0.4-nightly.1210.1\n")
+        older = executable(imported / "my-cloud-app/app/AppRun").parents[1]
+        (older / "github-repo").write_text("OpenCloudGaming/OpenNOW")
+        (older / "github-tag").write_text("v1.0.3")
+        executable(imported / "duckstation/app/AppRun")
+        runner_script = executable(self.home / "droiddeck-appimage-run")
+        with mock.patch.object(install, "DROIDDECK_APPIMAGES", imported), \
+                mock.patch.object(install, "DROIDDECK_APPIMAGE_RUN", str(runner_script)):
+            found = install.detect(self.home, run=runner(user_code=1, system_code=1))
+        self.assertEqual(found.kind, "appimage")
+        self.assertEqual(found.version, "1.0.4-nightly.1210.1")
+        self.assertEqual((found.exe, found.args), (str(runner_script), (str(imported / "opennow"),)))
+        self.assertEqual(found.data_dir, str(self.home / ".config/OpenNOW"))
+
+    def test_imported_appimages_are_ignored_outside_droiddeck(self):
+        imported = self.home / "opt/appimages/user"
+        executable(imported / "opennow/app/AppRun")
+        with mock.patch.object(install, "DROIDDECK_APPIMAGES", imported), \
+                mock.patch.object(install, "DROIDDECK_APPIMAGE_RUN", str(self.home / "missing")):
+            self.assertIsNone(install.detect_droiddeck_appimage(self.home))
 
     def test_legacy_lowercase_data_dir_is_kept_when_it_is_the_only_one(self):
         (self.home / ".config/opennow").mkdir(parents=True)

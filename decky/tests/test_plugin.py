@@ -100,6 +100,15 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.decky.emitted[-1], ("install_done", (False, "")))
         self.assertFalse(await self.plugin.cancel_install())
 
+    async def test_an_unexpected_install_failure_still_ends_the_install(self):
+        self.plugin.release = {"version": "1.0.4", "asset": {"url": "https://github.com/x", "size": 1}, "updateAvailable": True}
+        with mock.patch("opennow_decky.installer.install_bundle", side_effect=subprocess.TimeoutExpired(["flatpak"], 60)):
+            await self.plugin.install_opennow()
+            await self.plugin.install_task
+        self.assertEqual(self.decky.emitted[-1][0], "install_done")
+        self.assertFalse(self.decky.emitted[-1][1][0])
+        self.assertIsNone(self.plugin.install_progress)
+
     async def test_install_reports_progress_and_completion(self):
         release = {"version": "1.0.4", "asset": {"url": "https://github.com/x", "size": 1}, "updateAvailable": True}
         self.plugin.release = release

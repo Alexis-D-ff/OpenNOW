@@ -159,7 +159,7 @@ class Plugin:
     async def check_update(self) -> dict:
         install = await asyncio.to_thread(self._install)
         release = await asyncio.to_thread(releases.fetch_latest, self.state.preferences["nightlyChannel"])
-        self.release = releases.summarize(release, install.version if install else None)
+        self.release = await asyncio.to_thread(releases.summarize, release, install.version if install else None)
         return self.release
 
     async def install_opennow(self, nightly: bool | None = None) -> bool:
@@ -195,7 +195,7 @@ class Plugin:
                 await decky.emit("install_done", True, release["version"])
             except installer.Cancelled:
                 await decky.emit("install_done", False, "")
-            except (OSError, ValueError, installer.InstallError) as error:
+            except Exception as error:
                 decky.logger.error(f"Install failed: {error}")
                 await decky.emit("install_done", False, str(error))
             finally:
