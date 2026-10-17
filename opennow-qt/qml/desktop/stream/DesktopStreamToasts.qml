@@ -271,6 +271,7 @@ Column {
         width: root.width
         visible: root.active && root.decoderNotice && !ShellStore.streamerStopExpected
         warning: true
+        formatNotice: true
         title: qsTr("Decoder can't keep up")
         subtitle: qsTr("This device is dropping frames while decoding. Lower the resolution or frame rate in Settings.")
         lifetimeFraction: root.decoderLifetime
