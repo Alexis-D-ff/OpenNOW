@@ -38,15 +38,16 @@ pub fn vaapi_color_support(codec: VideoCodec) -> VaapiColorSupport {
 pub(crate) use ffmpeg::{FfmpegDecoder, FfmpegMode};
 pub(crate) use v4l2::probe_v4l2_devices;
 
-pub(crate) fn probe_v4l2_request() -> std::result::Result<String, String> {
+pub(crate) fn probe_v4l2_request(codec: VideoCodec) -> std::result::Result<String, String> {
     #[cfg(feature = "ffmpeg")]
     {
-        let device = v4l2_request::probe()?;
-        let decoder = FfmpegDecoder::probe(VideoCodec::H265, FfmpegMode::V4l2Request)?;
+        let device = v4l2_request::probe(codec, 1920, 1080)?;
+        let decoder = FfmpegDecoder::probe(codec, FfmpegMode::V4l2Request)?;
         Ok(format!("{device}; {decoder}"))
     }
     #[cfg(not(feature = "ffmpeg"))]
     {
+        let _ = codec;
         Err("crate was built without the ffmpeg feature".to_owned())
     }
 }

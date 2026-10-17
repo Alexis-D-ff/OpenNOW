@@ -704,8 +704,8 @@ struct PlaneGeometry {
 
 #[derive(Debug, Clone)]
 pub(super) struct NegotiatedFormat {
-    width: u32,
-    height: u32,
+    pub(super) width: u32,
+    pub(super) height: u32,
     visible_left: u32,
     visible_top: u32,
     visible_width: u32,

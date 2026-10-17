@@ -84,7 +84,15 @@ pub fn probe_video_capabilities() -> (Vec<BackendCapability>, PresentationCapabi
         vec![
             BackendCapability::from_probe("vaapi-h264", probe_vaapi()),
             BackendCapability::from_probe("v4l2-h264", v4l2),
-            BackendCapability::from_probe("v4l2-h265", probe_v4l2_request()),
+            BackendCapability::from_probe(
+                "v4l2-request-h264",
+                probe_v4l2_request(VideoCodec::H264),
+            ),
+            BackendCapability::from_probe(
+                "v4l2-request-h265",
+                probe_v4l2_request(VideoCodec::H265),
+            ),
+            BackendCapability::from_probe("v4l2-request-av1", probe_v4l2_request(VideoCodec::Av1)),
             BackendCapability::from_probe(
                 "vulkan-video-h264",
                 probe_ffmpeg_vulkan(VideoCodec::H264),
