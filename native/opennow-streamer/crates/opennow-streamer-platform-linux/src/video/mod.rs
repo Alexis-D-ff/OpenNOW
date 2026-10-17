@@ -38,12 +38,17 @@ pub fn vaapi_color_support(codec: VideoCodec) -> VaapiColorSupport {
 pub(crate) use ffmpeg::{FfmpegDecoder, FfmpegMode};
 pub(crate) use v4l2::probe_v4l2_devices;
 
-pub(crate) fn probe_v4l2_request(codec: VideoCodec) -> std::result::Result<String, String> {
+pub(crate) fn probe_v4l2_request(
+    codec: VideoCodec,
+) -> std::result::Result<(String, Option<[u32; 2]>), String> {
     #[cfg(feature = "ffmpeg")]
     {
         let device = v4l2_request::probe(codec, 1920, 1080)?;
         let decoder = FfmpegDecoder::probe(codec, FfmpegMode::V4l2Request)?;
-        Ok(format!("{device}; {decoder}"))
+        Ok((
+            format!("{}; {decoder}", device.detail),
+            device.max_dimensions,
+        ))
     }
     #[cfg(not(feature = "ffmpeg"))]
     {

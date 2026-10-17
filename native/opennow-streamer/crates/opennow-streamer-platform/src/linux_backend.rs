@@ -46,6 +46,7 @@ impl LinuxCapabilitySnapshot {
                 name: "missing-decoder-probe",
                 available: false,
                 detail: format!("capability probe did not return {name}"),
+                max_decode_dimensions: None,
             })
     }
 
@@ -496,7 +497,9 @@ fn v4l2_capability(
                 None
             };
             CodecCapability {
-                max_decode_dimensions: None,
+                max_decode_dimensions: request.max_decode_dimensions.filter(|_| available).map(
+                    |[width, height]| opennow_streamer_protocol::DecodeDimensions { width, height },
+                ),
                 hdr_supported: Some(false),
                 hdr_color_qualities: None,
                 color_qualities: Some(if available {
@@ -737,6 +740,7 @@ mod tests {
             name: "v4l2-request-h265",
             available: false,
             detail: "MEDIA_IOC_REQUEST_ALLOC failed: Permission denied (os error 13)".to_owned(),
+            max_decode_dimensions: None,
         });
         let backend = v4l2_capability(&capabilities, "wayland");
         assert!(!backend.available);
@@ -796,9 +800,10 @@ mod tests {
     #[test]
     fn request_h264_and_av1_are_available_without_stateful_or_hevc_decoders() {
         let mut capabilities = snapshot(false, false, false, true, vec!["wayland"]);
-        capabilities
-            .decoders
-            .push(capability("v4l2-request-h264", true));
+        capabilities.decoders.push(BackendCapability {
+            max_decode_dimensions: Some([1920, 1088]),
+            ..capability("v4l2-request-h264", true)
+        });
         capabilities
             .decoders
             .push(capability("v4l2-request-av1", true));
@@ -808,6 +813,17 @@ mod tests {
             assert_eq!(codec.available, codec.codec != "h265", "{}", codec.codec);
             assert_eq!(codec.hdr_supported, Some(false));
         }
+        let h264 = backend
+            .codecs
+            .iter()
+            .find(|codec| codec.codec == "h264")
+            .unwrap();
+        assert_eq!(
+            h264.max_decode_dimensions
+                .as_ref()
+                .map(|limit| (limit.width, limit.height)),
+            Some((1920, 1088))
+        );
         assert_eq!(
             select_video_path_for(Some("v4l2"), &capabilities, "wayland").path,
             LinuxVideoPath::Hardware(DecoderPreference::V4l2Only)
@@ -823,6 +839,11 @@ mod tests {
         );
         let x11 = v4l2_capability(&capabilities, "x11");
         assert!(!x11.available);
+        assert!(
+            x11.codecs
+                .iter()
+                .all(|codec| codec.max_decode_dimensions.is_none())
+        );
     }
 
     #[test]
@@ -1095,6 +1116,7 @@ mod tests {
             name,
             available,
             detail: format!("{name} probe"),
+            max_decode_dimensions: None,
         }
     }
 
