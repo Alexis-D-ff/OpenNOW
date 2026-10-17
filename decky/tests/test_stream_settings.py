@@ -56,6 +56,21 @@ class StreamSettingsTests(unittest.TestCase):
         values = stream_settings.read(self.data_dir)
         self.assertEqual((values["fps"], values["maxBitrateMbps"], values["enableHdr"]), (60, 0.5, True))
 
+    def test_identity_choice_records_the_marker_the_core_checks(self):
+        for value in (False, True):
+            with self.subTest(value=value):
+                self.path.write_text("{}")
+                stream_settings.write(self.data_dir, "identifyAsSteamDeck", value)
+                saved = json.loads(self.path.read_text())
+                self.assertIs(saved["identifyAsSteamDeck"], value)
+                self.assertIs(saved[stream_settings.IDENTITY_DECIDED_MARKER], True)
+
+    def test_only_the_identity_choice_records_the_marker(self):
+        stream_settings.write(self.data_dir, "fps", 90)
+        saved = json.loads(self.path.read_text())
+        self.assertNotIn(stream_settings.IDENTITY_DECIDED_MARKER, saved)
+        self.assertEqual(saved["fps"], 90)
+
 
 if __name__ == "__main__":
     unittest.main()
