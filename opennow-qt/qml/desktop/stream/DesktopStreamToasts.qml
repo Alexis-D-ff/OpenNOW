@@ -33,23 +33,22 @@ Column {
     property real antiAfkLifetime: 0
     width: Math.min(384, parent ? Math.max(0, parent.width - 48) : 384)
     spacing: 12
-    readonly property int pendingNotices: [
-        antiAfkNotice,
-        decoderNotice,
-        colorNotice,
-        hdrNotice,
-        bugReportNotice && bugReport !== null,
-        connectionNotificationsEnabled && controllerNotice !== null,
-        connectionNotificationsEnabled && lossNotice
-    ].filter(pending => pending).length
-    readonly property real tallestNotice: {
-        let tallest = 0
-        for (let index = 0; index < children.length; ++index)
-            tallest = Math.max(tallest, children[index].height)
-        return tallest
-    }
-    readonly property real stackHeight: pendingNotices === 0 ? 0
-        : pendingNotices * tallestNotice + spacing * (pendingNotices - 1)
+    readonly property var pendingStack: [
+        antiAfkNotice ? antiAfkToast : null,
+        decoderNotice ? decoderToast : null,
+        colorNotice ? colorToast : null,
+        hdrNotice ? hdrToast : null,
+        bugReportNotice && bugReport !== null ? bugReportToast : null,
+        connectionNotificationsEnabled && controllerNotice !== null ? controllerToast : null,
+        connectionNotificationsEnabled && lossNotice ? lossToast : null
+    ].filter(notice => notice !== null)
+    readonly property int pendingNotices: pendingStack.length
+    // The gate reserves what the notices that are showing actually paint. Summing the pending
+    // notices keeps a tall notice from reserving its height for the others, which is what makes a
+    // wrapped notice honest: it reserves the wrapped height only while it is the one on screen.
+    readonly property real stackHeight: pendingStack.length === 0 ? 0
+        : pendingStack.reduce((total, notice) => total + notice.height, 0)
+            + spacing * (pendingStack.length - 1)
 
     function reset() {
         controllerAnimation.stop()
@@ -255,6 +254,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: antiAfkToast
         objectName: "streamAntiAfkToast"
         width: root.width
         visible: root.active && root.antiAfkNotice
@@ -267,6 +267,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: decoderToast
         objectName: "streamDecoderLimitedToast"
         width: root.width
         visible: root.active && root.decoderNotice && !ShellStore.streamerStopExpected
@@ -278,6 +279,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: colorToast
         objectName: "streamColorFormatToast"
         width: root.width
         visible: root.active && root.colorNotice && !ShellStore.streamerStopExpected
@@ -292,6 +294,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: hdrToast
         objectName: "streamHdrDowngradeToast"
         width: root.width
         visible: root.active && root.hdrNotice && !ShellStore.streamerStopExpected
@@ -303,6 +306,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: bugReportToast
         objectName: "streamBugReportToast"
         width: root.width
         visible: root.active && root.bugReportNotice && root.bugReport !== null
@@ -315,6 +319,7 @@ Column {
     }
 
     DesktopStreamToast {
+        id: controllerToast
         objectName: "streamControllerToast"
         width: root.width
         visible: root.active && root.connectionNotificationsEnabled && root.controllerNotice !== null
@@ -333,6 +338,7 @@ Column {
         lifetimeFraction: root.controllerLifetime
     }
     DesktopStreamToast {
+        id: lossToast
         objectName: "streamPacketLossToast"
         width: root.width
         visible: root.active && root.connectionNotificationsEnabled && root.lossNotice
