@@ -884,6 +884,22 @@ if(BUILD_TESTING)
         set_tests_properties("qml-hdr-downgrade-${mode}" PROPERTIES
             ENVIRONMENT "${color_format_environment}" TIMEOUT 15)
     endforeach()
+    # The toast column only raises a notice while no blocking stream overlay is open, so the
+    # decoder notice is pinned on the bare stream route at the three audited sizes: the wrapped
+    # instruction must fit the column and stay inside the window.
+    qt_add_resources(opennow-qt "decoder-notice-acceptance"
+        PREFIX "/acceptance" BASE tests FILES tests/StreamDecoderNoticeAcceptance.qml)
+    foreach(size_pair "960;540" "1440;900" "1920;1080")
+        list(GET size_pair 0 decoder_notice_width)
+        list(GET size_pair 1 decoder_notice_height)
+        add_test(NAME "qml-decoder-notice-${decoder_notice_width}x${decoder_notice_height}"
+            COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
+                --route stream --smoke-decoder-notice --reduced-motion
+                --smoke-width ${decoder_notice_width} --smoke-height ${decoder_notice_height}
+                --screenshot ${CMAKE_CURRENT_BINARY_DIR}/decoder-notice-${decoder_notice_width}x${decoder_notice_height}.png)
+        set_tests_properties("qml-decoder-notice-${decoder_notice_width}x${decoder_notice_height}" PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
+    endforeach()
     add_test(NAME "qml-stream-toast-pending-stats-overlay"
         COMMAND opennow-qt --smoke-test --allow-multiple-instances --desktop
             --route stream --smoke-stream-toast-pending
