@@ -74,6 +74,7 @@ def install_with_droiddeck(bundle: Path, progress: Progress) -> None:
                     progress("install", min(done / steps, 1.0))
                 elif event.get("e") == "error":
                     error = event.get("message")
+            child.wait()
         finally:
             watchdog.cancel()
     if expired.is_set():
