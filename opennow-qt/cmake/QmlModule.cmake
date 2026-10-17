@@ -272,6 +272,8 @@ qt_add_qml_module(opennow-qt
         qml/components/TogglePill.qml
         qml/components/TenBitWarningDialog.qml
         qml/components/VirtualKeyboard.qml
+        qml/components/WindowResizeEdges.qml
+        qml/components/WindowTitleBar.qml
         qml/desktop/auth/DesktopAccountChip.qml
         qml/desktop/auth/DesktopAccountPicker.qml
         qml/desktop/auth/DesktopAccountTile.qml

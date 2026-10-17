@@ -13,8 +13,20 @@ ApplicationWindow {
     color: "black"
     title: qsTr("OpenNOW")
     WindowTheme {
+        id: windowTheme
         targetWindow: window
         darkMode: !Theme.lightMode
+    }
+    header: WindowTitleBar {
+        targetWindow: window
+        visible: windowTheme.clientDecorations && window.visibility !== ApplicationWindow.FullScreen
+    }
+    WindowResizeEdges {
+        parent: window.contentItem.parent
+        anchors.fill: parent
+        z: 10000
+        targetWindow: window
+        visible: windowTheme.clientDecorations && window.visibility === ApplicationWindow.Windowed
     }
     property bool applicationCloseConfirmed: false
     property bool librarySearchPending: false
@@ -925,9 +937,9 @@ ApplicationWindow {
         readonly property bool desktopSessionConflict: window.desktopSurfaceActive
             && presentedOverlay === "session-conflict"
         readonly property real consoleScale: desktopSessionConflict
-            ? 1 : Math.min(window.width / 1920, window.height / 1080)
-        width: desktopSessionConflict ? window.width : window.width / consoleScale
-        height: desktopSessionConflict ? window.height : window.height / consoleScale
+            ? 1 : Math.min(parent.width / 1920, parent.height / 1080)
+        width: desktopSessionConflict ? parent.width : parent.width / consoleScale
+        height: desktopSessionConflict ? parent.height : parent.height / consoleScale
         scale: consoleScale
         transformOrigin: Item.TopLeft
         overlay: AppController.overlay
@@ -986,10 +998,10 @@ ApplicationWindow {
     }
 
     Item {
-        readonly property real consoleScale: Math.min(window.width / 1920, window.height / 1080)
+        readonly property real consoleScale: Math.min(parent.width / 1920, parent.height / 1080)
         visible: consoleSystemWarning.present
-        width: window.width / consoleScale
-        height: window.height / consoleScale
+        width: parent.width / consoleScale
+        height: parent.height / consoleScale
         scale: consoleScale
         transformOrigin: Item.TopLeft
         z: 1200
