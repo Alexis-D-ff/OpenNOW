@@ -47,6 +47,7 @@ public:
                                 int timeoutMs = 15'000);
     Q_INVOKABLE bool cancel(const QString &requestId);
     Q_INVOKABLE void logShellDiagnostic(const QString &message);
+    void logInputDiagnostic(const QString &message);
     Q_INVOKABLE void markUiReady();
     void setNativeHdrSupported(bool supported) { m_nativeHdrSupported = supported; }
     void setNativeHdrDisplay(const NativeHdrDisplay &display) { m_nativeHdrDisplay = display; }

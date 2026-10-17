@@ -34,6 +34,7 @@ public:
     virtual void shutdown() = 0;
     virtual QList<Device> enumerate() = 0;
     virtual Handle open(const Device &device) = 0;
+    virtual bool accessDenied(const Device &device) = 0;
     virtual void close(Handle handle) = 0;
     virtual QByteArray descriptor(Handle handle) = 0;
     virtual int read(Handle handle, unsigned char *bytes, int capacity) = 0;
@@ -54,6 +55,7 @@ public:
         quint16 product = 0;
         quint8 slot = 0;
         quint64 incarnation = 0;
+        bool noAccess = false;
         bool operator==(const DetectedDevice &) const = default;
     };
     struct Batch {
@@ -79,6 +81,7 @@ public:
 
 signals:
     void inventoryChanged();
+    void diagnostic(const QString &message);
 
 protected:
     void run() override;

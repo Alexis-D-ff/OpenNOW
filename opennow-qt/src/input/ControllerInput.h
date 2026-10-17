@@ -135,6 +135,7 @@ signals:
     void deviceClaimsChanged();
     void genericDeviceClaimsChanged();
     void genericHidReport(const GenericHidReport &report);
+    void inputDiagnostic(const QString &message);
     void sonySnapshot(const ControllerInput::SonySnapshot &snapshot);
     void localActionRequested(quint32 action);
 
