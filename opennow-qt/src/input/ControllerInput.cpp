@@ -128,11 +128,18 @@ void ControllerInput::setForwardFlightControls(bool enabled)
 void ControllerInput::setGenericHidAdmission(quint8 slot, quint64 incarnation, GenericHidAdmission admission)
 {
     const auto claims = genericHidClaims();
-    if (!incarnation || std::none_of(claims.cbegin(), claims.cend(), [&](const auto &claim) {
-            return claim.slot == slot && claim.incarnation == incarnation;
-        })) return;
+    const auto claim = std::find_if(claims.cbegin(), claims.cend(), [&](const auto &entry) {
+        return entry.slot == slot && entry.incarnation == incarnation;
+    });
+    if (!incarnation || claim == claims.cend()) return;
     if (m_genericHidAdmissions.value(incarnation, GenericHidAdmission::Pending) == admission) return;
     m_genericHidAdmissions.insert(incarnation, admission);
+    if (admission != GenericHidAdmission::Pending) {
+        emit inputDiagnostic(QStringLiteral("generic-hid %1 slot=%2 %3 by server")
+            .arg(GenericHidInput::deviceMetadata(claim->vendor, claim->product).value(QStringLiteral("vidPid")).toString())
+            .arg(slot)
+            .arg(admission == GenericHidAdmission::Admitted ? QStringLiteral("admitted") : QStringLiteral("declined")));
+    }
     refreshFlightDevices();
 }
 
@@ -169,6 +176,7 @@ void ControllerInput::refreshFlightDevices()
         metadata.insert(QStringLiteral("deviceId"), device.deviceId);
         QString status = m_forwardFlightControls ? QStringLiteral("ready") : QStringLiteral("ignored");
         int player = 0;
+        if (m_forwardFlightControls && device.noAccess) status = QStringLiteral("no-access");
         if (m_forwardFlightControls && device.incarnation) {
             switch (m_genericHidAdmissions.value(device.incarnation, GenericHidAdmission::Pending)) {
             case GenericHidAdmission::Pending: break;
@@ -586,6 +594,7 @@ void ControllerInput::poll()
 {
     if (m_genericHid) {
         auto batch = m_genericHid->drain();
+        for (const auto &message : std::as_const(batch.diagnostics)) emit inputDiagnostic(message);
         if (batch.inventoryChanged) {
             updatePollInterval();
             emit genericDeviceClaimsChanged();

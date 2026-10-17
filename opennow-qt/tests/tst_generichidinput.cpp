@@ -36,6 +36,7 @@ public:
     QHash<QByteArray, std::deque<QByteArray>> reports;
     QList<Output> outputs;
     QSet<QByteArray> disconnected;
+    QSet<QByteArray> denied;
     int opens = 0;
     int closes = 0;
     int scans = 0;
@@ -59,8 +60,15 @@ public:
     {
         QMutexLocker lock(&mutex);
         checkThread();
+        if (denied.contains(device.path)) return nullptr;
         ++opens;
         return new Open{device.path};
+    }
+    bool accessDenied(const Device &device) override
+    {
+        QMutexLocker lock(&mutex);
+        checkThread();
+        return denied.contains(device.path);
     }
     void close(Handle handle) override
     {
@@ -263,6 +271,37 @@ private slots:
         }
         QTRY_VERIFY(input.flightDevices().isEmpty());
         QVERIFY(!changes.isEmpty());
+    }
+
+    void deniedAccessReportsNoAccessAndRetriesWhenGranted()
+    {
+        auto backend = std::make_shared<FakeBackend>();
+        backend->devices = {device("a", "parent")};
+        backend->denied = {"a"};
+        ControllerInput input(nullptr, backend);
+        QSignalSpy diagnostics(&input, &ControllerInput::inputDiagnostic);
+        const auto status = [&] {
+            const auto devices = input.flightDevices();
+            return devices.size() == 1 ? devices.first().toMap().value(QStringLiteral("status")).toString() : QString{};
+        };
+        QTRY_COMPARE(status(), QStringLiteral("no-access"));
+        QVERIFY(input.genericHidClaims().isEmpty());
+        QTRY_VERIFY(std::any_of(diagnostics.cbegin(), diagnostics.cend(), [](const auto &arguments) {
+            return arguments.first().toString().contains(QStringLiteral("044f:0402 refused: no read/write access to a"));
+        }));
+        {
+            QMutexLocker lock(&backend->mutex);
+            backend->denied.clear();
+        }
+        QTRY_COMPARE(input.genericHidClaims().size(), 1);
+        QTRY_COMPARE(status(), QStringLiteral("ready"));
+        const auto claim = input.genericHidClaims().first();
+        diagnostics.clear();
+        input.setGenericHidAdmission(claim.slot, claim.incarnation, GenericHidAdmission::Declined);
+        QCOMPARE(diagnostics.size(), 1);
+        QCOMPARE(diagnostics.first().first().toString(), QStringLiteral("generic-hid 044f:0402 slot=0 declined by server"));
+        input.setForwardFlightControls(false);
+        QCOMPARE(status(), QStringLiteral("ignored"));
     }
 
     void allowlistedSdlControllerUsesNormalPathWhenForwardingDisabled()

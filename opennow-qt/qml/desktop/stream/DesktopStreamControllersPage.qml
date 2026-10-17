@@ -60,6 +60,7 @@ FocusScope {
         switch (device.status) {
         case "active": return qsTr("ACTIVE")
         case "declined": return qsTr("DECLINED")
+        case "no-access": return qsTr("NO PERMISSION")
         case "controller": return qsTr("CONTROLLER")
         case "ignored": return qsTr("IGNORED")
         default: return qsTr("READY")
@@ -67,7 +68,7 @@ FocusScope {
     }
     function flightTone(device) {
         if (device.status === "active") return DesktopTokens.flightReady
-        if (device.status === "declined") return DesktopTokens.flightDeclined
+        if (device.status === "declined" || device.status === "no-access") return DesktopTokens.flightDeclined
         if (device.status === "controller") return DesktopTokens.flightWarning
         return DesktopTokens.textMuted
     }
@@ -75,6 +76,7 @@ FocusScope {
         let detail = flightType(device)
         switch (device.status) {
         case "declined": detail = qsTr("declined by the server, not sent"); break
+        case "no-access": detail = qsTr("no permission to open, not sent"); break
         case "controller": detail = qsTr("sent as controller P%1").arg(device.player); break
         case "ignored": detail = qsTr("not forwarded"); break
         }

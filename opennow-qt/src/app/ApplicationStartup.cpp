@@ -169,6 +169,8 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
     Localization localization;
     application.installTranslator(&localization);
     CoreClient coreClient;
+    QObject::connect(&controllerInput, &ControllerInput::inputDiagnostic,
+                     &coreClient, &CoreClient::logInputDiagnostic);
     const auto coreProgram = AcceptanceSession::coreProgram(arguments);
     GraphicsDeviceSelection graphicsDevices(GraphicsDeviceSelection::detectAdapters(),
 #ifdef Q_OS_WIN

@@ -80,8 +80,15 @@ Settings → Controls persists native forwarding in the Rust core, enabled by
 default. Qt changes routing only after the setting write is confirmed. When it
 is off, mapped SDL devices become controllers and unmapped devices are ignored.
 The connected list distinguishes detection (`ready`) from a verified server
-attach (`active`) and refusal (`declined`). Session teardown and capture detach
-reset admission; stale incarnations cannot update a replacement device.
+attach (`active`) and refusal (`declined`). On Linux, a device whose hidraw node
+OpenNOW cannot open for reading and writing shows `no-access`; the HID worker
+checks access on every discovery scan and retries once a udev rule grants it.
+Session teardown and capture detach reset admission; stale incarnations cannot
+update a replacement device.
+
+HID worker refusals, opens, failures, and server admission results are written
+to the diagnostics log as `input generic-hid …` lines, so an exported report
+shows why a device never reached the game.
 
 ### T.Flight Hotas 4 guidance
 

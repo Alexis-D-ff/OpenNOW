@@ -34,6 +34,7 @@ public:
     virtual void shutdown() = 0;
     virtual QList<Device> enumerate() = 0;
     virtual Handle open(const Device &device) = 0;
+    virtual bool accessDenied(const Device &device) = 0;
     virtual void close(Handle handle) = 0;
     virtual QByteArray descriptor(Handle handle) = 0;
     virtual int read(Handle handle, unsigned char *bytes, int capacity) = 0;
@@ -54,12 +55,14 @@ public:
         quint16 product = 0;
         quint8 slot = 0;
         quint64 incarnation = 0;
+        bool noAccess = false;
         bool operator==(const DetectedDevice &) const = default;
     };
     struct Batch {
         bool inventoryChanged = false;
         QList<GenericHidDeviceClaim> claims;
         QList<GenericHidReport> reports;
+        QStringList diagnostics;
     };
 
     explicit GenericHidInput(std::shared_ptr<GenericHidBackend> backend = {}, QObject *parent = nullptr);
@@ -92,6 +95,7 @@ private:
     void removeLocked(quint8 slot, quint64 incarnation);
     void markInventoryChangedLocked();
     bool append(const GenericHidReport &report);
+    void diagnose(const QString &message);
 
     std::shared_ptr<GenericHidBackend> m_backend;
     mutable QMutex m_mutex;
@@ -102,6 +106,8 @@ private:
     int m_drainSlot = 0;
     bool m_inventoryChanged = false;
     QSet<quint64> m_failedSources;
+    QStringList m_diagnostics;
+    quint32 m_droppedDiagnostics = 0;
     QList<DetectedDevice> m_devices;
     bool m_forwardingEnabled = true;
     quint64 m_forwardingEpoch = 0;

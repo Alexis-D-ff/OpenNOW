@@ -53,6 +53,8 @@ DesktopSettingsPanel {
     function deviceDescription(device) {
         if (device.status === "declined")
             return qsTr("%1 · The server declined this device. It stays idle and is not emulated as a controller.").arg(deviceType(device.type));
+        if (device.status === "no-access")
+            return qsTr("%1 · OpenNOW has no permission to open this device. Add a udev rule that grants access to its hidraw node.").arg(deviceType(device.type));
         if (device.status === "controller")
             return qsTr("Mapped as an Xbox controller. Some axes and buttons may not reach the game.");
         if (device.status === "ignored")
@@ -66,6 +68,8 @@ DesktopSettingsPanel {
             return qsTr("ACTIVE IN SESSION");
         case "declined":
             return qsTr("NOT ACCEPTED BY SERVER");
+        case "no-access":
+            return qsTr("NO PERMISSION");
         case "controller":
             return qsTr("CONTROLLER · PLAYER %1").arg(device.player);
         case "ignored":
@@ -76,7 +80,7 @@ DesktopSettingsPanel {
     }
 
     function statusColor(status) {
-        if (status === "declined")
+        if (status === "declined" || status === "no-access")
             return DesktopTokens.flightDeclined;
         if (status === "controller")
             return Theme.label;

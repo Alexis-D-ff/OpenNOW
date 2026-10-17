@@ -101,14 +101,24 @@ void appendCoreDiagnostics(const QList<QByteArray> &lines)
         file.write("\n");
     }
 }
-}
 
-void CoreClient::logShellDiagnostic(const QString &message)
+void appendSingleLineDiagnostic(const QByteArray &prefix, const QString &message)
 {
     auto safe = message.left(1024);
     safe.replace(u'\n', u' ');
     safe.replace(u'\r', u' ');
-    appendCoreDiagnostics({QByteArray("shell-mode ") + safe.toUtf8()});
+    appendCoreDiagnostics({prefix + safe.toUtf8()});
+}
+}
+
+void CoreClient::logShellDiagnostic(const QString &message)
+{
+    appendSingleLineDiagnostic("shell-mode ", message);
+}
+
+void CoreClient::logInputDiagnostic(const QString &message)
+{
+    appendSingleLineDiagnostic("input ", message);
 }
 
 CoreClient::CoreClient(QObject *parent)
