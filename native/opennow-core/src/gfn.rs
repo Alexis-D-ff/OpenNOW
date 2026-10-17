@@ -860,7 +860,7 @@ impl GfnService {
             access_token,
             refresh_token: payload["refresh_token"].as_str().map(ToOwned::to_owned),
             id_token: payload["id_token"].as_str().map(ToOwned::to_owned),
-            id_token_expires_at: payload["id_token"].as_str().and_then(jwt_expiry),
+            id_token_expires_at: payload["id_token"].as_str().and_then(received_jwt_expiry),
             expires_at: token_expiry(&payload),
             auth_client_id: STEAM_DECK_CLIENT_ID.to_owned(),
             client_token: payload["client_token"].as_str().map(ToOwned::to_owned),
@@ -1082,6 +1082,7 @@ impl GfnService {
                     json!({"attempted":true,"outcome":"refreshed","message":"Saved session token refreshed."}),
                 ),
                 Ok(_) => {
+                    eprintln!("auth: renewed token is already expired; check the system clock");
                     self.defer_refresh();
                     self.mark_needs_sign_in(&current.user.user_id);
                     (
@@ -2943,7 +2944,7 @@ impl GfnService {
                 .map(ToOwned::to_owned)
                 .or_else(|| session.tokens.id_token.clone()),
             id_token_expires_at: if let Some(token) = payload["id_token"].as_str() {
-                jwt_expiry(token)
+                received_jwt_expiry(token)
             } else {
                 session
                     .tokens
@@ -3066,7 +3067,7 @@ fn token_expiry(payload: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-fn jwt_expiry(token: &str) -> Option<u64> {
+fn jwt_claims(token: &str) -> Option<Value> {
     if token.len() > 64 * 1024 {
         return None;
     }
@@ -3080,9 +3081,24 @@ fn jwt_expiry(token: &str) -> Option<u64> {
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
-    serde_json::from_slice::<Value>(&decoded).ok()?["exp"]
-        .as_u64()?
-        .checked_mul(1000)
+    serde_json::from_slice(&decoded).ok()
+}
+
+fn jwt_expiry(token: &str) -> Option<u64> {
+    jwt_claims(token)?["exp"].as_u64()?.checked_mul(1000)
+}
+
+fn received_jwt_expiry(token: &str) -> Option<u64> {
+    let claims = jwt_claims(token)?;
+    let expiry = claims["exp"].as_u64()?;
+    let lifetime = claims["iat"]
+        .as_u64()
+        .and_then(|issued| expiry.checked_sub(issued))
+        .and_then(|seconds| token_lifetime(&json!({ "expires_in": seconds })));
+    match lifetime {
+        Some(lifetime) => now_ms().checked_add(lifetime),
+        None => expiry.checked_mul(1000),
+    }
 }
 
 fn is_definitive_auth_revocation(error: &ServiceError) -> bool {
@@ -4271,6 +4287,58 @@ pub(crate) mod tests {
         session.tokens.expires_at = 0;
         assert_eq!(session.tokens.expiry(TokenPurpose::StarfleetAccess), 0);
         assert!(session.tokens.expiry(TokenPurpose::ServiceId) > now_ms());
+    }
+
+    fn jwt_issued_at(user: &str, issued_ms: u64, expiry_ms: u64) -> String {
+        format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(
+                    &json!({"sub":user,"iat":issued_ms / 1000,"exp":expiry_ms / 1000})
+                )
+                .unwrap()
+            )
+        )
+    }
+
+    #[test]
+    fn received_id_expiry_follows_token_lifetime_not_local_wall_clock() {
+        let server_now = now_ms() - 7 * 3_600_000;
+        let token = jwt_issued_at("user", server_now, server_now + 3_600_000);
+        assert!(jwt_expiry(&token).unwrap() < now_ms());
+        let expiry = received_jwt_expiry(&token).unwrap();
+        assert!(expiry > now_ms() + 3_500_000 && expiry <= now_ms() + 3_600_000);
+        assert_eq!(
+            received_jwt_expiry(&jwt("user", 5_000_000)),
+            Some(5_000_000)
+        );
+        let inverted = jwt_issued_at("user", 9_000_000, 5_000_000);
+        assert_eq!(received_jwt_expiry(&inverted), Some(5_000_000));
+    }
+
+    #[test]
+    fn renewal_survives_a_local_clock_running_ahead_of_the_issuer() {
+        let server_now = now_ms() - 7 * 3_600_000;
+        let token = jwt_issued_at("user", server_now, server_now + 3_600_000);
+        let (url, server) = mock_responses(
+            vec![(
+                200,
+                json!({"access_token":"renewed","id_token":token,"expires_in":3600}),
+            )],
+            |_| {},
+        );
+        let (service, path) = test_service(&url);
+        let mut session = auth_fixture("user");
+        session.tokens.id_token = Some(jwt("user", 1000));
+        service.state.lock().unwrap().session = Some(session);
+        let session = service
+            .authenticated_snapshot(TokenPurpose::ServiceId, false)
+            .map(|(session, _)| session)
+            .unwrap();
+        assert_eq!(session.tokens.access_token, "renewed");
+        assert!(session.tokens.expiry(TokenPurpose::ServiceId) > now_ms());
+        server.join().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
