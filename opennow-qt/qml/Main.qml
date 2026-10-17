@@ -1266,7 +1266,7 @@ ApplicationWindow {
         parent: Overlay.overlay
         anchors.centerIn: parent
         message: ShellStore.clockSkewDismissed ? "" : ShellStore.clockSkewMessage
-        sessionSafe: window.desktopSurfaceActive && ShellStore.updaterSessionSafe
+        sessionSafe: window.desktopSurfaceActive && ShellStore.clockSkewSessionSafe
         onDismissed: ShellStore.clockSkewDismissed = true
     }
 

@@ -2876,8 +2876,8 @@ private:
             var Qt = {callLater:function(callback) { callbacks.push(callback); }};
         )JS"));
         if (setup.isError()) return false;
-        for (const auto *name : {"updaterSessionSafe", "updaterBusy", "updaterCanInstall", "updaterNeedsReconciliation",
-                                 "updaterAttention", "updaterDownloadFraction"}) {
+        for (const auto *name : {"sessionWorkIdle", "updaterSessionSafe", "updaterBusy", "updaterCanInstall",
+                                 "updaterNeedsReconciliation", "updaterAttention", "updaterDownloadFraction"}) {
             const auto match = QRegularExpression(QStringLiteral(
                 "    readonly property (?:bool|string|real) %1: (.*?)(?=\\n    (?:property|readonly|on[A-Z]|//))").arg(QString::fromLatin1(name)),
                 QRegularExpression::DotMatchesEverythingOption).match(shell);

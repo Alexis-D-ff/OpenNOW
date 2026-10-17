@@ -348,12 +348,14 @@ QtObject {
     property string autoDownloadAttempt: ""
     property int autoDownloadAttemptCount: 0
     property double autoDownloadAttemptMs: 0
-    readonly property bool updaterSessionSafe: !activeSession && !streamBusy && !sessionRecoveryPending
+    readonly property bool sessionWorkIdle: !activeSession && !streamBusy && !sessionRecoveryPending
         && activeSessionRequestId === "" && sessionClaimRequestId === "" && streamCreateRequestId === ""
         && streamerStartRequestId === "" && streamerPrepareRequestId === "" && streamerStopRequestId === ""
-        && !pendingLaunchParams && !pendingDirectLaunch
         && ["idle", "error"].indexOf(streamState) >= 0
         && ["stopped", "error"].indexOf(streamerStatus) >= 0
+    readonly property bool updaterSessionSafe: sessionWorkIdle
+        && !pendingLaunchParams && !pendingDirectLaunch
+    readonly property bool clockSkewSessionSafe: sessionWorkIdle
     readonly property bool applicationQuitNeedsConfirmation: settings.confirmQuitWhenIdle !== false
         || !updaterSessionSafe || resumableSession !== null
     readonly property bool updaterBusy: updaterReconciling || updaterCheckRequestId !== ""
