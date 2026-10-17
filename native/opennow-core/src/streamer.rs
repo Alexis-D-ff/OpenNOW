@@ -3680,6 +3680,30 @@ mod tests {
     }
 
     #[test]
+    fn embedded_v4l2_request_h264_steps_down_to_the_hantro_limit() {
+        let caps = json!({"protocolVersion":7,"videoBackends":[{
+            "backend":"v4l2","platform":"linux","available":true,"codecs":[
+                {"codec":"h264","available":true,"colorQualities":["8bit_420"],
+                    "maxDecodeDimensions":{"width":1920,"height":1088}},
+                {"codec":"av1","available":true,"colorQualities":["8bit_420"]}
+            ]
+        }]});
+        for (codec, resolution, expected) in [
+            ("h264", "2560x1440", "1920x1080"),
+            ("h264", "3440x1440", "1920x1080"),
+            ("h264", "1920x1080", "1920x1080"),
+            ("av1", "2560x1440", "2560x1440"),
+        ] {
+            let resolved = StreamerService::embedded_session_settings(
+                &json!({"codec":codec,"resolution":resolution,"fps":60}),
+                &caps,
+            )
+            .unwrap();
+            assert_eq!(resolved["resolution"], expected, "{codec} {resolution}");
+        }
+    }
+
+    #[test]
     fn embedded_dimension_preflight_rejects_invalid_limits_and_oversized_resumes() {
         let mut caps = json!({"protocolVersion":7,"videoBackends":[{
             "backend":"d3d11","available":true,"codecs":[{"codec":"h265","available":true,

@@ -17,6 +17,9 @@ const MEDIA_IOC_REQUEST_ALLOC: vidioc::_IOC_TYPE =
     ((2_u64 << 30) | (4 << 16) | ((b'|' as u64) << 8) | 5) as vidioc::_IOC_TYPE;
 const MEDIA_IOC_G_TOPOLOGY: vidioc::_IOC_TYPE =
     ((3_u64 << 30) | (72 << 16) | ((b'|' as u64) << 8) | 4) as vidioc::_IOC_TYPE;
+const VIDIOC_ENUM_FRAMESIZES: vidioc::_IOC_TYPE =
+    ((3_u64 << 30) | (44 << 16) | ((b'V' as u64) << 8) | 74) as vidioc::_IOC_TYPE;
+const V4L2_FRMSIZE_TYPE_DISCRETE: u32 = 1;
 const MEDIA_INTF_T_V4L_VIDEO: u32 = 0x200;
 const MAX_DEVICE_NODES: usize = 256;
 const MAX_INTERFACES: usize = 1024;
@@ -50,6 +53,21 @@ struct MediaInterface {
     devnode: [u32; 16],
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct FrameSizeEnum {
+    index: u32,
+    pixel_format: u32,
+    kind: u32,
+    sizes: [u32; 6],
+    reserved: [u32; 2],
+}
+
+pub(super) struct RequestProbe {
+    pub(super) detail: String,
+    pub(super) max_dimensions: Option<[u32; 2]>,
+}
+
 struct RequestDevice {
     file: fs::File,
     output_type: u32,
@@ -72,7 +90,7 @@ pub(super) fn probe(
     codec: VideoCodec,
     width: u32,
     height: u32,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<RequestProbe, String> {
     let coded = coded_format(codec);
     let videos = device_paths(Path::new("/dev"), "video")
         .map_err(|error| format!("enumerating /dev/video* failed: {error}"))?;
@@ -93,13 +111,20 @@ pub(super) fn probe(
         };
         match inspect(&video, coded, (width, height), &media) {
             Ok((capture, media)) => {
-                return Ok(format!(
-                    "{} request decode to {} via {} and {}",
-                    codec.label(),
-                    fourcc(capture),
-                    path.display(),
-                    media.display()
-                ));
+                let max_dimensions = max_frame_size(
+                    |frame_size| ioctl(video.file.as_raw_fd(), VIDIOC_ENUM_FRAMESIZES, frame_size),
+                    coded,
+                );
+                return Ok(RequestProbe {
+                    detail: format!(
+                        "{} request decode to {} via {} and {}",
+                        codec.label(),
+                        fourcc(capture),
+                        path.display(),
+                        media.display()
+                    ),
+                    max_dimensions,
+                });
             }
             Err(error) => {
                 if failures.len() < MAX_FAILURES {
@@ -303,6 +328,32 @@ fn media_contains_video(
     ))
 }
 
+fn max_frame_size(
+    mut query: impl FnMut(&mut FrameSizeEnum) -> io::Result<()>,
+    pixel_format: u32,
+) -> Option<[u32; 2]> {
+    let mut largest: Option<[u32; 2]> = None;
+    for index in 0..MAX_DEVICE_NODES as u32 {
+        let mut frame_size = FrameSizeEnum {
+            index,
+            pixel_format,
+            ..Default::default()
+        };
+        if query(&mut frame_size).is_err() {
+            break;
+        }
+        let size = if frame_size.kind == V4L2_FRMSIZE_TYPE_DISCRETE {
+            [frame_size.sizes[0], frame_size.sizes[1]]
+        } else {
+            return Some([frame_size.sizes[1], frame_size.sizes[4]]);
+        };
+        largest = Some(largest.map_or(size, |[width, height]| {
+            [width.max(size[0]), height.max(size[1])]
+        }));
+    }
+    largest.filter(|[width, height]| *width > 0 && *height > 0)
+}
+
 fn presentable_capture(formats: &[u32]) -> Option<u32> {
     formats
         .iter()
@@ -503,6 +554,51 @@ mod tests {
             Some(format(b"NV12"))
         );
         assert_eq!(presentable_capture(&[]), None);
+    }
+
+    #[test]
+    fn frame_size_abi_matches_linux_uapi() {
+        assert_eq!(std::mem::size_of::<FrameSizeEnum>(), 44);
+        assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xc02c564a);
+    }
+
+    #[test]
+    fn stepwise_frame_sizes_report_the_driver_maximum() {
+        let coded = coded_format(VideoCodec::H264);
+        let mut calls = 0;
+        let limit = max_frame_size(
+            |frame_size| {
+                calls += 1;
+                assert_eq!((frame_size.index, frame_size.pixel_format), (0, coded));
+                frame_size.kind = 3;
+                frame_size.sizes = [48, 1920, 16, 48, 1088, 16];
+                Ok(())
+            },
+            coded,
+        );
+        assert_eq!(limit, Some([1920, 1088]));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn discrete_frame_sizes_report_the_largest_and_unsupported_queries_report_none() {
+        let sizes = [[1280, 720], [3840, 2160], [1920, 1080]];
+        let limit = max_frame_size(
+            |frame_size| {
+                let size = sizes
+                    .get(frame_size.index as usize)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                frame_size.kind = V4L2_FRMSIZE_TYPE_DISCRETE;
+                frame_size.sizes[..2].copy_from_slice(size);
+                Ok(())
+            },
+            coded_format(VideoCodec::Av1),
+        );
+        assert_eq!(limit, Some([3840, 2160]));
+        assert_eq!(
+            max_frame_size(|_| Err(io::Error::from_raw_os_error(libc::ENOTTY)), 0),
+            None
+        );
     }
 
     #[test]

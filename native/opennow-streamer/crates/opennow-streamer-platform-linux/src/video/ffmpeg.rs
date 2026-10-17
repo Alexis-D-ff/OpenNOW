@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -167,6 +170,7 @@ impl FfmpegDecoder {
             ));
         }
         initialize_ffmpeg()?;
+        take_ffmpeg_log();
         let decoder_definition = match (mode, codec) {
             (FfmpegMode::Software, VideoCodec::Av1) => ["libdav1d", "libaom-av1"]
                 .into_iter()
@@ -303,11 +307,11 @@ impl FfmpegDecoder {
             .map_err(|error| {
                 Error::backend(
                     Subsystem::Ffmpeg,
-                    format!(
+                    with_ffmpeg_log(format!(
                         "{} {} decoder initialization failed: {error}",
                         mode.label(),
                         codec.label()
-                    ),
+                    )),
                 )
             })?;
         Ok(Self {
@@ -360,11 +364,11 @@ impl FfmpegDecoder {
     }
 
     fn decode_error(&self, operation: &str, error: ffmpeg::Error) -> Error {
-        let reason = format!(
+        let reason = with_ffmpeg_log(format!(
             "{} {} {operation} failed: {error}",
             self.mode.label(),
             self.codec.label()
-        );
+        ));
         if self.mode == FfmpegMode::V4l2Request && error == ffmpeg::Error::InvalidData {
             Error::ReferenceLost {
                 subsystem: Subsystem::V4l2,
@@ -1224,9 +1228,78 @@ impl VideoDecoder for FfmpegDecoder {
 fn initialize_ffmpeg() -> Result<()> {
     static INITIALIZED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     INITIALIZED
-        .get_or_init(|| ffmpeg::init().map_err(|error| error.to_string()))
+        .get_or_init(|| {
+            ffmpeg::init().map_err(|error| error.to_string())?;
+            unsafe { ffi::av_log_set_callback(Some(record_ffmpeg_log)) };
+            Ok(())
+        })
         .clone()
         .map_err(|reason| Error::unavailable(Subsystem::Ffmpeg, reason))
+}
+
+const FFMPEG_LOG_LINES: usize = 8;
+
+thread_local! {
+    static FFMPEG_LOG: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
+}
+
+#[cfg(target_arch = "x86_64")]
+type FfmpegVaList = *mut ffi::__va_list_tag;
+#[cfg(not(target_arch = "x86_64"))]
+type FfmpegVaList = ffi::va_list;
+
+unsafe extern "C" fn record_ffmpeg_log(
+    context: *mut c_void,
+    level: c_int,
+    format: *const c_char,
+    arguments: FfmpegVaList,
+) {
+    if level > ffi::AV_LOG_VERBOSE {
+        return;
+    }
+    let mut line = [0 as c_char; 512];
+    let mut print_prefix = 1;
+    let written = unsafe {
+        ffi::av_log_format_line2(
+            context,
+            level,
+            format,
+            arguments,
+            line.as_mut_ptr(),
+            line.len() as c_int,
+            &mut print_prefix,
+        )
+    };
+    if written < 0 {
+        return;
+    }
+    let text = unsafe { CStr::from_ptr(line.as_ptr()) }.to_string_lossy();
+    let text = text.trim_end();
+    if text.is_empty() {
+        return;
+    }
+    if level <= unsafe { ffi::av_log_get_level() } {
+        eprintln!("{text}");
+    }
+    FFMPEG_LOG.with_borrow_mut(|lines| {
+        if lines.len() == FFMPEG_LOG_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(text.to_owned());
+    });
+}
+
+fn take_ffmpeg_log() -> Vec<String> {
+    FFMPEG_LOG.with_borrow_mut(|lines| lines.drain(..).collect())
+}
+
+fn with_ffmpeg_log(reason: String) -> String {
+    let log = take_ffmpeg_log();
+    if log.is_empty() {
+        reason
+    } else {
+        format!("{reason} (FFmpeg: {})", log.join(" | "))
+    }
 }
 
 fn codec_id(codec: VideoCodec) -> codec::Id {
@@ -1480,6 +1553,33 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn ffmpeg_log_lines_reach_decoder_errors_and_are_bounded() {
+        initialize_ffmpeg().unwrap();
+        take_ffmpeg_log();
+        unsafe {
+            ffi::av_log(
+                ptr::null_mut(),
+                ffi::AV_LOG_DEBUG,
+                c"ignored %s\n".as_ptr(),
+                c"debug".as_ptr(),
+            );
+            for index in 0..(FFMPEG_LOG_LINES as c_int + 2) {
+                ffi::av_log(
+                    ptr::null_mut(),
+                    ffi::AV_LOG_VERBOSE,
+                    c"capture probe %d failed\n".as_ptr(),
+                    index,
+                );
+            }
+        }
+        let reason = with_ffmpeg_log("open failed".to_owned());
+        assert!(reason.starts_with("open failed (FFmpeg: capture probe 2 failed | "));
+        assert!(reason.ends_with("capture probe 9 failed)"));
+        assert!(!reason.contains("ignored"));
+        assert_eq!(with_ffmpeg_log("open failed".to_owned()), "open failed");
+    }
 
     #[test]
     fn software_decode_thread_count_stays_within_the_latency_budget() {
