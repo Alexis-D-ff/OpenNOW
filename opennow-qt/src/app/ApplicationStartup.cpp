@@ -35,11 +35,38 @@
 #include <QFileOpenEvent>
 #include <QProcess>
 
+#include <chrono>
 #include <cstdlib>
+#include <thread>
+
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Qt::StringLiterals;
 
 namespace {
+constexpr auto TeardownDeadline = std::chrono::seconds(10);
+
+void armTeardownDeadline(int exitCode)
+{
+    std::thread([exitCode] {
+        std::this_thread::sleep_for(TeardownDeadline);
+        qWarning("OpenNOW did not finish shutting down within %d seconds; terminating",
+                 int(TeardownDeadline.count()));
+#ifdef Q_OS_WIN
+        TerminateProcess(GetCurrentProcess(), UINT(exitCode));
+#endif
+        std::_Exit(exitCode);
+    }).detach();
+}
+
 class FileOpenFilter final : public QObject
 {
 public:
@@ -345,6 +372,8 @@ static int runApplicationSession(int argc, char *argv[], QString &restartExecuta
     if (acceptance.startWorkload() != EXIT_SUCCESS) return EXIT_FAILURE;
 
     const auto exitCode = application.exec();
+    armTeardownDeadline(exitCode);
+    coreClient.stop();
 #ifdef OPENNOW_EMBEDDED_STREAMER
     const auto roots = engine.rootObjects();
     for (auto *root : roots) delete root;
