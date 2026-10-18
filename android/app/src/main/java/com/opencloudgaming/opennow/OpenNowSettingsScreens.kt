@@ -681,6 +681,7 @@ private fun SettingsContent(
     }
     val gyroscopeAvailable = remember(context) { hasMobileGyroscope(context) }
     val deviceHasBattery = rememberDeviceHasBattery()
+    val spaceControllerConnected = rememberPhysicalControllerConnected(enabled = true)
     val fallbackMembershipTier = state.authSession?.user?.membershipTier
     var pendingMicrophoneMode by remember { mutableStateOf<MicrophoneMode?>(null) }
     var showStreamMenuShortcutDialog by remember { mutableStateOf(false) }
@@ -1135,7 +1136,7 @@ private fun SettingsContent(
                     )
                 }
             }
-    CategorySettingsSection(selectedCategory, SettingsCategory.Recording, searchQuery, stringResource(R.string.settings_section_recording_output), "recording", "recordings", "video", "mp4", "bitrate", "fps", "sharpness", "nitidez", "gravação", "upscale") {
+    CategorySettingsSection(selectedCategory, SettingsCategory.Recording, searchQuery, stringResource(R.string.settings_section_recording_output), "recording", "recordings", "video", "mp4", "bitrate", "fps", "sharpness", "nitidez", "gravação", "upscale", "microphone", "camera", "narration") {
                 ControlActionRow(
                     label = stringResource(R.string.settings_recording_folder),
                     actionLabel = stringResource(R.string.settings_recording_folder_choose),
@@ -1152,6 +1153,16 @@ private fun SettingsContent(
                     color = SettingsTextMuted,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                SettingSwitch(
+                    label = stringResource(R.string.settings_recording_microphone),
+                    checked = settings.stream.recordingMicrophoneEnabled,
+                    description = stringResource(R.string.settings_recording_microphone_desc),
+                ) { enabled -> viewModel.updateRecordingSettings { it.copy(recordingMicrophoneEnabled = enabled) } }
+                SettingSwitch(
+                    label = stringResource(R.string.settings_recording_camera),
+                    checked = settings.stream.recordingCameraEnabled,
+                    description = stringResource(R.string.settings_recording_camera_desc),
+                ) { enabled -> viewModel.updateRecordingSettings { it.copy(recordingCameraEnabled = enabled) } }
                 SettingSwitch(
                     label = stringResource(R.string.settings_recording_auto_bitrate),
                     checked = settings.stream.recordingBitrateMbps == 0,
@@ -1774,9 +1785,9 @@ private fun SettingsContent(
                     viewModel.updateSettings(settings.copy(absoluteCinemaEverywhere = enabled))
                 }
                 SettingSwitch(
-                    label = stringResource(R.string.settings_useless_mascot),
+                    label = stringResource(R.string.screensaver_name),
                     checked = settings.uselessMascotEnabled,
-                    description = stringResource(R.string.settings_useless_mascot_desc),
+                    description = stringResource(R.string.screensaver_description),
                 ) { enabled ->
                     viewModel.updateSettings(settings.copy(uselessMascotEnabled = enabled))
                 }
@@ -2028,6 +2039,13 @@ private fun SettingsContent(
                     BatteryOptimizationPanel()
                 }
             }
+    CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, stringResource(R.string.space_ui_experimental), "experimental", "space", "ui", "controller", "console") {
+        SpaceUiSettingsToggle(
+            checked = settings.experimentalSpaceUi,
+            controllerConnected = spaceControllerConnected,
+            onCheckedChange = { viewModel.updateSettings(settings.copy(experimentalSpaceUi = it)) },
+        )
+    }
     CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, "Codec Diagnostics", "codec", "diagnostics", "probe", "av1", "h264", "h265", "hevc", "decode") {
                     CodecDiagnosticsPanel(state.codecReport)
                 }

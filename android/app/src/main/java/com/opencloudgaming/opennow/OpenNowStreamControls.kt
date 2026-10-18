@@ -572,29 +572,47 @@ internal fun StreamInputModeSwitchDialog(
 @Composable
 internal fun StreamLaunchInputModeDialog(
     keyboardMouseConnected: Boolean,
-    onNativeTouch: () -> Unit,
-    onController: () -> Unit,
+    websiteClientMode: Boolean,
+    onNativeTouch: (rememberForGame: Boolean) -> Unit,
+    onController: (rememberForGame: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var rememberForGame by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.stream_input_choose_at_launch_title)) },
         text = {
-            Text(
-                stringResource(
-                    if (keyboardMouseConnected) R.string.stream_input_choose_at_launch_body
-                    else R.string.stream_input_choose_at_launch_no_device_body,
-                ),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            val body = stringResource(
+                if (keyboardMouseConnected) R.string.stream_input_choose_at_launch_body
+                else R.string.stream_input_choose_at_launch_no_device_body,
             )
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    if (websiteClientMode) "$body\n\n${stringResource(R.string.stream_input_native_touch_disables_website_mode)}"
+                    else body,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().toggleable(
+                        value = rememberForGame,
+                        role = Role.Checkbox,
+                        onValueChange = { rememberForGame = it },
+                    ).padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Checkbox(checked = rememberForGame, onCheckedChange = null)
+                    Text(stringResource(R.string.stream_input_remember_for_game))
+                }
+            }
         },
         confirmButton = {
-            TextButton(onClick = onNativeTouch) {
+            TextButton(onClick = { onNativeTouch(rememberForGame) }) {
                 Text(stringResource(R.string.stream_input_use_native_touch))
             }
         },
         dismissButton = {
-            TextButton(onClick = onController) {
+            TextButton(onClick = { onController(rememberForGame) }) {
                 Text(stringResource(
                     if (keyboardMouseConnected) R.string.stream_input_use_keyboard_mouse_controller
                     else R.string.stream_input_use_controller,

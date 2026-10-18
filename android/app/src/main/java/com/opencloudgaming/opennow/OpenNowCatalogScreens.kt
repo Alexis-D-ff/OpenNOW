@@ -23,6 +23,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
@@ -125,6 +126,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
@@ -1740,7 +1743,7 @@ private fun StoreGameGrid(
                         }
                     }
                     if (showDiscoverySections) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
+                        item(key = "store-start-rails", span = { GridItemSpan(maxLineSpan) }) {
                             StoreStartRails(
                                 games = games,
                                 newlyAddedGames = state.newlyAddedGames,
@@ -2080,7 +2083,8 @@ private fun StoreComingNextCarousel(
     if (games.isEmpty()) return
     val context = LocalContext.current
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    var page by remember(games) { mutableIntStateOf(0) }
+    val gameIds = games.map(GameInfo::id)
+    var page by rememberSaveable(gameIds) { mutableIntStateOf(0) }
     var focused by remember { mutableStateOf(false) }
     val enhancedControllerFocus = shouldShowEnhancedControllerFocus(
         focused = focused,
@@ -2089,21 +2093,29 @@ private fun StoreComingNextCarousel(
     )
     val selectedGameId = LocalSelectedCatalogGameId.current
     val reduceMotion = LocalReduceMotion.current
-    val storeScrolling = LocalCatalogScrolling.current
     val haptics = LocalOpenNowHaptics.current
-    val carouselProgress = remember { Animatable(0f) }
+    // Lazy-grid items leave composition offscreen. Save both the page and its exact progress so
+    // returning to the hero resumes the same countdown rather than starting a new one.
+    val carouselProgress = rememberSaveable(
+        gameIds,
+        page,
+        saver = Saver<Animatable<Float, AnimationVector1D>, Float>(
+            save = { it.value },
+            restore = { Animatable(it) },
+        ),
+    ) { Animatable(0f) }
+    var heroVisible by remember { mutableStateOf(false) }
     var carouselDragPx by remember { mutableFloatStateOf(0f) }
     val swipeThresholdPx = with(LocalDensity.current) { 48.dp.toPx() }
     val carouselDragState = rememberDraggableState { delta -> carouselDragPx += delta }
-    LaunchedEffect(games, page, focused, reduceMotion, storeScrolling, collapsed) {
-        // Never auto-advance under the reader's hands: not while focused, and not at all when the
-        // user has asked for reduced motion. Vertical Store motion also gets the full frame budget.
-        carouselProgress.snapTo(0f)
-        if (!collapsed && shouldAnimateStoreHero(games.size, focused, reduceMotion, storeScrolling)) {
+    LaunchedEffect(carouselProgress, focused, reduceMotion, heroVisible, collapsed) {
+        // Cancelling the animation freezes its current value. Only a page/feed change resets it;
+        // ordinary scrolling keeps the timer running until the hero actually leaves the viewport.
+        if (!collapsed && shouldAnimateStoreHero(games.size, focused, reduceMotion, heroVisible)) {
             carouselProgress.animateTo(
                 targetValue = 1f,
                 animationSpec = tween(
-                    durationMillis = HERO_CAROUSEL_ADVANCE_MS.toInt(),
+                    durationMillis = (HERO_CAROUSEL_ADVANCE_MS * (1f - carouselProgress.value)).toInt(),
                     easing = LinearEasing,
                 ),
             )
@@ -2160,7 +2172,13 @@ private fun StoreComingNextCarousel(
                 }
             },
         )
-        AnimatedVisibility(visible = !collapsed) {
+        AnimatedVisibility(
+            visible = !collapsed,
+            modifier = Modifier.onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInWindow()
+                heroVisible = bounds.width > 0f && bounds.height > 0f
+            },
+        ) {
             AnimatedContent(
                 targetState = page,
                 transitionSpec = {
@@ -2362,8 +2380,8 @@ internal fun shouldAnimateStoreHero(
     pageCount: Int,
     focused: Boolean,
     reduceMotion: Boolean,
-    storeScrolling: Boolean,
-): Boolean = pageCount > 1 && !focused && !reduceMotion && !storeScrolling
+    heroVisible: Boolean,
+): Boolean = pageCount > 1 && !focused && !reduceMotion && heroVisible
 
 @Composable
 private fun HeroCarouselProgress(
@@ -3454,6 +3472,24 @@ internal fun GameDetailsSheet(
     onRemove: (() -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val availability = game.availability(defaultVariantId)
+    var pendingLaunch by remember(game, defaultVariantId) { mutableStateOf<GameDetailsLaunchAction?>(null) }
+    fun completeLaunch(action: GameDetailsLaunchAction) {
+        onDismiss()
+        when (action) {
+            GameDetailsLaunchAction.Play -> playOrUpgrade(game, context, onPlay)
+            GameDetailsLaunchAction.ChooseStore -> onChooseStore(game)
+            GameDetailsLaunchAction.PlayOnTv -> onPlayOnTv(game)
+        }
+    }
+    val requestLaunch: (GameDetailsLaunchAction) -> Unit = { action ->
+        if (availability == GameAvailability.Available || game.requiresMembershipUpgrade()) {
+            completeLaunch(action)
+        } else {
+            pendingLaunch = action
+        }
+    }
     val transitionRegistry = LocalGameDetailsTransitionRegistry.current
     val transitionOrigin = transitionRegistry?.originFor(game.id)
     val cardTransitionOrigin = transitionOrigin
@@ -3657,11 +3693,9 @@ internal fun GameDetailsSheet(
                         game = game,
                         favorite = favorite,
                         defaultVariantId = defaultVariantId,
-                        onPlay = onPlay,
-                        onChooseStore = onChooseStore,
+                        onLaunch = requestLaunch,
                         onFavorite = onFavorite,
                         connectedTvName = connectedTvName,
-                        onPlayOnTv = onPlayOnTv,
                         removeLabel = removeLabel,
                         removeConfirmationText = removeConfirmationText,
                         removeEnabled = removeEnabled,
@@ -3677,11 +3711,9 @@ internal fun GameDetailsSheet(
                         game = game,
                         favorite = favorite,
                         defaultVariantId = defaultVariantId,
-                        onPlay = onPlay,
-                        onChooseStore = onChooseStore,
+                        onLaunch = requestLaunch,
                         onFavorite = onFavorite,
                         connectedTvName = connectedTvName,
-                        onPlayOnTv = onPlayOnTv,
                         removeLabel = removeLabel,
                         removeConfirmationText = removeConfirmationText,
                         removeEnabled = removeEnabled,
@@ -3694,6 +3726,16 @@ internal fun GameDetailsSheet(
             }
             }
         }
+    }
+    pendingLaunch?.let { action ->
+        GameAvailabilityDialog(
+            availability = availability,
+            onContinue = {
+                pendingLaunch = null
+                completeLaunch(action)
+            },
+            onDismiss = { pendingLaunch = null },
+        )
     }
 }
 
@@ -3726,11 +3768,9 @@ private fun GameDetailsLandscapeContent(
     game: GameInfo,
     favorite: Boolean,
     defaultVariantId: String?,
-    onPlay: (GameInfo) -> Unit,
-    onChooseStore: (GameInfo) -> Unit,
+    onLaunch: (GameDetailsLaunchAction) -> Unit,
     onFavorite: (String) -> Unit,
     connectedTvName: String?,
-    onPlayOnTv: (GameInfo) -> Unit,
     removeLabel: String?,
     removeConfirmationText: String?,
     removeEnabled: Boolean,
@@ -3744,10 +3784,7 @@ private fun GameDetailsLandscapeContent(
     val description = gameDescriptionForDetails(game)
     val context = LocalContext.current
     val upgradeRequired = game.requiresMembershipUpgrade()
-    val primaryAction = {
-        onDismiss()
-        playOrUpgrade(game, context, onPlay)
-    }
+    val primaryAction = { onLaunch(GameDetailsLaunchAction.Play) }
     val sideScrollState = rememberScrollState()
     val detailsSpacing = if (shortHeight) 8.dp else 10.dp
     var gameFocused by remember(game.id) { mutableStateOf(false) }
@@ -3822,8 +3859,7 @@ private fun GameDetailsLandscapeContent(
                         connectedTvName?.takeUnless { upgradeRequired }?.let {
                             OutlinedButton(
                                 onClick = {
-                                    onDismiss()
-                                    onPlayOnTv(game)
+                                    onLaunch(GameDetailsLaunchAction.PlayOnTv)
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
@@ -3833,8 +3869,7 @@ private fun GameDetailsLandscapeContent(
                         LongPressPlayButton(
                             onClick = primaryAction,
                             onLongClick = if (upgradeRequired) null else ({
-                                onDismiss()
-                                onChooseStore(game)
+                                onLaunch(GameDetailsLaunchAction.ChooseStore)
                             }),
                             upgradeRequired = upgradeRequired,
                             modifier = Modifier
@@ -3917,8 +3952,7 @@ private fun GameDetailsLandscapeContent(
                     LongPressPlayButton(
                         onClick = primaryAction,
                         onLongClick = if (upgradeRequired) null else ({
-                            onDismiss()
-                            onChooseStore(game)
+                            onLaunch(GameDetailsLaunchAction.ChooseStore)
                         }),
                         upgradeRequired = upgradeRequired,
                         modifier = Modifier.weight(1f),
@@ -3927,8 +3961,7 @@ private fun GameDetailsLandscapeContent(
                     connectedTvName?.takeUnless { upgradeRequired }?.let {
                         OutlinedButton(
                             onClick = {
-                                onDismiss()
-                                onPlayOnTv(game)
+                                onLaunch(GameDetailsLaunchAction.PlayOnTv)
                             },
                             modifier = Modifier.weight(1f).height(48.dp),
                         ) {
@@ -3947,6 +3980,7 @@ private fun GameDetailsCompactInfoContent(
     defaultVariantId: String?,
     description: String?,
 ) {
+    GameAvailabilityBanner(game.availability(defaultVariantId), compact = true)
     OwnershipStatusRow(game = game, compact = true)
     MembershipUpgradeNotice(game)
     GameGenreChips(game = game, compact = true)
@@ -3970,11 +4004,9 @@ private fun GameDetailsScrollableContent(
     game: GameInfo,
     favorite: Boolean,
     defaultVariantId: String?,
-    onPlay: (GameInfo) -> Unit,
-    onChooseStore: (GameInfo) -> Unit,
+    onLaunch: (GameDetailsLaunchAction) -> Unit,
     onFavorite: (String) -> Unit,
     connectedTvName: String?,
-    onPlayOnTv: (GameInfo) -> Unit,
     removeLabel: String?,
     removeConfirmationText: String?,
     removeEnabled: Boolean,
@@ -3985,10 +4017,7 @@ private fun GameDetailsScrollableContent(
 ) {
     val context = LocalContext.current
     val upgradeRequired = game.requiresMembershipUpgrade()
-    val primaryAction = {
-        onDismiss()
-        playOrUpgrade(game, context, onPlay)
-    }
+    val primaryAction = { onLaunch(GameDetailsLaunchAction.Play) }
     var gameFocused by remember(game.id) { mutableStateOf(false) }
     val gameImageInteraction = remember(game.id) { MutableInteractionSource() }
     val gameImageHovered by gameImageInteraction.collectIsHoveredAsState()
@@ -4058,6 +4087,7 @@ private fun GameDetailsScrollableContent(
             item {
                 Column(Modifier.padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     val description = gameDescriptionForDetails(game)
+                    GameAvailabilityBanner(game.availability(defaultVariantId), compact = false)
                     OwnershipStatusRow(game = game, compact = false)
                     MembershipUpgradeNotice(game)
                     GameGenreChips(game = game, compact = false)
@@ -4120,8 +4150,7 @@ private fun GameDetailsScrollableContent(
                 LongPressPlayButton(
                     onClick = primaryAction,
                     onLongClick = if (upgradeRequired) null else ({
-                        onDismiss()
-                        onChooseStore(game)
+                        onLaunch(GameDetailsLaunchAction.ChooseStore)
                     }),
                     upgradeRequired = upgradeRequired,
                     modifier = Modifier.weight(1f),
@@ -4130,8 +4159,7 @@ private fun GameDetailsScrollableContent(
                 connectedTvName?.takeUnless { upgradeRequired }?.let { tvName ->
                     IconButton(
                         onClick = {
-                            onDismiss()
-                            onPlayOnTv(game)
+                            onLaunch(GameDetailsLaunchAction.PlayOnTv)
                         },
                         modifier = Modifier.size(48.dp),
                     ) {

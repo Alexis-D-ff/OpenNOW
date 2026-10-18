@@ -997,6 +997,8 @@ fn ensure_rtsp_ok(step: &str, response: &RtspResponse) -> Result<(), NvstRtspErr
         let failure = NvstRtspError::new(
             if response.status == 403 {
                 "nvst-forbidden"
+            } else if step == "OPTIONS" && response.status == 400 {
+                "nvst-attachment-rejected"
             } else {
                 "nvst-rtsp-failed"
             },
@@ -1316,6 +1318,42 @@ fn set_read_timeout(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, timeout: 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn options_rejection_is_not_success_even_when_the_server_says_ok() {
+        let mut wire = "RTSP/1.0 400 OK\r\nCSeq: 1\r\n\r\n".to_owned();
+        let response = take_rtsp_response(&mut wire, 1).unwrap().unwrap();
+        let error = ensure_rtsp_ok("OPTIONS", &response).unwrap_err();
+        assert_eq!(error.code, "nvst-attachment-rejected");
+        assert_eq!(error.message, "OPTIONS failed: 400 OK");
+        // A malformed SETUP must not initiate a cloud-session resume.
+        assert_eq!(
+            ensure_rtsp_ok("SETUP", &response).unwrap_err().code,
+            "nvst-rtsp-failed"
+        );
+    }
+
+    #[test]
+    fn options_success_authorization_and_server_errors_keep_their_meaning() {
+        for (status, expected) in [
+            (200, None),
+            (403, Some("nvst-forbidden")),
+            (500, Some("nvst-rtsp-failed")),
+        ] {
+            let response = RtspResponse {
+                status,
+                status_text: "OK".to_owned(),
+                headers: HashMap::new(),
+                body: String::new(),
+            };
+            assert_eq!(
+                ensure_rtsp_ok("OPTIONS", &response)
+                    .err()
+                    .map(|error| error.code),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn describe_overrides_config_but_never_imports_upstream_identity_or_media() {

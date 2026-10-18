@@ -241,12 +241,13 @@ class NativeStreamClient(
     private val lowLatencyGameAudio: Boolean,
     private val onState: (String) -> Unit,
     private val onError: (String) -> Unit,
-    private val onSessionRecoveryRequired: (String) -> Unit = {},
+    private val onSessionRecoveryRequired: (StreamSessionRecoveryRequest) -> Unit = {},
     private val onFirstVideoFrameRendered: () -> Unit = {},
     private val onStats: (StreamRuntimeStats) -> Unit = {},
     private val onControllerMouseAssistChanged: (Boolean) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
+    private val wifiPerformance = StreamWifiPerformanceLock(appContext)
     private val initialAndroidTvProfile = isAndroidTvProfile(appContext)
     private val eglBase: EglBase = EglBase.create()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -268,6 +269,13 @@ class NativeStreamClient(
             .setUseLowLatency(shouldUseLowLatencyStreamAudio(Build.VERSION.SDK_INT, lowLatencyGameAudio))
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .setUseStereoInput(false)
+            .setSamplesReadyCallback { samples ->
+                if (samples.audioFormat == android.media.AudioFormat.ENCODING_PCM_16BIT) {
+                    streamRecorder?.takeIf { it.usesSharedMicrophone }?.queueMicrophoneAudio(
+                        ByteBuffer.wrap(samples.data), samples.sampleRate, samples.channelCount,
+                    )
+                }
+            }
             .setUseStereoOutput(true)
             .setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true)
@@ -293,12 +301,14 @@ class NativeStreamClient(
                 object : JavaAudioDeviceModule.AudioRecordErrorCallback {
                     override fun onWebRtcAudioRecordInitError(errorMessage: String?) {
                         recordStreamDiagnostic("microphone capture init failed error=${errorMessage.orEmpty()}")
+                        streamRecorder?.onSharedMicrophoneError(errorMessage.orEmpty())
                     }
 
                     override fun onWebRtcAudioRecordStartError(
                         errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode?,
                         errorMessage: String?,
                     ) {
+                        streamRecorder?.onSharedMicrophoneError(errorMessage.orEmpty())
                         recordStreamDiagnostic(
                             "microphone capture start failed code=${errorCode?.name.orEmpty()} error=${errorMessage.orEmpty()}",
                         )
@@ -306,6 +316,7 @@ class NativeStreamClient(
 
                     override fun onWebRtcAudioRecordError(errorMessage: String?) {
                         recordStreamDiagnostic("microphone capture runtime failed error=${errorMessage.orEmpty()}")
+                        streamRecorder?.onSharedMicrophoneError(errorMessage.orEmpty())
                     }
                 },
             )
@@ -1052,6 +1063,7 @@ class NativeStreamClient(
 
     fun release() {
         if (released) return
+        recordStreamDiagnostic("client release tv=$androidTvProfile")
         released = true
         if (androidTvProfile) {
             val activeRenderer = renderer
@@ -2391,7 +2403,7 @@ class NativeStreamClient(
     }
 
     @Synchronized
-    internal fun startStreamRecording(outputUri: Uri): Boolean {
+    internal fun startStreamRecording(outputUri: Uri, recordingSettings: StreamSettings = settings): Boolean {
         if (streamRecorder != null) return false
         if (recordingPhase.value in setOf(StreamRecorderPhase.Starting, StreamRecorderPhase.Recording, StreamRecorderPhase.Finalizing)) return false
         val activeRenderer = renderer ?: return false
@@ -2400,7 +2412,7 @@ class NativeStreamClient(
         recordingError.value = null
         streamRecorderForShutdown = null
         val sourceFps = settings.fps.coerceAtLeast(1)
-        val recordingFps = (settings.recordingFps.takeIf { it > 0 } ?: sourceFps.coerceAtMost(60))
+        val recordingFps = (recordingSettings.recordingFps.takeIf { it > 0 } ?: sourceFps.coerceAtMost(60))
             .coerceAtMost(sourceFps).coerceIn(1, 60)
         val recorder = try {
             AndroidStreamRecorder(
@@ -2410,18 +2422,25 @@ class NativeStreamClient(
                 width = width,
                 height = height,
                 fps = recordingFps,
-                bitrateMbps = settings.recordingBitrateMbps,
+                bitrateMbps = recordingSettings.recordingBitrateMbps,
                 sharpnessAmount = streamSharpnessShaderStrength(
-                    settings.recordingSharpeningEnabled,
-                    settings.recordingSharpeningAmount,
+                    recordingSettings.recordingSharpeningEnabled,
+                    recordingSettings.recordingSharpeningAmount,
                 ),
+                includeMicrophone = recordingSettings.recordingMicrophoneEnabled,
+                includeCamera = recordingSettings.recordingCameraEnabled,
+                usesSharedMicrophone = recordingSettings.recordingMicrophoneEnabled && settings.microphoneMode != MicrophoneMode.Disabled,
+                microphoneDeviceId = settings.microphoneDeviceId,
             ) { phase, error ->
                 if (phase == StreamRecorderPhase.Recording && error != null) {
                     recordStreamDiagnostic("stream recorder notice: $error")
                 } else synchronized(this) {
                     recordingPhase.value = phase
-                    recordingError.value = error.takeIf { phase == StreamRecorderPhase.Failed }
-                    if (phase == StreamRecorderPhase.Finished || phase == StreamRecorderPhase.Failed) {
+                    recordingError.value = error.takeIf { phase == StreamRecorderPhase.Failed || phase == StreamRecorderPhase.Interrupted }
+                    if (phase == StreamRecorderPhase.Failed || phase == StreamRecorderPhase.Interrupted) {
+                        recordStreamDiagnostic("stream recorder stopped phase=$phase error=${error.orEmpty()}")
+                    }
+                    if (phase == StreamRecorderPhase.Finished || phase == StreamRecorderPhase.Failed || phase == StreamRecorderPhase.Interrupted) {
                         streamRecorder = null
                         if (renderer === activeRenderer) activeRenderer.setRecordingSink(null)
                         detachRecordingAudioSink()
@@ -2442,6 +2461,11 @@ class NativeStreamClient(
         activeRenderer.setRecordingSink(recorder)
         attachRecordingAudioSink()
         return true
+    }
+
+    @Synchronized
+    internal fun stopPersonalRecordingInBackground() {
+        if (streamRecorder?.recordsPersonalInputs == true) stopStreamRecording()
     }
 
     @Synchronized
@@ -2526,6 +2550,7 @@ class NativeStreamClient(
     }
 
     private fun startTransport(session: SessionInfo, settings: StreamSettings, generation: Int) {
+        wifiPerformance.acquire()
         inputDropLogged = false
         lastIceState = null
         lastStatsSample = null
@@ -2566,6 +2591,9 @@ class NativeStreamClient(
                             ptsNs = SystemClock.elapsedRealtimeNanos(),
                         )
                     },
+                    recordingMicrophone = { samples ->
+                        streamRecorder?.takeIf { it.usesSharedMicrophone }?.queueMicrophoneAudio(samples)
+                    },
                     event = { kind, detail -> scope.launch {
                         if (generation == transportGeneration) when (kind) {
                             "connected" -> emitState("Waiting for NVST video")
@@ -2588,11 +2616,18 @@ class NativeStreamClient(
                                 startGamepadKeepalive()
                             }
                             "input-unavailable" -> inputHandshakeReady = false
-                            "microphone-error" -> recordStreamDiagnostic("NVST microphone failed: $detail")
+                            "microphone-error" -> {
+                                recordStreamDiagnostic("NVST microphone failed: $detail")
+                                streamRecorder?.onSharedMicrophoneError(detail)
+                            }
                             "error" -> {
                                 lastNvstError = detail
                                 recordStreamDiagnostic("NVST attachment failed: $detail")
-                                scheduleTransportReconnect("NVST attachment failed", SIGNALING_RECONNECT_DELAY_MS, generation)
+                                if (nvstAttachmentRequiresResume(detail)) {
+                                    requestSessionRecovery(detail, StreamSessionRecoveryMode.ResumeNvstAttachment)
+                                } else {
+                                    scheduleTransportReconnect("NVST attachment failed", SIGNALING_RECONNECT_DELAY_MS, generation)
+                                }
                             }
                         }
                     } },
@@ -2626,11 +2661,12 @@ class NativeStreamClient(
     }
 
     private fun closeTransport(clearInputState: Boolean, cancelRecovery: Boolean = true) {
+        wifiPerformance.release()
         val closingNvst = nvstTransport
         closingNvst?.stop()
         nvstTransport = null
-        if (peerConnection != null || signaling != null || reliableInput != null || partiallyReliableInput != null) {
-            recordStreamDiagnostic("transport close clearInput=$clearInputState cancelRecovery=$cancelRecovery lastIce=${lastIceState?.name ?: "none"}")
+        if (closingNvst != null || peerConnection != null || signaling != null || reliableInput != null || partiallyReliableInput != null) {
+            recordStreamDiagnostic("transport close clearInput=$clearInputState cancelRecovery=$cancelRecovery nvst=${closingNvst != null} lastIce=${lastIceState?.name ?: "none"}")
         }
         if (cancelRecovery) {
             iceRecoveryJob?.cancel()
@@ -3371,9 +3407,14 @@ class NativeStreamClient(
         if (consumeReconnectAttempt && reconnectAttempts >= MAX_TRANSPORT_RECONNECT_ATTEMPTS) {
             recordStreamDiagnostic("reconnect limit reached reason=$reason attempts=$reconnectAttempts")
             if (currentSettings.experimentalNvst) {
-                // A successful CloudMatch ready poll does not prove media recovered. Reclaiming
-                // here recreates this client and resets the retry budget indefinitely.
-                failStream("${lastNvstError ?: reason}. NVST could not reconnect after $MAX_TRANSPORT_RECONNECT_ATTEMPTS retries. Your cloud session is still running; retry when ready.")
+                val error = lastNvstError ?: reason
+                if (nvstAttachmentRequiresResume(error, retriesExhausted = true)) {
+                    // The ViewModel owns the per-session claim budget across client recreation.
+                    // A ready GET alone cannot refresh the failed RTSPS attachment.
+                    requestSessionRecovery(error, StreamSessionRecoveryMode.ResumeNvstAttachment)
+                } else {
+                    failStream("$error. NVST could not reconnect after $MAX_TRANSPORT_RECONNECT_ATTEMPTS retries. Your cloud session is still running; retry when ready.")
+                }
             } else {
                 requestSessionRecovery("$reason. Stream reconnect failed after $MAX_TRANSPORT_RECONNECT_ATTEMPTS attempts.")
             }
@@ -3412,14 +3453,17 @@ class NativeStreamClient(
         }
     }
 
-    private fun requestSessionRecovery(message: String) {
+    private fun requestSessionRecovery(
+        message: String,
+        mode: StreamSessionRecoveryMode = StreamSessionRecoveryMode.RefreshSession,
+    ) {
         if (sessionRecoveryRequested) return
         sessionRecoveryRequested = true
         transportGeneration += 1
         closeTransport(clearInputState = false)
-        recordStreamDiagnostic("session recovery requested message=$message")
+        recordStreamDiagnostic("session recovery requested mode=$mode message=$message")
         emitState("Recovering cloud session")
-        emitSessionRecoveryRequired(message)
+        emitSessionRecoveryRequired(StreamSessionRecoveryRequest(message, mode))
     }
 
     private fun failStream(message: String, generation: Int? = null) {
@@ -3438,8 +3482,8 @@ class NativeStreamClient(
         scope.launch { onError(message) }
     }
 
-    private fun emitSessionRecoveryRequired(message: String) {
-        scope.launch { onSessionRecoveryRequired(message) }
+    private fun emitSessionRecoveryRequired(request: StreamSessionRecoveryRequest) {
+        scope.launch { onSessionRecoveryRequired(request) }
     }
 
     private fun PeerConnection.IceConnectionState.toIceStatusLabel(): String = "ICE_${name}"

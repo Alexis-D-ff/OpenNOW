@@ -289,6 +289,7 @@ object NativeStreamInputRouter {
     private var streamUiActive = false
     private val nativeUiTouchRouting = NativeUiTouchRoutingState()
     private val touchMouseState = TouchMouseState()
+    @Volatile
     private var touchMouseOutput: TouchMouseOutput? = null
 
     /**

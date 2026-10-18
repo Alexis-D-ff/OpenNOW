@@ -58,6 +58,7 @@ internal class MediaCodecSurfaceVideoDecoder(
     private val fps: Int,
     private val surface: () -> DecoderSurfaceTarget?,
     private val hdr: Boolean,
+    private val presentationMode: SurfacePresentationMode = SurfacePresentationMode.MediaCadence,
     private val configuration: (Int, Int, Int) -> SurfaceDecoderConfiguration?,
 ) : VideoDecoder {
     private data class FrameInfo(val timestampNs: Long, val rotation: Int, val queuedAtMs: Long, val size: Int)
@@ -67,9 +68,8 @@ internal class MediaCodecSurfaceVideoDecoder(
     private val inputSlots = java.util.ArrayDeque<Int>()
     private val lock = Any()
     private val queuePolicy = SurfaceDecoderQueuePolicy(fps)
-    private val presentationClock = SurfacePresentationClock(fps)
+    private val presentationClock = SurfacePresentationClock(fps, presentationMode)
     private var queuedBytes = 0L
-    private var producedOutput = false
     private var inputCount = 0
     private var outputCount = 0
     private var outputCallbackCount = 0
@@ -143,13 +143,13 @@ internal class MediaCodecSurfaceVideoDecoder(
                 selected.onStarted(decoder)
                 failureReason = null
                 NativeInputDiagnostics.addRetained("surface-decoder",
-                    "MediaCodec direct surface decoder=${selected.name} size=${width}x$height fps=$fps hdr=$hdr async=true")
+                    "MediaCodec direct surface decoder=${selected.name} size=${width}x$height fps=$fps hdr=$hdr async=true presentation=$presentationMode")
             }
             val nowMs = SystemClock.elapsedRealtime()
             val oldestMs = minOf((if (frames.size() > 0) frames.valueAt(0).queuedAtMs else nowMs),
                 pendingFrames.peekFirst()?.info?.queuedAtMs ?: nowMs)
             queuePolicy.failure(frames.size() + pendingFrames.size, queuedBytes + frame.buffer.remaining(),
-                nowMs - oldestMs, priming = !producedOutput)?.let { return@synchronized failLocked(it) }
+                nowMs - oldestMs, nowMs)?.let { return@synchronized failLocked(it) }
             val frameInfo = FrameInfo(frame.captureTimeNs, frame.rotation, nowMs, frame.buffer.remaining())
             queuedBytes += frameInfo.size
             needsKeyFrame = false
@@ -191,15 +191,15 @@ internal class MediaCodecSurfaceVideoDecoder(
                         decoder.releaseOutputBuffer(index, false)
                         return
                     }
-                    producedOutput = true
+                    queuePolicy.outputProduced(SystemClock.elapsedRealtime())
                     outputCount++
                     val buffer = MediaCodecSurfaceBuffer(outputWidth, outputHeight) { render ->
                         synchronized(lock) {
                             if (!isCurrentCodec(decoder, codecGeneration)) false
                             else try {
                                 val present = render && failureReason == null && surface() === outputSurface && outputSurface?.surface?.isValid == true
-                                // WebRTC's callbacks can straddle VSYNC despite steady media FPS.
-                                // Preserve the media cadence in Android's monotonic clock domain.
+                                // WebRTC has already paced sink delivery. Only direct NVST
+                                // callbacks need an additional media clock for SurfaceView.
                                 if (present) decoder.releaseOutputBuffer(index,
                                     presentationClock.next(frame.timestampNs, System.nanoTime()))
                                 else decoder.releaseOutputBuffer(index, false)
@@ -304,7 +304,7 @@ internal class MediaCodecSurfaceVideoDecoder(
         pendingFrames.clear()
         encodedBuffers.clear()
         queuedBytes = 0
-        producedOutput = false
+        queuePolicy.reset()
         presentationClock.reset()
         inputCount = 0
         outputCount = 0

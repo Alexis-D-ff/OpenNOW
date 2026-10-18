@@ -1375,10 +1375,11 @@ private const val OPENNOW_GITHUB_URL = "https://github.com/OpenCloudGaming/OpenN
 private data class DeveloperCredit(
     val name: String,
     val githubUrl: String,
+    val screensaverPreview: Boolean = false,
 )
 
 private val DEVELOPER_CREDITS = listOf(
-    DeveloperCredit("Kiefer", "https://github.com/Kief5555"),
+    DeveloperCredit("Kiefer", "https://github.com/Kief5555", screensaverPreview = true),
     DeveloperCredit("Zortos", "https://github.com/zortos293"),
 )
 
@@ -1652,6 +1653,11 @@ internal fun DeveloperPanel() {
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
+    var previewOpen by remember { mutableStateOf(false) }
+    if (previewOpen) {
+        GoofyScreensaverPreview(onDismiss = { previewOpen = false })
+    }
+    val previewLabel = stringResource(R.string.screensaver_preview)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         DEVELOPER_CREDITS.forEach { developer ->
             Row(
@@ -1664,7 +1670,14 @@ internal fun DeveloperPanel() {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Surface(
-                    modifier = Modifier.size(52.dp),
+                    modifier = Modifier.size(52.dp).then(
+                        if (developer.screensaverPreview) Modifier
+                            .semantics { contentDescription = previewLabel }
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = previewLabel) {
+                                previewOpen = true
+                            }
+                        else Modifier,
+                    ),
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.surfaceVariant,
                 ) {
@@ -1673,6 +1686,10 @@ internal fun DeveloperPanel() {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(developer.name, color = SettingsText, fontWeight = FontWeight.SemiBold)
                     Text(stringResource(R.string.settings_developer_label), color = SettingsTextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (developer.screensaverPreview) {
+                        Text(stringResource(R.string.screensaver_avatar_hint), color = SettingsTextMuted,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                 }
                 OutlinedButton(onClick = {
                     scope.launch { openExternalUrlOrCopy(context, clipboard, developer.githubUrl, "GitHub link copied") }

@@ -93,6 +93,9 @@ import kotlin.math.roundToInt
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -382,7 +385,7 @@ internal fun StreamScreen(
                 viewModel.markStreamError(it)
             },
             onSessionRecoveryRequired = {
-                streamState = it
+                streamState = it.reason
                 viewModel.recoverStreamSession(it)
             },
             onFirstVideoFrameRendered = {
@@ -399,13 +402,22 @@ internal fun StreamScreen(
     }
 
     val recordingPhase by client.recordingPhase.collectAsStateWithLifecycle()
+    val recordingLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(client, recordingLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) client.stopPersonalRecordingInBackground()
+        }
+        recordingLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { recordingLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val currentRecordingSessionId by rememberUpdatedState(session?.sessionId)
     val currentRecordingStreamReady by rememberUpdatedState(streamReady)
     var pendingRecordingSessionId by remember(session?.sessionId) { mutableStateOf<String?>(null) }
     var pendingRecordingFileName by remember(session?.sessionId) { mutableStateOf<String?>(null) }
+    var pendingRecordingSettings by remember(session?.sessionId) { mutableStateOf<StreamSettings?>(null) }
     var recordingOutputPending by remember(session?.sessionId) { mutableStateOf(false) }
     val recordingScope = rememberCoroutineScope()
-    fun startRecordingInFolder(folder: String, requestedSessionId: String, fileName: String) {
+    fun startRecordingInFolder(folder: String, requestedSessionId: String, fileName: String, options: StreamSettings) {
         if (recordingOutputPending) return
         recordingOutputPending = true
         recordingScope.launch {
@@ -415,8 +427,9 @@ internal fun StreamScreen(
                 val uri = withContext(Dispatchers.IO) {
                     RecordingDestination.createFile(context, folder, fileName).also { createdUri = it }
                 }
-                val sameActiveSession = requestedSessionId == currentRecordingSessionId && currentRecordingStreamReady
-                started = sameActiveSession && client.startStreamRecording(uri)
+                val sameActiveSession = requestedSessionId == currentRecordingSessionId && currentRecordingStreamReady &&
+                    recordingLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                started = sameActiveSession && client.startStreamRecording(uri, options)
                 if (sameActiveSession && !started && client.recordingError.value.isNullOrBlank()) {
                     Toast.makeText(context, R.string.stream_record_unavailable, Toast.LENGTH_LONG).show()
                 }
@@ -437,7 +450,10 @@ internal fun StreamScreen(
     LaunchedEffect(client) {
         client.recordingError.collect { error ->
             if (!error.isNullOrBlank()) {
-                Toast.makeText(context, context.getString(R.string.stream_record_failed), Toast.LENGTH_LONG).show()
+                val message = if (client.recordingPhase.value == StreamRecorderPhase.Interrupted) {
+                    R.string.stream_record_inputs_interrupted
+                } else R.string.stream_record_failed
+                Toast.makeText(context, context.getString(message), Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -446,23 +462,64 @@ internal fun StreamScreen(
     ) { uri ->
         val requestedSessionId = pendingRecordingSessionId
         val fileName = pendingRecordingFileName
+        val options = pendingRecordingSettings
         pendingRecordingSessionId = null
         pendingRecordingFileName = null
-        if (uri != null && requestedSessionId != null && fileName != null) {
+        pendingRecordingSettings = null
+        if (uri != null && requestedSessionId != null && fileName != null && options != null) {
             if (RecordingDestination.rememberFolder(context, uri)) {
                 viewModel.updateSettings(state.settings.copy(recordingDirectoryUri = uri.toString()))
-                startRecordingInFolder(uri.toString(), requestedSessionId, fileName)
+                startRecordingInFolder(uri.toString(), requestedSessionId, fileName, options)
             } else {
                 Toast.makeText(context, R.string.stream_record_folder_permission_failed, Toast.LENGTH_LONG).show()
             }
         }
     }
 
+    fun continueRecordingStart() {
+        val requestedSessionId = pendingRecordingSessionId ?: return
+        val fileName = pendingRecordingFileName ?: return
+        val options = pendingRecordingSettings ?: return
+        if (requestedSessionId != currentRecordingSessionId || !currentRecordingStreamReady) {
+            pendingRecordingSessionId = null
+            pendingRecordingFileName = null
+            pendingRecordingSettings = null
+            return
+        }
+        val folder = state.settings.recordingDirectoryUri
+        if (folder == null) recordingFolderLauncher.launch(null)
+        else {
+            pendingRecordingSessionId = null
+            pendingRecordingFileName = null
+            pendingRecordingSettings = null
+            startRecordingInFolder(folder, requestedSessionId, fileName, options)
+        }
+    }
+    val recordingPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        val options = pendingRecordingSettings
+        val allowed = options != null &&
+            (!options.recordingMicrophoneEnabled || ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) &&
+            (!options.recordingCameraEnabled || ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+        if (allowed) continueRecordingStart()
+        else {
+            pendingRecordingSessionId = null
+            pendingRecordingFileName = null
+            pendingRecordingSettings = null
+            Toast.makeText(context, R.string.stream_record_inputs_permission_denied, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val latestStreamUiState by rememberUpdatedState(state)
     DisposableEffect(Unit) {
         val decor = activity?.window?.decorView
         NativeStreamInputRouter.attach(client)
         NativeStreamInputRouter.setAndroidTvProfile(tvProfile)
         onDispose {
+            NativeInputDiagnostics.addRetained("stream.screen.dispose",
+                "stream screen disposed page=${latestStreamUiState.page} status=${latestStreamUiState.streamStatus} " +
+                    "changingConfigurations=${activity?.isChangingConfigurations} finishing=${activity?.isFinishing}")
             if (Build.VERSION.SDK_INT >= 26) {
                 decor?.let(AndroidPointerCapture::release)
             }
@@ -1236,13 +1293,19 @@ internal fun StreamScreen(
                                         .ifBlank { "Game" }
                                     session?.sessionId?.let { activeSessionId ->
                                         val fileName = "OpenNOW_${safeTitle}_${System.currentTimeMillis()}.mp4"
-                                        val folder = state.settings.recordingDirectoryUri
-                                        if (folder != null) {
-                                            startRecordingInFolder(folder, activeSessionId, fileName)
+                                        val options = state.settings.stream
+                                        if (options.recordingCameraEnabled && !context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+                                            Toast.makeText(context, R.string.stream_record_camera_unavailable, Toast.LENGTH_LONG).show()
                                         } else {
                                             pendingRecordingSessionId = activeSessionId
                                             pendingRecordingFileName = fileName
-                                            recordingFolderLauncher.launch(null)
+                                            pendingRecordingSettings = options
+                                            val permissions = buildList {
+                                                if (options.recordingMicrophoneEnabled) add(Manifest.permission.RECORD_AUDIO)
+                                                if (options.recordingCameraEnabled) add(Manifest.permission.CAMERA)
+                                            }.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+                                            if (permissions.isEmpty()) continueRecordingStart()
+                                            else recordingPermissionLauncher.launch(permissions.toTypedArray())
                                         }
                                     }
                                 } else {

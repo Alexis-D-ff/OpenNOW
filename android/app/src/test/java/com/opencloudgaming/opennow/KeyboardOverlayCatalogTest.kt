@@ -143,6 +143,60 @@ class KeyboardOverlayCatalogTest {
     }
 
     @Test
+    fun capturedHighSlotsStayVisibleOnTheReportedPhoneAfterSettingsReload() {
+        // The report contains slots 19..29 without manual offsets. The old layout
+        // placed them 7..10 rows above the bottom of a roughly 403dp-high viewport.
+        val touch = AndroidTouchSettings(keyboardButtons = (19..29).map {
+            KeyboardOverlayButton("captured_$it", "digit_6", layoutIndex = it)
+        })
+        val restored = OpenNowJson.decodeFromString<AndroidTouchSettings>(OpenNowJson.encodeToString(touch))
+        val size = 48f * 1.102468f
+        val spacing = size + 7f
+        val width = 1600f / 1.7f - 28f
+        val height = 720f / 1.7f - 20f
+        assertTrue(keyboardButtonDefaultOffset(19, spacing).y < -height)
+        val offsets = restored.keyboardButtons.map {
+            keyboardButtonViewportOffset(it.layoutIndex, spacing, size, width, height)
+        }
+        assertEquals(offsets.size, offsets.toSet().size)
+        offsets.forEach { offset ->
+            assertTrue(offset.x in -(width - size)..0f)
+            assertTrue(offset.y in -(height - size)..0f)
+        }
+    }
+
+    @Test
+    fun automaticPlacementPreservesOriginalSlotsAndBoundsLargeOrOverflowingControls() {
+        (0..12).forEach { slot ->
+            assertEquals(keyboardButtonDefaultOffset(slot, 55f),
+                keyboardButtonViewportOffset(slot, 55f, 48f, 900f, 400f))
+        }
+        // Partial column bands, portrait, and a control larger than its viewport.
+        listOf(440f to 230f, 230f to 440f, 60f to 60f).forEach { (width, height) ->
+            (0 until MAX_KEYBOARD_OVERLAY_BUTTONS).forEach { slot ->
+                val offset = keyboardButtonViewportOffset(slot, 103f, 96f, width, height)
+                assertTrue(offset.x in -(width - 96f).coerceAtLeast(0f)..0f)
+                assertTrue(offset.y in -(height - 96f).coerceAtLeast(0f)..0f)
+            }
+        }
+        assertEquals(TouchOffset(-50f, -100f),
+            keyboardButtonViewportOffset(6, 55f, 48f, 900f, 400f, TouchOffset(-50f, -100f)))
+    }
+
+    @Test
+    fun automaticSlotsUsePartialColumnBandsWithoutOverlappingBeforeCapacity() {
+        // The regular layout reserves two empty cells in its initial 3x3 block.
+        listOf(4 to 6, 5 to 6, 2 to 6, 4 to 2).forEach { (columns, rows) ->
+            val count = columns * rows - if (columns >= 3 && rows >= 3) 2 else 0
+            val positions = (0 until count).map { slot ->
+                keyboardButtonViewportOffset(slot, 55f, 48f,
+                    48f + (columns - 1) * 55f, 48f + (rows - 1) * 55f)
+            }
+            assertEquals("Grid ${columns}x$rows", count, positions.toSet().size)
+        }
+    }
+
+    @Test
     fun customKeyboardButtonListHasNoExtraButtonSlotLimit() {
         val manyButtons = AndroidTouchSettings(
             keyboardButtons = defaultKeyboardOverlayButtons() + (0 until 100).map { index ->

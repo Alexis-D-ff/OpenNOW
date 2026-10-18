@@ -2,6 +2,7 @@ package com.opencloudgaming.opennow
 
 import android.view.KeyEvent
 import java.util.UUID
+import kotlin.math.roundToInt
 
 internal enum class KeyboardButtonCategory {
     Mouse,
@@ -262,4 +263,48 @@ internal fun keyboardButtonDefaultOffset(index: Int, spacingDp: Float, migratedG
     val y = -row * spacingDp
     val migration = if (index < 7) migratedGroupOffset else TouchOffset()
     return TouchOffset(x + migration.x, y + migration.y)
+}
+
+/** Wrap automatic slots into adjacent columns instead of extending above a short screen. */
+internal fun keyboardButtonViewportOffset(
+    index: Int,
+    spacingDp: Float,
+    buttonSizeDp: Float,
+    viewportWidthDp: Float,
+    viewportHeightDp: Float,
+    migratedGroupOffset: TouchOffset = TouchOffset(),
+): TouchOffset {
+    if (index < 0 || !spacingDp.isFinite() || spacingDp <= 0f ||
+        !buttonSizeDp.isFinite() || buttonSizeDp <= 0f ||
+        !viewportWidthDp.isFinite() || !viewportHeightDp.isFinite()
+    ) return TouchOffset()
+    val availableX = (viewportWidthDp - buttonSizeDp).coerceAtLeast(0f)
+    val availableY = (viewportHeightDp - buttonSizeDp).coerceAtLeast(0f)
+    val columns = (availableX / spacingDp).toInt() + 1
+    val rows = (availableY / spacingDp).toInt() + 1
+    val original = keyboardButtonDefaultOffset(index, spacingDp)
+    val column = (-original.x / spacingDp).roundToInt()
+    val row = (-original.y / spacingDp).roundToInt()
+    // Retain the original three-column layout, then fill bands to its left. The last
+    // band may be narrower. Only reuse cells once the available grid is full.
+    val slot = (if (rows < 3 || columns < 3) index else row * 3 + column) % (rows * columns)
+    val fullColumns = columns / 3 * 3
+    val fullCapacity = rows * fullColumns
+    val wrappedColumn: Int
+    val wrappedRow: Int
+    if (slot < fullCapacity) {
+        val bandSize = rows * 3
+        wrappedColumn = slot / bandSize * 3 + slot % 3
+        wrappedRow = slot % bandSize / 3
+    } else {
+        val remainder = slot - fullCapacity
+        val bandWidth = columns - fullColumns
+        wrappedColumn = fullColumns + remainder % bandWidth
+        wrappedRow = remainder / bandWidth
+    }
+    val migration = if (index < 7) migratedGroupOffset else TouchOffset()
+    return TouchOffset(
+        (-wrappedColumn * spacingDp + migration.x).coerceIn(-availableX, 0f),
+        (-wrappedRow * spacingDp + migration.y).coerceIn(-availableY, 0f),
+    )
 }

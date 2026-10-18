@@ -237,6 +237,8 @@ data class StreamSettings(
     val recordingFps: Int = 0,
     val recordingSharpeningEnabled: Boolean = false,
     val recordingSharpeningAmount: Float = 0.25f,
+    val recordingMicrophoneEnabled: Boolean = false,
+    val recordingCameraEnabled: Boolean = false,
 )
 
 internal fun StreamSettings.withUserStreamOptionsFrom(source: StreamSettings): StreamSettings =
@@ -252,6 +254,8 @@ internal fun StreamSettings.withUserStreamOptionsFrom(source: StreamSettings): S
         recordingFps = source.recordingFps,
         recordingSharpeningEnabled = source.recordingSharpeningEnabled,
         recordingSharpeningAmount = source.recordingSharpeningAmount,
+        recordingMicrophoneEnabled = source.recordingMicrophoneEnabled,
+        recordingCameraEnabled = source.recordingCameraEnabled,
     )
 
 /**
@@ -658,6 +662,8 @@ data class AppSettings(
     val libraryFilterIds: List<String> = emptyList(),
     val launchPage: AppLaunchPage = AppLaunchPage.Store,
     val nerdMode: Boolean = false,
+    /** Opt-in console shell. Only active while a physical controller is connected. */
+    val experimentalSpaceUi: Boolean = false,
     val hideStreamButtons: Boolean = false,
     val streamKeyboardClearConfirmationDisabled: Boolean = false,
     val streamKeyboardButtonPosition: StreamKeyboardButtonPosition = StreamKeyboardButtonPosition(),

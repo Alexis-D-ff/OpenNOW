@@ -798,8 +798,9 @@ fun OpenNowApp(
                 if (state.awaitingLaunchInputModeChoice) {
                     StreamLaunchInputModeDialog(
                         keyboardMouseConnected = connectedPhysicalKeyboardMouse().connected,
-                        onNativeTouch = { viewModel.chooseLaunchInputMode(StreamInputMode.NativeTouch) },
-                        onController = { viewModel.chooseLaunchInputMode(StreamInputMode.KeyboardMouse) },
+                        websiteClientMode = state.activeStreamSettings?.forProviderInput(state.authSession?.provider?.code)?.browserClientMode == true,
+                        onNativeTouch = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.NativeTouch, remember) },
+                        onController = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.KeyboardMouse, remember) },
                         onDismiss = viewModel::cancelLaunchInputModeChoice,
                     )
                 }
@@ -958,6 +959,7 @@ private fun MainShell(
         state.pendingLaunchRecovery != null
     val tvProfile = state.androidTvProfile
     val physicalControllerConnected = rememberPhysicalControllerConnected(enabled = !inStream)
+    val spaceUi = shouldUseSpaceUi(state.settings.experimentalSpaceUi, physicalControllerConnected, state.page)
     val navAudioController = remember(context) { AndroidNerdAudioController(context.applicationContext) }
     var visibleSearchTarget by remember { mutableStateOf<SearchTarget?>(null) }
     var settingsSearchQuery by remember { mutableStateOf("") }
@@ -1059,7 +1061,7 @@ private fun MainShell(
         }
         // A chosen app wallpaper stays visible through Settings as well as Store and Library.
         // Stream surfaces remain opaque so custom art can never compete with video or overlays.
-        val wallpaperVisible = shouldShowAppWallpaper(state.page, inStream, state.settings)
+        val wallpaperVisible = !spaceUi && shouldShowAppWallpaper(state.page, inStream, state.settings)
         if (wallpaperVisible) {
             CatalogWallpaperBackdrop(
                 settings = state.settings,
@@ -1067,7 +1069,7 @@ private fun MainShell(
                 width = maxWidth,
                 height = maxHeight,
             )
-        } else if (!inStream && state.settings.ambientBackgroundEnabled) {
+        } else if (!inStream && !spaceUi && state.settings.ambientBackgroundEnabled) {
             AmbientBackground()
         }
 
@@ -1075,7 +1077,7 @@ private fun MainShell(
             containerColor = Color.Transparent,
             contentWindowInsets = if (streamingActive || tvProfile) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
             bottomBar = {
-                if (!inStream && !showNavigationRail) {
+                if (!inStream && !showNavigationRail && !spaceUi) {
                     Column {
                         if (showMinimizedQueueDock) {
                             MinimizedQueueDock(
@@ -1138,7 +1140,85 @@ private fun MainShell(
                         false
                     },
             ) {
-                Row(
+                if (spaceUi) {
+                    Box(Modifier.fillMaxSize().padding(screenEdgePadding)) {
+                        SpaceUiScreen(
+                            state = state,
+                            onNavigate = ::navigateFromAppChrome,
+                            onSelectGame = { viewModel.selectGame(it) },
+                            onRefresh = viewModel::refreshGames,
+                            onResumeSession = viewModel::resumeActiveSession,
+                            onSearchChange = { query ->
+                                if (state.page == AppPage.Library) viewModel.setLibrarySearch(query)
+                                else viewModel.setCatalogSearch(query)
+                            },
+                            inputEnabled = state.selectedGame == null && !modalPickerOpen,
+                            catalogControls = {
+                                if (state.page == AppPage.Library) {
+                                    val touchLabel = stringResource(R.string.catalog_filter_touch_controls)
+                                    val options = remember(state.libraryGames, touchLabel) {
+                                        libraryStoreFilterOptions(state.libraryGames, touchLabel)
+                                    }
+                                    CatalogSortFilterMenu(
+                                        sortOptions = librarySortOptions(),
+                                        selectedSortId = state.librarySortId,
+                                        filterOptions = options,
+                                        selectedFilterIds = state.libraryFilterIds,
+                                        onSortChange = viewModel::setLibrarySort,
+                                        onFilterToggle = viewModel::toggleLibraryFilter,
+                                    )
+                                } else {
+                                    val options = rememberCatalogFilterOptions(
+                                        remember(state.catalogResult.filterGroups) {
+                                            catalogVisibleFilterGroups(state.catalogResult.filterGroups)
+                                        },
+                                    )
+                                    CatalogSortFilterMenu(
+                                        sortOptions = state.catalogResult.sortOptions,
+                                        selectedSortId = state.catalogSortId,
+                                        filterOptions = options,
+                                        selectedFilterIds = state.catalogFilterIds,
+                                        onSortChange = viewModel::setCatalogSort,
+                                        onFilterToggle = viewModel::toggleCatalogFilter,
+                                    )
+                                }
+                            },
+                            settingsContent = {
+                                SettingsScreen(
+                                    state = state,
+                                    viewModel = viewModel,
+                                    tvProfile = tvProfile,
+                                    searchRequested = visibleSearchTarget == SearchTarget.Settings,
+                                    searchQuery = settingsSearchQuery,
+                                    backRequestToken = settingsBackRequestToken,
+                                    onSearchQueryChange = { settingsSearchQuery = it },
+                                    onDetailRouteChange = { settingsDetailRouteOpen = it },
+                                )
+                            },
+                            libraryContent = {
+                                if (state.settings.localAppsEnabled && BuildConfig.LOCAL_APP_LAUNCHER_SUPPORTED) {
+                                    LocalAppsShelf(
+                                        packageNames = state.settings.localAppPackageNames,
+                                        collapsed = state.settings.localAppsCollapsed,
+                                        onCollapsedChange = viewModel::setLocalAppsCollapsed,
+                                        onAddPackage = viewModel::addLocalApp,
+                                        onRemovePackage = viewModel::removeLocalApp,
+                                        horizontalPadding = 0.dp,
+                                    )
+                                }
+                            },
+                            queueContent = {
+                                if (showMinimizedQueueDock) {
+                                    MinimizedQueueDock(
+                                        state = state,
+                                        onRestore = viewModel::restoreStreamLaunch,
+                                        onCancel = { viewModel.stopStream(StreamStopOrigin.MinimizedQueueCancel) },
+                                    )
+                                }
+                            },
+                        )
+                    }
+                } else Row(
                     Modifier
                         .fillMaxSize()
                         .padding(screenEdgePadding),

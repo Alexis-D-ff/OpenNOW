@@ -31,6 +31,7 @@ private const val KEY_CATALOG_CACHE_PREFIX = "catalog_cache_"
 private const val KEY_ANDROID_UPDATE_DISMISSED_NOTICE = "android_update_dismissed_notice"
 private const val KEY_QUEUED_GAME_KEYS = "queued_game_keys"
 private const val KEY_CONTINUE_PLAYING_DISMISSALS = "continue_playing_dismissals"
+private const val KEY_GAME_INPUT_MODE_PREFIX = "game_input_mode_"
 private const val CATALOG_CACHE_TTL_MS = 12L * 60L * 60L * 1000L
 
 /**
@@ -814,6 +815,21 @@ class CatalogCacheStore private constructor(
             return
         }
         backup.delete()
+    }
+}
+
+internal class GameInputModeStore(context: Context) {
+    private val prefs = ExternalPrefs.get(context, STORE_NAME)
+
+    fun load(gameId: String?): StreamInputMode? {
+        if (gameId.isNullOrBlank()) return null
+        val saved = prefs.getString(KEY_GAME_INPUT_MODE_PREFIX + gameId, null)
+        return StreamInputMode.entries.firstOrNull { it.name == saved }
+    }
+
+    fun save(gameId: String?, mode: StreamInputMode) {
+        if (gameId.isNullOrBlank()) return
+        prefs.edit().putString(KEY_GAME_INPUT_MODE_PREFIX + gameId, mode.name).apply()
     }
 }
 
