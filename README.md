@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/OpenCloudGaming/OpenNOW/releases">
-    <img src="https://img.shields.io/badge/Download-Desktop_builds-56E6A5?style=for-the-badge&logo=desktop&logoColor=white&labelColor=101916" alt="Download desktop builds" />
+    <img src="https://img.shields.io/badge/Download-Desktop_builds-56E6A5?style=for-the-badge&logo=github&logoColor=white&labelColor=101916" alt="Download desktop builds" />
   </a>
   <a href="https://play.google.com/store/apps/details?id=com.opencloudgaming.opennow">
     <img src="https://img.shields.io/badge/Download-Android_app-56E6A5?style=for-the-badge&logo=android&logoColor=white&labelColor=101916" alt="Download Android Build" />
