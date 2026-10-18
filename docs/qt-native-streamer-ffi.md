@@ -67,3 +67,116 @@ Desktop and console display it for five seconds in the existing passive input
 notice, including when the Guide is closed. The normal stream video item and
 gameplay focus remain unchanged. Temporary SCTP deferral queues one bounded paste
 behind older input; only rejected local paste admission needs this notice.
+
+## Co-op sessions (ABI 16)
+
+ABI version 16 adds co-op hosting and joining on the existing JSON command and
+event channel. No C symbol or struct layout changed; Qt requires version 16 so
+it never sends co-op commands to an older streamer. `docs/coop-sessions.md`
+section 7 is the contract. This section records what the native streamer does
+with it.
+
+### Host commands
+
+The host commands run while this client streams a native NVST session. Every
+command gets an `ok` response or an error with one of these codes:
+`coop-unavailable` (no active NVST session), `coop-not-running`,
+`coop-busy` (the bounded co-op command queue is full), or `invalid-coop-command`.
+
+```json
+{"id":"c1","type":"coop-host-start","iceServers":[{"urls":["stun:relay.example:3478"]}],"maxGuests":2,"relays":[{"id":"nl","name":"Netherlands","stunUrl":"stun:relay.example:3478","turnUrls":["turn:relay.example:3478?transport=udp"]}]}
+{"id":"c2","type":"coop-peer-add","peerId":"usr_2","slot":1,"displayName":"Sam"}
+{"id":"c3","type":"coop-signal-in","peerId":"usr_2","payload":{"kind":"answer","sdp":"v=0..."}}
+{"id":"c4","type":"coop-peer-slot","peerId":"usr_2","slot":2}
+{"id":"c5","type":"coop-peer-input-muted","peerId":"usr_2","muted":true}
+{"id":"c6","type":"coop-peer-remove","peerId":"usr_2","reason":"kicked"}
+{"id":"c7","type":"coop-host-stop"}
+```
+
+- `coop-host-start` is idempotent. A repeated start only applies `maxGuests`.
+  It attaches a bounded tap (2048 packets) to the NVST receive path after SRTP
+  decryption. When the co-op worker falls behind, the tap drops packets and
+  counts them; it never blocks NVST receive. While no host runs, the tap costs
+  one atomic load per packet.
+- `coop-peer-add` makes the host the offerer. The offer and every trickled
+  candidate arrive as `coop-signal-out`. A guest slot is registered with GFN only
+  after that guest's link connects.
+- `coop-peer-slot`, `coop-peer-input-muted`, `coop-peer-remove`, a guest `bye`,
+  a link failure, and 500 ms without guest input all release the affected slot
+  with a reliable neutral state before the registration bitmap changes.
+- `coop-host-stop` and the normal `stop` remove every guest. Neither command
+  changes the host's own stream.
+
+### Guest commands
+
+```json
+{"id":"g1","type":"coop-guest-start","iceServers":[...],"relays":[...],"hostPeerId":"usr_1","slot":1}
+{"id":"g2","type":"coop-signal-in","peerId":"usr_1","payload":{"kind":"offer","sdp":"v=0..."}}
+{"id":"g3","type":"coop-guest-stop"}
+```
+
+`coop-guest-start` replaces `start`. It fails with `invalid-state` while this
+client streams GFN, and with `coop-guest-active` while a guest session runs. A
+`start` during a guest session fails with `coop-guest-active`. When the host
+sends the stream description, the guest starts the normal embedded media
+runtime. Surface, presentation, decode, and audio commands therefore work as
+they do in a GFN session. Gamepad input uses `opennow_streamer_submit_gamepad`
+with controller 0. The guest sends a snapshot when the state changes and resends
+the latest one every 50 ms. The Guide button emits `overlay-request` as usual.
+Keyboard and mouse input are not forwarded.
+
+### Events
+
+- `coop-signal-out {peerId, payload}`. Payloads are opaque: offer, answer,
+  candidate, end-of-candidates, and bye. They can hold SDP, so they are never
+  logged.
+- `coop-peer-state {peerId, state, path, relayId}`. The state is `connecting`,
+  `connected`, `reconnecting`, `disconnected`, or `failed`. A peer that does not
+  connect within 30 s fails. The event is sent again when the selected path
+  changes.
+- `coop-guest-state {state, path, relayId, reason}`. The guest moves through
+  `negotiating`, `trying_direct`, then `direct_blocked` and `relay` when no
+  direct pair connects within 4 s, then `connected`. After that it can move to
+  `reconnecting` or `ended`. `connected` is sent again when the path is first
+  known. These are the `ended` reasons:
+
+  | Reason | Meaning |
+  |---|---|
+  | `left` | The guest sent `coop-guest-stop`. |
+  | `host-left` | The host sent `bye`. If the host gave its own reason, the guest reports that reason instead. |
+  | `host-disconnected` | The link closed. |
+  | `connect-timeout` | No connection within 30 s, or no reconnect within 15 s. |
+  | `relay-unavailable` | No relay allocation succeeded. |
+  | `relay-credentials-rejected` | A TURN server answered the allocation with 401 or 437. Fetch fresh `iceServers` once and join again. |
+  | `media-closed: ...` | The local media pipeline closed. |
+
+- `path` is `direct`, `relay`, or null. `relayId` is the configured relay site
+  of the TURN server that carries the selected pair, whichever side allocated it.
+- `coop-host-stats` and `coop-guest-stats` are sent at 1 Hz with the contract
+  fields. The native file log includes them at most every 10 s. `capacityKbps`
+  is null because the peer link runs without bandwidth estimation. `lossPct` on
+  the host comes from the guest's RTCP receiver reports. On the guest, it is the
+  share of forwarded video packets still missing after NACK repair.
+- A guest receives rumble for its own slot from the host and emits the existing
+  `controller-rumble` event. The event has `controllerId:0` and the
+  `coop-guest-start` command id as `startId`. On the host, rumble for a slot
+  that a guest owns goes to that guest and not to a local controller.
+
+### Media path
+
+The host forwards each decrypted NVST video and audio packet byte for byte,
+including the RTP header and the NV extension. Each one becomes the payload of
+a P2P RTP packet whose sequence number, timestamp, and marker match the
+original. FEC repair shards are not forwarded. The guest feeds the inner packets
+through the same reorder, frame assembly, and bounded media consumer as an NVST
+session. Guest NACKs are RTCP application feedback named `ONAK`, which carries
+(PID, BLP) pairs. The host answers them from a 256-packet ring per guest. Guest
+keyframe requests (`{"type":"keyframe-request"}` on `coop-control`, or RTCP PLI)
+reach GFN at most once per second across all guests.
+
+The stream description on `coop-control` has the contract fields plus
+`audio.payloadType`, the negotiated GFN audio payload type. The guest uses it to
+admit forwarded Opus and RED packets. `colorRange` is null: NVST does not
+negotiate it, so the decoder reads it from the bitstream.
+`colorSpace` is `bt2020` for HDR sessions and `bt709` otherwise.
+`docs/coop-sessions.md` has not been changed for these additions.

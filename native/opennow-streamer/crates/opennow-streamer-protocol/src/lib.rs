@@ -115,6 +115,20 @@ pub struct Command {
     pub payload_base64: Option<String>,
     #[serde(default)]
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub ice_servers: Option<Value>,
+    #[serde(default)]
+    pub relays: Option<Value>,
+    #[serde(default)]
+    pub max_guests: Option<u8>,
+    #[serde(default)]
+    pub peer_id: Option<String>,
+    #[serde(default)]
+    pub host_peer_id: Option<String>,
+    #[serde(default)]
+    pub slot: Option<u8>,
+    #[serde(default)]
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

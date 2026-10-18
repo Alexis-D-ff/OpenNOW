@@ -2,6 +2,7 @@
 members = [
     "crates/opennow-awdl-helper",
     "crates/opennow-streamer",
+    "crates/opennow-streamer-coop",
     "crates/opennow-streamer-core",
     "crates/opennow-streamer-ffi",
     "crates/opennow-streamer-hid",

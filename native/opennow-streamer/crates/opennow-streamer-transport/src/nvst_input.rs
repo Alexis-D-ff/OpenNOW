@@ -53,6 +53,13 @@ const INPUT_GAMEPAD: u32 = 12;
 const INPUT_HAPTICS_ENABLED: u32 = 13;
 const INPUT_LOCK_KEYS_SYNC: u32 = 19;
 const INPUT_TEXT: u32 = 23;
+/// In-process co-op records. They never reach the wire: the codec translates them into
+/// the documented 0x020d registration and state commands so one owner keeps the
+/// registration bitmap consistent across the host's own controllers and guests.
+pub const INPUT_COOP_GAMEPAD: u32 = 0x434f_0001;
+pub const INPUT_COOP_SLOTS: u32 = 0x434f_0002;
+pub const INPUT_COOP_NEUTRAL: u32 = 0x434f_0003;
+const COOP_GUEST_SLOTS: u16 = 0x000e;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NvstChannelReliability {
@@ -619,6 +626,8 @@ pub(crate) struct NvstInputCodec {
     gamepad_bitmap: Option<u16>,
     rich_slot_mask: u16,
     last_gamepad_report: Option<[u8; 38]>,
+    host_bitmap: u16,
+    coop_slots: u16,
 }
 
 impl NvstInputCodec {
@@ -640,6 +649,53 @@ impl NvstInputCodec {
             self.emit_topology_transition(previous, filtered, timestamp_us, &mut encoded);
         }
         encoded
+    }
+
+    fn effective_bitmap(&self) -> u16 {
+        let coop = self.coop_slots | (self.coop_slots << 8);
+        ((self.host_bitmap & !coop) | coop) & !self.rich_slot_mask
+    }
+
+    fn sync_topology(&mut self, timestamp_us: u64, encoded: &mut Vec<NvstEncodedInput>) -> u16 {
+        let effective = self.effective_bitmap();
+        if self.gamepad_bitmap != Some(effective) {
+            let previous = self.gamepad_bitmap.unwrap_or_default();
+            self.emit_topology_transition(previous, effective, timestamp_us, encoded);
+        }
+        effective
+    }
+
+    fn emit_neutral(
+        &mut self,
+        id: usize,
+        bitmap: u16,
+        timestamp_us: u64,
+        encoded: &mut Vec<NvstEncodedInput>,
+    ) {
+        let mut neutral = self
+            .last_gamepad_report
+            .unwrap_or_else(canonical_gamepad_event);
+        neutral[0..4].copy_from_slice(&INPUT_GAMEPAD.to_le_bytes());
+        neutral[6..8].copy_from_slice(&(id as u16).to_le_bytes());
+        neutral[8..10].copy_from_slice(&bitmap.to_le_bytes());
+        neutral[12..24].fill(0);
+        neutral[30..38].copy_from_slice(&timestamp_us.to_le_bytes());
+        let mut payload = Vec::with_capacity(48);
+        payload.push(0x23);
+        payload.extend_from_slice(&timestamp_us.to_be_bytes());
+        payload.push(0x22);
+        payload.extend_from_slice(&neutral);
+        encoded.push(NvstEncodedInput {
+            route: NvstInputRoute::ControlReliable,
+            bytes: control_command(COMMAND_GAMEPAD, &payload),
+            meaningful: false,
+        });
+        self.gamepad_sequences[id] = self.gamepad_sequences[id].wrapping_add(1);
+        encoded.push(NvstEncodedInput {
+            route: NvstInputRoute::InputPartial,
+            bytes: gamepad_command(&neutral, timestamp_us, self.gamepad_sequences[id]),
+            meaningful: false,
+        });
     }
 
     fn emit_topology_transition(
@@ -793,35 +849,84 @@ impl NvstInputCodec {
                         ));
                     }
                     let bitmap = read_u16_le(event.bytes, 8).expect("gamepad length checked");
-                    self.last_gamepad_report = Some(
-                        event.bytes[..38]
-                            .try_into()
-                            .expect("gamepad length checked"),
-                    );
-                    let filtered = bitmap & !self.rich_slot_mask;
-                    if self.gamepad_bitmap != Some(filtered) {
-                        let previous_bitmap = self.gamepad_bitmap.unwrap_or_default();
-                        self.emit_topology_transition(
-                            previous_bitmap,
-                            filtered,
-                            timestamp,
-                            &mut encoded,
-                        );
-                    }
-                    if filtered & (1 << controller_id) == 0 {
+                    let mut report: [u8; 38] = event.bytes[..38]
+                        .try_into()
+                        .expect("gamepad length checked");
+                    self.last_gamepad_report = Some(report);
+                    self.host_bitmap = bitmap;
+                    let filtered = self.sync_topology(timestamp, &mut encoded);
+                    if filtered & (1 << controller_id) == 0
+                        || self.coop_slots & (1 << controller_id) != 0
+                    {
                         continue;
+                    }
+                    if self.coop_slots != 0 {
+                        report[8..10].copy_from_slice(&filtered.to_le_bytes());
                     }
                     self.gamepad_sequences[controller_id] =
                         self.gamepad_sequences[controller_id].wrapping_add(1);
                     encoded.push(NvstEncodedInput {
                         route: NvstInputRoute::InputPartial,
                         bytes: gamepad_command(
-                            event.bytes,
+                            &report,
                             timestamp,
                             self.gamepad_sequences[controller_id],
                         ),
                         meaningful: true,
                     });
+                }
+                INPUT_COOP_GAMEPAD => {
+                    require_len(event.bytes, 38, "short co-op gamepad record")?;
+                    let slot = usize::from(read_u16_le(event.bytes, 6).expect("length checked"));
+                    if slot >= self.gamepad_sequences.len() {
+                        return Err(NvstInputCodecError::Malformed(
+                            "co-op slot is outside the supported range",
+                        ));
+                    }
+                    let timestamp = read_u64_le(event.bytes, 30).unwrap_or(event.timestamp_us);
+                    if self.coop_slots & (1 << slot) == 0 {
+                        continue;
+                    }
+                    let filtered = self.sync_topology(timestamp, &mut encoded);
+                    if filtered & (1 << slot) == 0 {
+                        continue;
+                    }
+                    let mut report: [u8; 38] =
+                        event.bytes[..38].try_into().expect("length checked");
+                    report[0..4].copy_from_slice(&INPUT_GAMEPAD.to_le_bytes());
+                    report[8..10].copy_from_slice(&filtered.to_le_bytes());
+                    self.gamepad_sequences[slot] = self.gamepad_sequences[slot].wrapping_add(1);
+                    encoded.push(NvstEncodedInput {
+                        route: NvstInputRoute::InputPartial,
+                        bytes: gamepad_command(&report, timestamp, self.gamepad_sequences[slot]),
+                        meaningful: true,
+                    });
+                }
+                INPUT_COOP_SLOTS => {
+                    require_len(event.bytes, 16, "short co-op slot record")?;
+                    let mask =
+                        read_u16_le(event.bytes, 4).expect("length checked") & COOP_GUEST_SLOTS;
+                    let timestamp = read_u64_le(event.bytes, 8).unwrap_or(event.timestamp_us);
+                    let released = self.coop_slots & !mask;
+                    self.coop_slots = mask;
+                    let filtered = self.sync_topology(timestamp, &mut encoded);
+                    for slot in 0..self.gamepad_sequences.len() {
+                        if released & (1 << slot) != 0 && filtered & (1 << slot) != 0 {
+                            self.emit_neutral(slot, filtered, timestamp, &mut encoded);
+                        }
+                    }
+                }
+                INPUT_COOP_NEUTRAL => {
+                    require_len(event.bytes, 16, "short co-op neutral record")?;
+                    let slot = usize::from(read_u16_le(event.bytes, 4).expect("length checked"));
+                    let timestamp = read_u64_le(event.bytes, 8).unwrap_or(event.timestamp_us);
+                    if slot >= self.gamepad_sequences.len() || self.coop_slots & (1 << slot) == 0 {
+                        continue;
+                    }
+                    let filtered = self.sync_topology(timestamp, &mut encoded);
+                    if filtered & (1 << slot) != 0 {
+                        self.emit_neutral(slot, filtered, timestamp, &mut encoded);
+                    }
                 }
                 INPUT_HAPTICS_ENABLED => {
                     require_len(event.bytes, 6, "short haptics packet")?;
@@ -945,7 +1050,8 @@ fn native_event_length(input_type: u32, remaining: usize) -> Result<usize, NvstI
         INPUT_KEY_DOWN | INPUT_KEY_UP | INPUT_MOUSE_BUTTON_DOWN | INPUT_MOUSE_BUTTON_UP => Ok(18),
         INPUT_MOUSE_RELATIVE | INPUT_MOUSE_WHEEL => Ok(22),
         INPUT_MOUSE_ABSOLUTE => Ok(26),
-        INPUT_GAMEPAD => Ok(38),
+        INPUT_GAMEPAD | INPUT_COOP_GAMEPAD => Ok(38),
+        INPUT_COOP_SLOTS | INPUT_COOP_NEUTRAL => Ok(16),
         INPUT_HAPTICS_ENABLED => Ok(6),
         INPUT_LOCK_KEYS_SYNC => Ok(5),
         INPUT_TEXT => Ok(remaining),
@@ -1019,6 +1125,62 @@ pub(crate) fn unicode_text_messages(
         remaining = &remaining[end..];
     }
     messages
+}
+
+fn canonical_gamepad_event() -> [u8; 38] {
+    let mut event = [0_u8; 38];
+    event[0..4].copy_from_slice(&INPUT_GAMEPAD.to_le_bytes());
+    event[4..6].copy_from_slice(&26_u16.to_le_bytes());
+    event[10..12].copy_from_slice(&20_u16.to_le_bytes());
+    event[26..28].copy_from_slice(&85_u16.to_le_bytes());
+    event
+}
+
+/// Builds the in-process record that sets which GFN slots (1..3) belong to co-op guests.
+pub fn coop_slots_record(slot_mask: u8, timestamp_us: u64) -> Vec<u8> {
+    let mut record = Vec::with_capacity(16);
+    record.extend_from_slice(&INPUT_COOP_SLOTS.to_le_bytes());
+    record.extend_from_slice(&u16::from(slot_mask).to_le_bytes());
+    record.extend_from_slice(&0_u16.to_le_bytes());
+    record.extend_from_slice(&timestamp_us.to_le_bytes());
+    record
+}
+
+/// Builds the in-process record that releases a co-op slot to a neutral state.
+pub fn coop_neutral_record(slot: u8, timestamp_us: u64) -> Vec<u8> {
+    let mut record = Vec::with_capacity(16);
+    record.extend_from_slice(&INPUT_COOP_NEUTRAL.to_le_bytes());
+    record.extend_from_slice(&u16::from(slot).to_le_bytes());
+    record.extend_from_slice(&0_u16.to_le_bytes());
+    record.extend_from_slice(&timestamp_us.to_le_bytes());
+    record
+}
+
+/// Builds the in-process record carrying one guest snapshot for its assigned slot. The
+/// layout is the 38-byte gamepad event; the codec stamps the registered bitmap.
+#[allow(clippy::too_many_arguments)]
+pub fn coop_gamepad_record(
+    slot: u8,
+    buttons: u16,
+    left_trigger: u8,
+    right_trigger: u8,
+    left_stick: (i16, i16),
+    right_stick: (i16, i16),
+    timestamp_us: u64,
+) -> Vec<u8> {
+    let mut event = canonical_gamepad_event();
+    event[0..4].copy_from_slice(&INPUT_COOP_GAMEPAD.to_le_bytes());
+    event[6..8].copy_from_slice(&u16::from(slot & 0x03).to_le_bytes());
+    event[12..14].copy_from_slice(&buttons.to_le_bytes());
+    event[14..16].copy_from_slice(
+        &(u16::from(left_trigger) | (u16::from(right_trigger) << 8)).to_le_bytes(),
+    );
+    event[16..18].copy_from_slice(&left_stick.0.to_le_bytes());
+    event[18..20].copy_from_slice(&left_stick.1.to_le_bytes());
+    event[20..22].copy_from_slice(&right_stick.0.to_le_bytes());
+    event[22..24].copy_from_slice(&right_stick.1.to_le_bytes());
+    event[30..38].copy_from_slice(&timestamp_us.to_le_bytes());
+    event.to_vec()
 }
 
 fn gamepad_command(packet: &[u8], timestamp_us: u64, sequence: u16) -> Vec<u8> {
@@ -2438,5 +2600,202 @@ mod tests {
         let mut sony_count = 0;
         for_each_sony_output(&packets, |_, _| sony_count += 1);
         assert_eq!(sony_count, 0);
+    }
+
+    fn host_gamepad(id: u8, bitmap: u16, buttons: u16) -> Vec<u8> {
+        let mut event = canonical_gamepad_event();
+        event[6..8].copy_from_slice(&u16::from(id).to_le_bytes());
+        event[8..10].copy_from_slice(&bitmap.to_le_bytes());
+        event[12..14].copy_from_slice(&buttons.to_le_bytes());
+        event.to_vec()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Coop {
+        Register(u16),
+        Release { id: u16, bitmap: u16 },
+        State { id: u8, bitmap: u16, buttons: u16 },
+    }
+
+    fn classify(messages: &[NvstEncodedInput]) -> Vec<Coop> {
+        messages
+            .iter()
+            .map(|message| {
+                let bytes = &message.bytes;
+                assert_eq!(read_u16_le(bytes, 0), Some(COMMAND_GAMEPAD));
+                match message.route {
+                    NvstInputRoute::ControlReliable => match read_u16_le(bytes, 20).unwrap() {
+                        0 => Coop::Register(read_u16_le(bytes, 22).unwrap()),
+                        id => Coop::Release {
+                            id,
+                            bitmap: read_u16_le(bytes, 22).unwrap(),
+                        },
+                    },
+                    NvstInputRoute::InputPartial => Coop::State {
+                        id: bytes[14],
+                        bitmap: read_u16_le(bytes, 28).unwrap(),
+                        buttons: read_u16_le(bytes, 32).unwrap(),
+                    },
+                    other => panic!("unexpected route {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    fn guest(slot: u8, buttons: u16) -> Vec<u8> {
+        coop_gamepad_record(slot, buttons, 1, 2, (3, -4), (5, -6), 77)
+    }
+
+    #[test]
+    fn coop_join_merges_guest_slots_into_one_registration_bitmap() {
+        let mut codec = NvstInputCodec::default();
+        assert_eq!(
+            classify(&codec.encode(&host_gamepad(0, 0x0101, 1), 1).unwrap()),
+            [
+                Coop::Register(0x0101),
+                Coop::State {
+                    id: 0,
+                    bitmap: 0x0101,
+                    buttons: 1
+                }
+            ]
+        );
+        assert_eq!(
+            classify(&codec.encode(&coop_slots_record(0b0010, 2), 2).unwrap()),
+            [Coop::Register(0x0303)]
+        );
+        assert_eq!(
+            classify(&codec.encode(&guest(1, 0x1000), 3).unwrap()),
+            [Coop::State {
+                id: 1,
+                bitmap: 0x0303,
+                buttons: 0x1000
+            }]
+        );
+        assert_eq!(
+            classify(&codec.encode(&host_gamepad(0, 0x0101, 2), 4).unwrap()),
+            [Coop::State {
+                id: 0,
+                bitmap: 0x0303,
+                buttons: 2
+            }],
+            "the host's own bitmap must not unregister the guest"
+        );
+        let state = codec.encode(&guest(1, 0x1000), 5).unwrap();
+        let event = &state[0].bytes[20..58];
+        assert_eq!(read_u32_le(event, 0), Some(INPUT_GAMEPAD));
+        assert_eq!(event[14..24], [1, 2, 3, 0, 0xfc, 0xff, 5, 0, 0xfa, 0xff]);
+        assert_eq!(read_u64_le(event, 30), Some(77));
+    }
+
+    #[test]
+    fn coop_guest_owns_its_slot_and_unassigned_slots_drop_guest_input() {
+        let mut codec = NvstInputCodec::default();
+        codec.encode(&coop_slots_record(0b0010, 1), 1).unwrap();
+        assert_eq!(
+            classify(&codec.encode(&host_gamepad(1, 0x0303, 9), 2).unwrap()),
+            [Coop::Register(0x0303)],
+            "a second local controller must not drive a guest-owned slot"
+        );
+        assert!(codec.encode(&guest(2, 1), 3).unwrap().is_empty());
+        assert!(
+            !codec
+                .encode(&coop_slots_record(0b0001, 4), 4)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            codec.encode(&guest(0, 1), 5).unwrap().is_empty(),
+            "slot 0 stays with the host"
+        );
+    }
+
+    #[test]
+    fn coop_neutral_releases_reliably_and_supersedes_older_partial_state() {
+        let mut codec = NvstInputCodec::default();
+        codec.encode(&coop_slots_record(0b0100, 1), 1).unwrap();
+        let pressed = codec.encode(&guest(2, 0x00ff), 2).unwrap();
+        let neutral = codec.encode(&coop_neutral_record(2, 3), 3).unwrap();
+        assert_eq!(
+            classify(&neutral),
+            [
+                Coop::Release {
+                    id: 2,
+                    bitmap: 0x0404
+                },
+                Coop::State {
+                    id: 2,
+                    bitmap: 0x0404,
+                    buttons: 0
+                }
+            ]
+        );
+        let pressed_sequence = u16::from_be_bytes([pressed[0].bytes[15], pressed[0].bytes[16]]);
+        let neutral_sequence = u16::from_be_bytes([neutral[1].bytes[15], neutral[1].bytes[16]]);
+        assert_eq!(neutral_sequence, pressed_sequence.wrapping_add(1));
+        assert!(neutral.iter().all(|message| !message.is_meaningful()));
+    }
+
+    #[test]
+    fn coop_leave_and_slot_move_release_with_the_old_bitmap_first() {
+        let mut codec = NvstInputCodec::default();
+        codec.encode(&host_gamepad(0, 0x0101, 0), 1).unwrap();
+        codec.encode(&coop_slots_record(0b0010, 2), 2).unwrap();
+        codec.encode(&guest(1, 0x0010), 3).unwrap();
+        assert_eq!(
+            classify(&codec.encode(&coop_slots_record(0b0100, 4), 4).unwrap()),
+            [
+                Coop::Release {
+                    id: 1,
+                    bitmap: 0x0303
+                },
+                Coop::Register(0x0505)
+            ]
+        );
+        assert!(codec.encode(&guest(1, 0x0010), 5).unwrap().is_empty());
+        assert_eq!(
+            classify(&codec.encode(&coop_slots_record(0, 6), 6).unwrap()),
+            [
+                Coop::Release {
+                    id: 2,
+                    bitmap: 0x0505
+                },
+                Coop::Register(0x0101)
+            ]
+        );
+    }
+
+    #[test]
+    fn coop_release_of_a_slot_the_host_also_reports_still_sends_neutral() {
+        let mut codec = NvstInputCodec::default();
+        codec.encode(&host_gamepad(0, 0x0303, 0), 1).unwrap();
+        codec.encode(&coop_slots_record(0b0010, 2), 2).unwrap();
+        codec.encode(&guest(1, 0x0001), 3).unwrap();
+        assert_eq!(
+            classify(&codec.encode(&coop_slots_record(0, 4), 4).unwrap()),
+            [
+                Coop::Release {
+                    id: 1,
+                    bitmap: 0x0303
+                },
+                Coop::State {
+                    id: 1,
+                    bitmap: 0x0303,
+                    buttons: 0
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn coop_records_do_not_change_host_bytes_while_coop_is_off() {
+        let mut plain = NvstInputCodec::default();
+        let mut touched = NvstInputCodec::default();
+        touched.encode(&coop_slots_record(0, 1), 1).unwrap();
+        let packet = host_gamepad(0, 0x0101, 0x4000);
+        assert_eq!(
+            plain.encode(&packet, 2).unwrap(),
+            touched.encode(&packet, 2).unwrap()
+        );
     }
 }

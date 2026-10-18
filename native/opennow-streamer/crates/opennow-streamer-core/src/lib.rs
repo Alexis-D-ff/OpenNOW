@@ -10,6 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use decode_progress::{
     DecodeProgressEvent, DecodeProgressPolicy, DecodeProgressStage, DecodeProgressWatchdog,
 };
+use opennow_streamer_coop::{CoopGuest, CoopHost, Rumble, RumbleRouter};
 use opennow_streamer_hid::HidRuntime;
 use opennow_streamer_platform::{
     CapturedInput, CapturedInputQueue, CapturedInputSample, DecodeStageTimings,
@@ -34,6 +35,7 @@ use serde_json::{Value, json};
 #[cfg(test)]
 static LOG_SINK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+mod coop;
 mod decode_progress;
 mod microphone;
 mod nvst_rtsp;
@@ -266,6 +268,10 @@ pub struct Engine {
     replay_budget: Arc<AtomicUsize>,
     microphone: Option<MicrophoneController>,
     hid_runtime: Arc<HidRuntime>,
+    nvst_coop: Option<coop::NvstCoopSession>,
+    coop_host: Option<CoopHost>,
+    coop_guest: Option<CoopGuest>,
+    coop_rumble: Arc<RumbleRouter>,
 }
 
 struct RecordingWorker {
@@ -312,6 +318,10 @@ impl Engine {
             replay_budget: Arc::new(AtomicUsize::new(0)),
             microphone: None,
             hid_runtime: Arc::new(HidRuntime::new()),
+            nvst_coop: None,
+            coop_host: None,
+            coop_guest: None,
+            coop_rumble: Arc::default(),
         }
     }
 
@@ -352,6 +362,10 @@ impl Engine {
             replay_budget: Arc::new(AtomicUsize::new(0)),
             microphone: None,
             hid_runtime: Arc::new(HidRuntime::new()),
+            nvst_coop: None,
+            coop_host: None,
+            coop_guest: None,
+            coop_rumble: Arc::default(),
         }
     }
 
@@ -388,6 +402,10 @@ impl Engine {
             replay_budget: Arc::new(AtomicUsize::new(0)),
             microphone: None,
             hid_runtime: Arc::new(HidRuntime::new()),
+            nvst_coop: None,
+            coop_host: None,
+            coop_guest: None,
+            coop_rumble: Arc::default(),
         }
     }
 
@@ -449,6 +467,15 @@ impl Engine {
                 Ok(vec![response(id, "replay-stopped")])
             }
             "microphone-set" | "microphone-toggle" => self.set_microphone(command),
+            "coop-host-start"
+            | "coop-peer-add"
+            | "coop-signal-in"
+            | "coop-peer-slot"
+            | "coop-peer-input-muted"
+            | "coop-peer-remove"
+            | "coop-host-stop"
+            | "coop-guest-start"
+            | "coop-guest-stop" => self.coop_command(command),
             "bitrate" | "update-shortcuts" => Err(error(
                 Some(&id),
                 "unsupported-command",
@@ -718,6 +745,13 @@ impl Engine {
                 return Err(invalid_state(&command.id, "start", lifecycle.state, "Idle"));
             }
         }
+        if self.coop_guest.is_some() {
+            return Err(error(
+                Some(&command.id),
+                "coop-guest-active",
+                "Leave the co-op session before starting a stream",
+            ));
+        }
         if let Some(session) = self.webrtc_session.take() {
             session.stop();
         }
@@ -927,6 +961,7 @@ impl Engine {
                 };
             let mjolnir_udp_port = config.mjolnir_udp_port();
             let feedback = config.feedback();
+            let coop_audio = config.audio_track().cloned();
             nvst_authenticated_ready = Some(feedback.clone());
             let (upstream_ready, upstream_waiter) = if prepared_nvst.is_some() {
                 let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1007,6 +1042,15 @@ impl Engine {
                 mjolnir_control = Some(mjolnir.control());
                 self.nvst_mjolnir_transport = Some(mjolnir);
             }
+            let coop_stream = prepared_nvst
+                .as_ref()
+                .map(|prepared| prepared.media_config)
+                .unwrap_or_else(|| media_stream_config(&context));
+            self.nvst_coop = Some(coop::NvstCoopSession {
+                bundle: bundle_control.clone(),
+                feedback: feedback.clone(),
+                description: coop::stream_description(&coop_stream, coop_audio.as_ref()),
+            });
             nvst_resources = Some(ActiveNvstResources {
                 bundle: bundle_control,
                 mjolnir: mjolnir_control,
@@ -1047,6 +1091,7 @@ impl Engine {
                 .map(MediaSession::captured_input);
             let shortcut_runtime = self.media_runtime.clone();
             let start_id = command.id.clone();
+            let coop_rumble = Arc::clone(&self.coop_rumble);
             let nvst_resources = nvst_resources.expect("NVST events require active resources");
             self.feedback_worker = thread::Builder::new()
                 .name("opennow-nvst-events".to_owned())
@@ -1061,6 +1106,7 @@ impl Engine {
                             media_feedback,
                             captured_input,
                             shortcut_runtime,
+                            coop_rumble,
                             transport: nvst_resources,
                         },
                     )
@@ -1323,6 +1369,9 @@ impl Engine {
     }
 
     fn stop(&mut self, reason: &str) {
+        self.stop_coop_guest();
+        self.stop_coop_host();
+        self.nvst_coop = None;
         self.clip_cancelled.store(true, Ordering::Release);
         if let Some(session) = self.media_session.as_ref() {
             session.control().unsubscribe_recording();
@@ -1846,6 +1895,7 @@ struct NvstSessionEventResources<R> {
     media_feedback: Option<Receiver<MediaFeedback>>,
     captured_input: Option<Arc<CapturedInputQueue>>,
     shortcut_runtime: Option<MediaRuntime>,
+    coop_rumble: Arc<RumbleRouter>,
     transport: R,
 }
 
@@ -1866,6 +1916,7 @@ fn forward_nvst_session_events<R: NvstSessionResources>(
         media_feedback,
         captured_input,
         shortcut_runtime,
+        coop_rumble,
         transport: resources,
     } = event_resources;
     let mut feedback_state = NvstMediaFeedbackState::new(false);
@@ -1907,6 +1958,16 @@ fn forward_nvst_session_events<R: NvstSessionResources>(
             .drop_reports
             .record("controller-rumble-coalesced", coalesced);
         for command in rumble.into_iter().flatten() {
+            if coop_rumble.route(
+                command.controller_id,
+                Rumble {
+                    low_frequency: command.low_frequency,
+                    high_frequency: command.high_frequency,
+                    duration_ms: u16::try_from(command.duration_ms).unwrap_or(u16::MAX),
+                },
+            ) {
+                continue;
+            }
             if pending_rumble[usize::from(command.controller_id)]
                 .replace(command)
                 .is_some()
@@ -4720,6 +4781,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "input-readiness".to_owned(),
                     nvst_events,
                     media_feedback: None,
@@ -4779,6 +4841,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "input-closed".to_owned(),
                     nvst_events,
                     media_feedback: None,
@@ -4964,6 +5027,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "test-session".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5030,6 +5094,7 @@ mod tests {
                     &worker_lifecycle,
                     7,
                     NvstSessionEventResources {
+                        coop_rumble: Arc::default(),
                         start_id: "decode-deadline".into(),
                         nvst_events,
                         media_feedback: Some(feedback),
@@ -5157,6 +5222,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "decode-stall".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5272,6 +5338,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "decode-owned".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5339,6 +5406,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "stall-ownership".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5492,6 +5560,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "assembly-resumed".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5611,6 +5680,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "idle-decoder".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
@@ -5662,6 +5732,7 @@ mod tests {
                 &worker_lifecycle,
                 7,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "start-7".to_owned(),
                     nvst_events,
                     media_feedback: None,
@@ -5774,6 +5845,7 @@ mod tests {
                 &lifecycle,
                 u64::MAX,
                 NvstSessionEventResources {
+                    coop_rumble: Arc::default(),
                     start_id: "test-session".to_owned(),
                     nvst_events,
                     media_feedback: Some(feedback),
