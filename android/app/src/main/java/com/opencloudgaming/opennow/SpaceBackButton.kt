@@ -32,12 +32,11 @@ internal fun SpaceBackButton(modifier: Modifier = Modifier, onClick: () -> Unit)
 internal fun SpaceIconButton(icon: ImageVector, label: String, modifier: Modifier = Modifier,
     active: Boolean = false, size: Dp = 48.dp, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    val interaction = rememberSpaceInteraction(focused)
+    val interaction = rememberSpaceInteraction(focused, cornerRadius = size / 2)
     val focusManager = LocalFocusManager.current
     Box(modifier.size(size).then(interaction.modifier)
         .onFocusChanged { focused = it.isFocused }
         .hoverable(interaction.source)
-        .spaceFocusFrame(focused || interaction.hovered, size / 2)
         .clip(CircleShape).background(SpaceWhite)
         .onPreviewKeyEvent { handleDpadFocusMove(it, focusManager) }
         .semantics { selected = active }

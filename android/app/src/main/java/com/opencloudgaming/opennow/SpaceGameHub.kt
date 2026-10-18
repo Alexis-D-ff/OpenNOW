@@ -1,6 +1,5 @@
 package com.opencloudgaming.opennow
 
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.border
@@ -27,7 +26,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.onGloballyPositioned
-import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -83,7 +81,7 @@ internal fun SpaceGameHub(
                 if (event.type == KeyEventType.KeyUp && screenshots.isNotEmpty() && !confirmRemove) gallery = !gallery
                 true
             }
-        }.lockedFocusGroup()) {
+        }.onKeyEvent { readScroll.handleVerticalKey(it, scrollStep) }.lockedFocusGroup()) {
             val compact = maxHeight < 500.dp
             val narrow = maxWidth < 600.dp
             val galleryWidth = minOf(if (narrow) 280.dp else 520.dp,
@@ -106,15 +104,8 @@ internal fun SpaceGameHub(
                 }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().onGloballyPositioned { readScroll.viewport = it }) {
                 val overviewHeight = (maxHeight - (if (compact) 20.dp else 40.dp) - 8.dp).coerceAtLeast(0.dp)
-                Column(Modifier.fillMaxSize().testTag("space-hub-scroll").spaceArrival(gallery).verticalScroll(detailsScroll).onKeyEvent { event ->
-                    val delta = when {
-                        event.type != KeyEventType.KeyDown -> 0f
-                        event.key == Key.DirectionDown && detailsScroll.canScrollForward -> scrollStep
-                        event.key == Key.DirectionUp && detailsScroll.canScrollBackward -> -scrollStep
-                        else -> 0f
-                    }
-                    if (delta != 0f) { scrollScope.launch { detailsScroll.animateScrollBy(delta) }; true } else false
-                }.padding(top = if (compact) 20.dp else 40.dp, bottom = 48.dp),
+                Column(Modifier.fillMaxSize().testTag("space-hub-scroll").spaceArrival(gallery).verticalScroll(detailsScroll)
+                    .padding(top = if (compact) 20.dp else 40.dp, bottom = 48.dp),
                     verticalArrangement = Arrangement.spacedBy(if (compact) 14.dp else 24.dp)) {
                     if (!gallery) {
                         Column(Modifier.fillMaxWidth().heightIn(min = overviewHeight).testTag("space-hub-hero"),
@@ -137,19 +128,19 @@ internal fun SpaceGameHub(
                 Row(Modifier.fillMaxWidth().testTag("space-hub-actions"),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     SpaceControl(stringResource(if (game.requiresMembershipUpgrade()) R.string.catalog_upgrade_to_play else R.string.action_play),
-                        Modifier.focusRequester(playRequester).focusProperties { down = descriptionRequester }
+                        Modifier.focusRequester(playRequester).spaceDetailsHeroAction().focusProperties { down = descriptionRequester }
                             .testTag("space-hub-play"), filled = true, minHeight = 52.dp,
                         onClick = { launch(GameDetailsLaunchAction.Play) })
                     SpaceIconButton(if (favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                         stringResource(if (favorite) R.string.controller_action_unfavorite else R.string.controller_action_favorite),
-                        Modifier.testTag("space-hub-favorite"), active = favorite, size = 52.dp, onClick = { onFavorite(game.id) })
+                        Modifier.testTag("space-hub-favorite").spaceDetailsHeroAction(), active = favorite, size = 52.dp, onClick = { onFavorite(game.id) })
                     if (connectedTvName != null) SpaceControl(stringResource(R.string.action_play_on_tv, connectedTvName),
-                        minHeight = 52.dp, onClick = { launch(GameDetailsLaunchAction.PlayOnTv) })
+                        Modifier.spaceDetailsHeroAction(), minHeight = 52.dp, onClick = { launch(GameDetailsLaunchAction.PlayOnTv) })
                 }
                         }
                     } else {
                         Text(stringResource(R.string.space_ui_gallery), color = SpaceWhite, fontWeight = FontWeight.Light, fontSize = 32.sp)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 20.dp)) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(horizontal = 24.dp, vertical = 20.dp)) {
                             itemsIndexed(screenshots, key = { _, url -> url }) { index, url ->
                                 var imageFocused by remember { mutableStateOf(false) }
                                 val focusManager = LocalFocusManager.current
@@ -159,6 +150,7 @@ internal fun SpaceGameHub(
                                     Modifier.width(galleryWidth).aspectRatio(16f / 9f).testTag("space-gallery-image")
                                         .then(if (index == 0) Modifier.focusRequester(galleryRequester) else Modifier)
                                         .then(interaction.modifier).hoverable(interaction.source)
+                                        .spaceFocusFrame(imageFocused || interaction.hovered, 20.dp)
                                         .clip(RoundedCornerShape(20.dp))
                                         .border(if (imageFocused || interaction.hovered) 2.dp else 0.dp, SpaceIce, RoundedCornerShape(20.dp))
                                         .onFocusChanged { imageFocused = it.isFocused }
@@ -167,7 +159,8 @@ internal fun SpaceGameHub(
                             }
                         }
                     }
-                    SpaceGameDetails(game, narrow, defaultVariantId, descriptionRequester)
+                    SpaceGameDetails(game, narrow, defaultVariantId, descriptionRequester,
+                        previousRequester = if (gallery) galleryRequester else playRequester)
                     if (removeLabel != null && removeEnabled && onRemove != null) {
                         SpaceControl(removeLabel, onClick = {
                             if (removeConfirmationText != null) confirmRemove = true else onRemove()

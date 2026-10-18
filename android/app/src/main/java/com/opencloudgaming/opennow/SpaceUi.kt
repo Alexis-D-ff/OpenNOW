@@ -457,7 +457,7 @@ internal fun SpaceGameTile(game: GameInfo, selected: Boolean, compact: Boolean, 
 internal fun SpaceControl(label: String, modifier: Modifier = Modifier, active: Boolean = false,
     filled: Boolean = false, rectangular: Boolean = false, enabled: Boolean = true, minHeight: androidx.compose.ui.unit.Dp = if (filled) 52.dp else 42.dp, onClick: () -> Unit, content: (@Composable RowScope.() -> Unit)? = null) {
     var focused by remember { mutableStateOf(false) }
-    val interaction = rememberSpaceInteraction(focused, enabled = enabled)
+    val interaction = rememberSpaceInteraction(focused, enabled = enabled, cornerRadius = if (rectangular) 4.dp else minHeight / 2)
     val shape = RoundedCornerShape(if (rectangular) 4.dp else 50.dp)
     val focusManager = LocalFocusManager.current
     Row(modifier.defaultMinSize(minHeight = minHeight, minWidth = if (filled) 132.dp else 42.dp)

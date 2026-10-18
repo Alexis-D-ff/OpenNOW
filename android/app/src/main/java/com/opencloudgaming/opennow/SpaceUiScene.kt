@@ -32,7 +32,8 @@ internal val LocalSpaceUiPresentation = staticCompositionLocalOf { false }
 
 /** A single visual system across discovery, game hubs, settings, and session launch. */
 @Composable
-internal fun SpaceUiTheme(enabled: Boolean = true, content: @Composable () -> Unit) {
+internal fun SpaceUiTheme(enabled: Boolean = true,
+    physicalControllerConnected: Boolean = LocalSpaceControllerConnected.current, content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = if (!enabled) MaterialTheme.colorScheme else MaterialTheme.colorScheme.copy(
             primary = SpaceWhite, onPrimary = SpaceInk, primaryContainer = Color(0xFF233140),
@@ -68,6 +69,7 @@ internal fun SpaceUiTheme(enabled: Boolean = true, content: @Composable () -> Un
             titleWeight = FontWeight.Medium, titleColor = SpaceMuted, itemSpacing = 2.dp,
         )
         CompositionLocalProvider(
+            LocalSpaceControllerConnected provides physicalControllerConnected,
             LocalSpaceUiPresentation provides (enabled || LocalSpaceUiPresentation.current),
             androidx.compose.material3.LocalContentColor provides (if (enabled) SpaceWhite else androidx.compose.material3.LocalContentColor.current),
             LocalControlRowStyle provides (if (enabled) rows else LocalControlRowStyle.current),

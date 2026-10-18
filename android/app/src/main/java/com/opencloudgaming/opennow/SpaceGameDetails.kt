@@ -6,6 +6,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -19,7 +20,8 @@ import kotlin.math.roundToInt
 
 /** Same facts and actions as standard details, with a five-line, expandable console presentation. */
 @Composable
-internal fun SpaceGameDetails(game: GameInfo, narrow: Boolean, defaultVariantId: String?, descriptionRequester: FocusRequester) {
+internal fun SpaceGameDetails(game: GameInfo, narrow: Boolean, defaultVariantId: String?, descriptionRequester: FocusRequester,
+    previousRequester: FocusRequester) {
     val description = remember(game) { gameDescriptionForDetails(game) }
         ?: stringResource(R.string.catalog_no_description)
     var expanded by rememberSaveable(game.id, description) { mutableStateOf(false) }
@@ -48,6 +50,7 @@ internal fun SpaceGameDetails(game: GameInfo, narrow: Boolean, defaultVariantId:
             maxLines = if (expanded) Int.MAX_VALUE else 5, overflow = TextOverflow.Ellipsis,
             onTextLayout = { if (!expanded) canExpand = it.hasVisualOverflow },
             modifier = Modifier.fillMaxWidth(if (narrow) 1f else .84f).testTag("space-hub-description")
+                .focusProperties { up = previousRequester }
                 .onGloballyPositioned { position[0] = it }.spaceReadableBlock(descriptionRequester, contentPadding = 0.dp, highlight = false))
         if (canExpand || expanded) SpaceControl(stringResource(if (expanded) R.string.space_ui_show_less else R.string.space_ui_show_more),
             Modifier.testTag("space-hub-description-toggle"), rectangular = true, onClick = { expanded = !expanded })

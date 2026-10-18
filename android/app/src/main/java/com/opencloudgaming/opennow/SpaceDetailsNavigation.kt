@@ -27,8 +27,41 @@ import kotlinx.coroutines.launch
 
 internal class SpaceDetailsScroll(val state: ScrollState, val scope: CoroutineScope) {
     var viewport: LayoutCoordinates? = null
+
+    fun moveBy(delta: Float) {
+        scope.launch { state.scroll(MutatePriority.UserInput) { scrollBy(delta) } }
+    }
+
+    fun returnToTop() {
+        scope.launch { state.scroll(MutatePriority.UserInput) { scrollBy(-state.value.toFloat()) } }
+    }
+
+    /** Also handles keys from the fixed header, after its normal focus traversal declines them. */
+    fun handleVerticalKey(event: KeyEvent, step: Float): Boolean {
+        if (event.type != KeyEventType.KeyDown) return false
+        val delta = when {
+            event.key == Key.DirectionDown && state.canScrollForward -> step
+            event.key == Key.DirectionUp && state.canScrollBackward -> -step
+            else -> return false
+        }
+        moveBy(delta)
+        return true
+    }
 }
 internal val LocalSpaceDetailsScroll = staticCompositionLocalOf<SpaceDetailsScroll?> { null }
+
+/** Returning to an opening action reveals the whole hero, not just the action at its foot. */
+@Composable
+internal fun Modifier.spaceDetailsHeroAction(): Modifier {
+    val owner = LocalSpaceDetailsScroll.current
+    return onFocusChanged { if (it.isFocused) owner?.returnToTop() }
+        .onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp && owner?.state?.canScrollBackward == true) {
+                owner.returnToTop()
+                true
+            } else false
+        }
+}
 private class ReadablePosition { var coordinates: LayoutCoordinates? = null }
 private fun LayoutCoordinates.unclippedRect(): Rect {
     val origin = localToRoot(Offset.Zero)
@@ -61,7 +94,7 @@ internal fun Modifier.spaceReadableBlock(requester: FocusRequester? = null, focu
                 else -> 0f
             } else 0f
             if (delta != 0f && owner != null) {
-                owner.scope.launch { owner.state.scroll(MutatePriority.UserInput) { scrollBy(delta) } }
+                owner.moveBy(delta)
                 true
             } else handleDpadFocusMove(event, manager)
         }

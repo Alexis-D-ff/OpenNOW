@@ -765,7 +765,8 @@ private fun OpenNowAppContent(
         physicalControllerConnected = physicalControllerConnected,
         runtimeCodecReport = state.codecReport,
     ) {
-        SpaceUiTheme(enabled = state.settings.experimentalSpaceUi && state.authSession != null && !showSetupFlow && (state.page != AppPage.Stream || state.pendingStoreChoiceGame != null || state.pendingPrintedWasteGame != null)) {
+        SpaceUiTheme(enabled = state.settings.experimentalSpaceUi && state.authSession != null && !showSetupFlow && (state.page != AppPage.Stream || state.pendingStoreChoiceGame != null || state.pendingPrintedWasteGame != null),
+            physicalControllerConnected = physicalControllerConnected) {
             val primaryColor = MaterialTheme.colorScheme.primary
             CompositionLocalProvider(
                 LocalTvLoadingProfile provides state.androidTvProfile,

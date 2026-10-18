@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -997,6 +998,8 @@ private fun PrintedWasteLocationRow(
     liveSelectedOutlines: Boolean,
     onClick: () -> Unit,
 ) {
+    val space = LocalSpaceUiPresentation.current
+    val motion = if (space) rememberSpaceInteraction(focused) else null
     val zoneOption = location.primary
     val zone = zoneOption.zone
     val detail = printedWasteLocationDetail(location)
@@ -1005,9 +1008,12 @@ private fun PrintedWasteLocationRow(
         contentColor = TextPrimary,
             modifier = Modifier
                 .fillMaxWidth()
+                .then(motion?.modifier ?: Modifier)
+                .then(if (motion != null) Modifier.hoverable(motion.source) else Modifier)
                 .focusProperties { canFocus = false }
-                .clickable { onClick() },
-            shape = RoundedCornerShape(if (LocalSpaceUiPresentation.current) 4.dp else 12.dp),
+                .then(if (motion != null) Modifier.clickable(interactionSource = motion.source, indication = null, onClick = onClick)
+                    else Modifier.clickable(onClick = onClick)),
+            shape = RoundedCornerShape(if (space) 4.dp else 12.dp),
             color = if (focused) {
                 Color.White.copy(alpha = 0.16f)
             } else if (selected) {
@@ -1016,7 +1022,7 @@ private fun PrintedWasteLocationRow(
                 PanelAlt
             },
             tonalElevation = if (selected) 2.dp else 0.dp,
-            border = if (selected && listFocused && !liveSelectedOutlines) {
+            border = if (!space && selected && listFocused && !liveSelectedOutlines) {
                 BorderStroke(2.dp, LocalSelectionTintColor.current)
             } else {
                 null
@@ -1072,7 +1078,7 @@ private fun PrintedWasteLocationRow(
             }
         }
         ControllerFocusFrame(
-            visible = shouldShowActiveSelectionOutline(selected, liveSelectedOutlines),
+            visible = !space && shouldShowActiveSelectionOutline(selected, liveSelectedOutlines),
             cornerRadius = 12.dp,
             tint = LocalActiveSelectionColor.current,
             secondaryTint = LocalActiveSelectionSecondaryColor.current,

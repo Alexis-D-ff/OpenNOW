@@ -334,6 +334,17 @@ class SpaceUiInstrumentedTest {
         capture("space-hub-metadata")
         compose.onNodeWithTag("space-hub-description-toggle").performScrollTo().performClick()
         assertEquals("Show less restores five lines", 5, descriptionLines())
+        compose.onNodeWithTag("space-hub-description").performScrollTo()
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.RequestFocus) { it() }
+        for (step in 0..5) {
+            if (compose.onAllNodes(hasTestTag("space-hub-play") and isFocused()).fetchSemanticsNodes().isNotEmpty()) break
+            compose.onNodeWithTag("space-game-hub").performKeyInput { pressKey(Key.DirectionUp) }
+        }
+        awaitFocused("space-hub-play")
+        val returnedScroll = compose.onNodeWithTag("space-hub-scroll").fetchSemanticsNode()
+            .config[androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange].value()
+        assertEquals("Returning to Play reveals the entire opening section", 0f, returnedScroll, .1f)
+        compose.onNodeWithTag("space-hub-author").assertIsDisplayed()
     }
 
     @Test fun discoverTouchScrollOpensAFullCatalogWithVerticalCovers() {

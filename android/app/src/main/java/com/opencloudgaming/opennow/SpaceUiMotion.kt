@@ -13,10 +13,14 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.opencloudgaming.opennow.ui.theme.LocalReduceMotion
 
-/** Shared, event-driven console motion. No idle animation or layout-size changes. */
+internal val LocalSpaceAnimatedFocusOutline = compositionLocalOf { true }
+internal val LocalSpaceControllerConnected = compositionLocalOf { false }
+
+/** Shared console feedback; focus chrome draws without changing control layout. */
 internal class SpaceInteraction(
     val source: MutableInteractionSource,
     val hovered: Boolean,
@@ -26,7 +30,7 @@ internal class SpaceInteraction(
 
 @Composable
 internal fun rememberSpaceInteraction(focused: Boolean, tile: Boolean = false, enabled: Boolean = true,
-    reduceMotion: Boolean = LocalReduceMotion.current): SpaceInteraction {
+    reduceMotion: Boolean = LocalReduceMotion.current, cornerRadius: Dp = 4.dp): SpaceInteraction {
     val fast = LocalSpaceFastNavigation.current
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
@@ -37,14 +41,14 @@ internal fun rememberSpaceInteraction(focused: Boolean, tile: Boolean = false, e
     val scale by animateFloatAsState(when {
         reduceMotion -> 1f
         enabled && pressed -> .97f
-        engaged -> if (tile) 1.045f else 1.025f
+        engaged && tile -> 1.045f
         else -> 1f
     }, tween(if (reduceMotion) 0 else if (fast) 45 else if (pressed) 80 else 180, easing = FastOutSlowInEasing), label = "space-scale")
-    val lift = with(LocalDensity.current) { (if (tile) 3.dp else 1.dp).toPx() }
+    val lift = with(LocalDensity.current) { (if (tile) 3.dp else 0.dp).toPx() }
     return SpaceInteraction(source, enabled && hovered, emphasis, Modifier.graphicsLayer {
         scaleX = scale; scaleY = scale
         translationY = if (reduceMotion || pressed) 0f else -lift * emphasis
-    })
+    }.then(if (tile || !LocalSpaceAnimatedFocusOutline.current) Modifier else Modifier.spaceFocusFrame(engaged, cornerRadius)))
 }
 
 /** Finite entrance on navigation/selection, cancelled immediately by the next navigation. */
@@ -68,7 +72,8 @@ internal fun Modifier.spaceArrival(key: Any?, delayMillis: Int = 0): Modifier {
 /** Spring-in frame with a slow moving light while a tile owns focus or hover. */
 @Composable
 internal fun Modifier.spaceFocusFrame(active: Boolean, radius: androidx.compose.ui.unit.Dp): Modifier {
-    val engaged = active && androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    val engaged = active && LocalSpaceAnimatedFocusOutline.current && LocalSpaceControllerConnected.current &&
+        androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
     val reduced = LocalReduceMotion.current
     val fast = LocalSpaceFastNavigation.current
     val reveal = animateFloatAsState(if (engaged) 1f else 0f,

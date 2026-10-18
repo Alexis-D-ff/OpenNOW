@@ -35,6 +35,7 @@ internal fun SpaceSettingsFrame(sections: List<SpaceSettingsSection>, selectedId
     val scroll = rememberScrollState()
     val entry = LocalSpaceSettingsEntry.current ?: remember { FocusRequester() }
     LaunchedEffect(selectedId) { scroll.scrollTo(0) }
+    CompositionLocalProvider(LocalSpaceAnimatedFocusOutline provides false) {
     BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 16.dp).testTag("space-settings")) {
         val wide = maxWidth >= 600.dp
         val rail: @Composable () -> Unit = {
@@ -68,5 +69,6 @@ internal fun SpaceSettingsFrame(sections: List<SpaceSettingsSection>, selectedId
             rail()
             Box(Modifier.weight(1f)) { controls() }
         }
+    }
     }
 }
