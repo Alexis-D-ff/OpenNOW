@@ -188,7 +188,7 @@ The final subdomains are not decided; nothing may hard-code them.
 ### Join landing page
 
 `GET /join/:code` serves a small HTML page: game, host display name, "Open in OpenNOW" (`opennow://join/<CODE>`)
-and "Get OpenNOW" (https://opennow.zortos.me or the project download URL from env `DOWNLOAD_URL`). Invalid or expired codes render a friendly expired state.
+and "Get OpenNOW" (the download URL from env `DOWNLOAD_URL`). Invalid or expired codes render a friendly expired state.
 
 ## 4. Social backend WebSocket (`GET /v1/ws`)
 
