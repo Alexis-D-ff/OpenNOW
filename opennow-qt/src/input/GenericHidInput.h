@@ -63,6 +63,7 @@ public:
         QList<GenericHidDeviceClaim> claims;
         QList<GenericHidReport> reports;
         QStringList diagnostics;
+        quint64 scanGeneration = 0;
     };
 
     explicit GenericHidInput(std::shared_ptr<GenericHidBackend> backend = {}, QObject *parent = nullptr);
@@ -75,7 +76,6 @@ public:
     Batch drain(int limit = 32);
     QList<GenericHidDeviceClaim> claims() const;
     QList<DetectedDevice> devices() const;
-    bool scanned() const;
     void setForwardingEnabled(bool enabled);
     void submitOutput(const GenericHidReport &report);
     void clearOutputs();
@@ -110,7 +110,7 @@ private:
     QStringList m_diagnostics;
     quint32 m_droppedDiagnostics = 0;
     QList<DetectedDevice> m_devices;
-    bool m_scanned = false;
+    quint64 m_scanGeneration = 0;
     bool m_forwardingEnabled = true;
     quint64 m_forwardingEpoch = 0;
 };

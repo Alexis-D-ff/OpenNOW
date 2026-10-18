@@ -162,6 +162,8 @@ void ControllerInput::refreshFlightDevices()
     QVariantList result;
     QSet<SDL_JoystickID> matched;
     QSet<SDL_JoystickID> noHidPath;
+    QHash<SDL_JoystickID, quint64> firstSeenScan;
+    m_hidPathCheckPending = false;
     int count = 0;
     auto *ids = m_sdlReady ? SDL_GetJoysticks(&count) : nullptr;
     QHash<SDL_JoystickID, QByteArray> physicalKeys;
@@ -225,10 +227,14 @@ void ControllerInput::refreshFlightDevices()
         const auto open = !m_forwardFlightControls && m_gamepadSlots.contains(id);
         const auto vendor = SDL_GetJoystickVendorForID(id);
         const auto product = SDL_GetJoystickProductForID(id);
-        const auto hidSourceMissing = m_forwardFlightControls && m_genericHid && m_genericHid->scanned()
+        const auto seenAt = m_flightFirstSeenScan.value(id, m_hidScanGeneration);
+        firstSeenScan.insert(id, seenAt);
+        const auto noHidSource = m_forwardFlightControls && m_genericHid
             && std::none_of(devices.cbegin(), devices.cend(), [&](const auto &device) {
                 return device.vendor == vendor && device.product == product;
             });
+        const auto hidSourceMissing = noHidSource && m_hidScanGeneration >= seenAt + 2;
+        if (noHidSource && !hidSourceMissing) m_hidPathCheckPending = true;
         if (hidSourceMissing) noHidPath.insert(id);
         metadata.insert(QStringLiteral("status"), hidSourceMissing ? QStringLiteral("no-hid-path")
             : m_forwardFlightControls ? QStringLiteral("ready")
@@ -245,6 +251,7 @@ void ControllerInput::refreshFlightDevices()
                 path ? QString::fromLocal8Bit(path) : QStringLiteral("unknown")));
     }
     m_noHidPathDevices = std::move(noHidPath);
+    m_flightFirstSeenScan = std::move(firstSeenScan);
     std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
         return a.toMap().value(QStringLiteral("deviceId")).toString() < b.toMap().value(QStringLiteral("deviceId")).toString();
     });
@@ -611,6 +618,8 @@ void ControllerInput::poll()
 {
     if (m_genericHid) {
         auto batch = m_genericHid->drain();
+        const auto scanAdvanced = std::exchange(m_hidScanGeneration, batch.scanGeneration) != batch.scanGeneration;
+        if (scanAdvanced && m_hidPathCheckPending && !batch.inventoryChanged) refreshFlightDevices();
         for (const auto &message : std::as_const(batch.diagnostics)) emit inputDiagnostic(message);
         if (batch.inventoryChanged) {
             updatePollInterval();
