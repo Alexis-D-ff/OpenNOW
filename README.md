@@ -48,7 +48,7 @@ Portrait captures from the Android phone interface.
   </tr>
 </table>
 
-### Space UI · Experimental
+### Space UI
 
 **Discover**
 
