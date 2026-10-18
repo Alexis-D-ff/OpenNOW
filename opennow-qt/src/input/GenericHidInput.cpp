@@ -435,6 +435,12 @@ QList<GenericHidInput::DetectedDevice> GenericHidInput::devices() const
     return m_devices;
 }
 
+bool GenericHidInput::scanned() const
+{
+    QMutexLocker lock(&m_mutex);
+    return m_scanned;
+}
+
 void GenericHidInput::setForwardingEnabled(bool enabled)
 {
     QMutexLocker lock(&m_mutex);
@@ -787,8 +793,9 @@ void GenericHidInput::run()
             std::sort(inventory.begin(), inventory.end(), [](const auto &a, const auto &b) { return a.deviceId < b.deviceId; });
             QMutexLocker lock(&m_mutex);
             if (m_forwardingEpoch != forwardingEpoch) for (auto &entry : inventory) entry.incarnation = 0;
-            if (inventory != m_devices) {
+            if (inventory != m_devices || !m_scanned) {
                 m_devices = std::move(inventory);
+                m_scanned = true;
                 markInventoryChangedLocked();
             }
         }

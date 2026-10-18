@@ -235,6 +235,7 @@ private:
     QVariantList m_controllerMetadata;
     QVariantList m_availableControllerMetadata;
     QVariantList m_flightDevices;
+    QSet<SDL_JoystickID> m_noHidPathDevices;
     QHash<quint64, GenericHidAdmission> m_genericHidAdmissions;
     bool m_forwardFlightControls = true;
     SDL_JoystickID m_inputControllerId = 0;

@@ -308,6 +308,7 @@ private slots:
     {
         auto backend = std::make_shared<FakeBackend>();
         ControllerInput input(nullptr, backend);
+        QSignalSpy diagnostics(&input, &ControllerInput::inputDiagnostic);
         SDL_VirtualJoystickDesc virtualDevice{};
         SDL_INIT_INTERFACE(&virtualDevice);
         virtualDevice.type = SDL_JOYSTICK_TYPE_GAMEPAD;
@@ -326,7 +327,13 @@ private slots:
         } detach{id};
         QTRY_COMPARE(input.flightDevices().size(), 1);
         QCOMPARE(input.controllerCount(), 0);
-        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("ready"));
+        QTRY_COMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("no-hid-path"));
+        const auto noHidPathLogs = [&] {
+            return std::count_if(diagnostics.cbegin(), diagnostics.cend(), [](const auto &arguments) {
+                return arguments.first().toString().startsWith(QStringLiteral("generic-hid 044f:0402 has no hidraw node"));
+            });
+        };
+        QCOMPARE(noHidPathLogs(), 1);
         input.setForwardFlightControls(false);
         QTRY_COMPARE(input.controllerCount(), 1);
         QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("controller"));
@@ -341,7 +348,8 @@ private slots:
         QTRY_VERIFY(!snapshots.isEmpty() && snapshots.last()[2].toUInt() == 0x1000);
         input.setForwardFlightControls(true);
         QCOMPARE(input.controllerCount(), 0);
-        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("ready"));
+        QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("status")).toString(), QStringLiteral("no-hid-path"));
+        QCOMPARE(noHidPathLogs(), 2);
         QCOMPARE(input.flightDevices().first().toMap().value(QStringLiteral("player")).toInt(), 0);
         input.setForwardFlightControls(false);
         QCOMPARE(input.controllerCount(), 1);

@@ -75,6 +75,7 @@ public:
     Batch drain(int limit = 32);
     QList<GenericHidDeviceClaim> claims() const;
     QList<DetectedDevice> devices() const;
+    bool scanned() const;
     void setForwardingEnabled(bool enabled);
     void submitOutput(const GenericHidReport &report);
     void clearOutputs();
@@ -109,6 +110,7 @@ private:
     QStringList m_diagnostics;
     quint32 m_droppedDiagnostics = 0;
     QList<DetectedDevice> m_devices;
+    bool m_scanned = false;
     bool m_forwardingEnabled = true;
     quint64 m_forwardingEpoch = 0;
 };
