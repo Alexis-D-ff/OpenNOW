@@ -589,7 +589,11 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
     }
     const auto object = QJsonDocument::fromJson(command).object();
     const auto type = object.value(u"type"_s).toString();
-    const bool changesSession = type == u"start"_s || type == u"stop"_s;
+    // A co-op guest has no GFN session: coop-guest-start/stop own the same presentation,
+    // input-authorization and rumble generation as start/stop on the normal embedded path.
+    const bool startsSession = type == u"start"_s || type == u"coop-guest-start"_s;
+    const bool stopsSession = type == u"stop"_s || type == u"coop-guest-stop"_s;
+    const bool changesSession = startsSession || stopsSession;
     const bool previousInputAllowed = inputAllowed();
     const bool previousInputPending = d->inputAuthorizationPending;
     if (changesSession) resetInputCapture();
@@ -615,13 +619,13 @@ bool NativeStreamRuntime::sendBytes(const QByteArray &command)
         setLastError(statusText(status));
         return false;
     }
-    if (type == u"start"_s || type == u"stop"_s) {
+    if (changesSession) {
         setStreaming(false);
-        d->streamSessionActive = type == u"start"_s;
+        d->streamSessionActive = startsSession;
         invalidatePresentation();
         d->defaultRelativeMouse = false;
-        d->sessionStartId = type == u"start"_s ? object.value(u"id"_s).toString() : QString{};
-        if (type == u"start"_s) {
+        d->sessionStartId = startsSession ? object.value(u"id"_s).toString() : QString{};
+        if (startsSession) {
             d->serverCursorComposited = true;
             d->firstNotification = false;
             d->presentationStartId = object.value(u"id"_s).toString();
@@ -1210,7 +1214,14 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
             }
             continue;
         }
-        if (message.event && (kind == u"error"_s
+        if (message.event && kind == u"coop-guest-state"_s && d->streamSessionActive
+                && document.object().value(u"state"_s).toString() == u"connected"_s) {
+            setStreaming(true);
+            if (!current()) return;
+        }
+        const bool coopGuestEnded = message.event && kind == u"coop-guest-state"_s
+            && document.object().value(u"state"_s).toString() == u"ended"_s;
+        if (message.event && (kind == u"error"_s || coopGuestEnded
                 || (kind == u"status"_s && (status == u"stopped"_s || status == u"error"_s)))) {
             const auto startId = document.object().value(u"startId"_s).toString();
             if (!startId.isEmpty() && startId != d->sessionStartId) continue;
@@ -1248,7 +1259,9 @@ void NativeStreamRuntime::drainCallbacks(const std::shared_ptr<CallbackState> &s
         if (kind != u"telemetry"_s && kind != u"stats"_s && kind != u"log"_s)
             handshakeLog(u"delivered %1 bytes=%2"_s.arg(handshakeSummary(document.object()))
                          .arg(message.bytes.size()));
-        if (message.event)
+        if (message.event && kind.startsWith(u"coop-"_s))
+            emit coopEventReceived(document.object());
+        else if (message.event)
             emit eventReceived(document.object());
         else
             emit responseReceived(document.object());

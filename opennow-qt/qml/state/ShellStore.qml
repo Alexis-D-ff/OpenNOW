@@ -4,6 +4,8 @@ import "catalog"
 import "settings"
 import "account"
 import "reporting"
+import "social"
+import "coop"
 
 QtObject {
     id: root
@@ -96,6 +98,90 @@ QtObject {
         uiSurface: root.desktopUiActive ? "desktop" : "console"
         gameId: String(root.activeSession && root.activeSession.appId || "")
         decoderBackend: String(root.streamer && root.streamer.mediaBackend || "")
+    }
+
+    property FriendsState friendsOwnerState: FriendsState {
+        id: friendsOwner
+        coreClient: CoreClient
+        appController: AppController
+        ready: root.ready
+        presence: root.socialPresence
+        onAccessibilityAnnounced: message => root.accessibilityMessage = message
+    }
+    property CoopState coopOwnerState: CoopState {
+        id: coopOwner
+        coreClient: CoreClient
+        appController: AppController
+        ready: root.ready
+        friends: friendsOwner
+        streamRuntime: NativeStreamRuntime
+        sendNativeCommand: root.sendNativeCommand
+        applySetting: root.applySetting
+        currentBitrateMbps: () => Number(root.settings.maxBitrateMbps || 0)
+        launchGame: game => {
+            root.selectedGame = game
+            root.launchSelectedGame(false)
+        }
+        hostStreaming: root.activeSession !== null && root.streamerStatus === "streaming"
+        persistPreferences: !SmokeTestMode
+        onAccessibilityAnnounced: message => root.accessibilityMessage = message
+    }
+    readonly property alias friends: friendsOwner
+    readonly property alias coop: coopOwner
+
+    // Shell activity to presence (docs/coop-sessions.md section 8).
+    property bool userIdle: false
+    property Timer userIdleTimer: Timer {
+        interval: 10 * 60 * 1000
+        running: root.ready
+        onTriggered: root.userIdle = true
+    }
+    property Connections coopShellSignals: Connections {
+        target: AppController
+        function onUserActivity() {
+            root.userIdle = false
+            root.userIdleTimer.restart()
+        }
+        function onCoopJoinCodeChanged() { root.openPendingCoopJoin() }
+    }
+    function openPendingCoopJoin() {
+        if (AppController.coopJoinCode === "")
+            return
+        coopOwner.openJoin(AppController.takeCoopJoinCode())
+    }
+    function presenceGame(game) {
+        if (!game)
+            return null
+        const artUrl = String(game.artUrl || game.heroImageUrl || game.imageUrl || game.boxArtUrl || "")
+        return {appId: String(game.appId || game.launchAppId || game.id || ""), title: String(game.title || ""),
+            artUrl: artUrl === "" ? null : artUrl}
+    }
+    readonly property var socialPresence: {
+        const base = {activity: "online", game: null, since: null, queuePosition: null, lobbyId: null}
+        if (coopOwner.lobbyOpen) {
+            const self = coopOwner.members.find(member => member.slot === coopOwner.slot)
+            return Object.assign(base, {activity: "in_lobby", game: coopOwner.lobby.game,
+                since: self ? self.joinedAt : null, lobbyId: coopOwner.lobby.id})
+        }
+        if (activeSession) {
+            const queuePosition = Number(activeSession.queuePosition || 0)
+            if (streamState === "streaming" || streamState === "ready")
+                return Object.assign(base, {activity: "playing", game: presenceGame(selectedGame),
+                    since: streamStartedAtMs > 0 ? new Date(streamStartedAtMs).toISOString() : null})
+            if (queuePosition > 0)
+                return Object.assign(base, {activity: "in_queue", game: presenceGame(selectedGame),
+                    queuePosition: queuePosition})
+        }
+        if (userIdle)
+            return Object.assign(base, {activity: "idle"})
+        const route = String(AppController.route)
+        if (route === "library" || route === "game-detail")
+            return Object.assign(base, {activity: "browsing_library"})
+        if (route === "store")
+            return Object.assign(base, {activity: "browsing_store"})
+        if (route.indexOf("settings") === 0 || route === "controllers")
+            return Object.assign(base, {activity: "in_settings"})
+        return base
     }
 
     property alias settings: settingsOwner.settings
@@ -2762,7 +2848,9 @@ QtObject {
                 ? [String(settings.shortcutToggleMicrophone ?? "Ctrl+Shift+M")] : [],
             "screenshot": [String(settings.shortcutScreenshot ?? "Ctrl+F11")],
             "toggle-recording": [String(settings.shortcutToggleRecording ?? "F12")],
-            "save-clip": [String(settings.shortcutSaveClip ?? "Ctrl+F12")]
+            "save-clip": [String(settings.shortcutSaveClip ?? "Ctrl+F12")],
+            "coop-accept": coopOwner.promptPending ? ["Ctrl+Shift+Y"] : [],
+            "coop-decline": coopOwner.promptPending ? ["Ctrl+Shift+N"] : []
         }
     }
 
@@ -2839,6 +2927,8 @@ QtObject {
             saveStreamClip()
         } else if (action === "toggle-microphone") {
             toggleMicrophone()
+        } else if (action === "coop-accept" || action === "coop-decline") {
+            coopOwner.answerFirstPrompt(action === "coop-accept")
         }
     }
 

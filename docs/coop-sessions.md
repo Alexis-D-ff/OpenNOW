@@ -118,6 +118,23 @@ Authentication: `Authorization: Bearer <token>`. Tokens are 32 random bytes, bas
 Errors: HTTP 4xx/5xx with `{"error":{"code":string,"message":string}}`. Codes are stable and listed per route.
 Every list is bounded: friends 500, requests 200, invites 100.
 
+Backend clarifications (additive):
+
+- Shared codes on any route: 400 `invalid_request`, 401 `unauthorized`, 403 `guest_not_allowed`, 403 `not_host`,
+  404 `not_found`, 413 `payload_too_large`, 429 `rate_limited`, 500 `internal`. Missing resources use
+  `lobby_not_found`, `invite_not_found`, `join_request_not_found`, `member_not_found`, `request_not_found` and
+  `login_not_found`.
+- Further route codes: 409 `already_in_lobby` (also on joins and join requests), 403 `blocked` (joining a host you
+  are blocked with), 409 `too_many_guests`, 409 `invite_not_pending`, 409 `friend_limit` / `request_limit` /
+  `invite_limit`, 409 `join_request_not_pending`, 409 `join_request_not_approved`, 410 `join_request_expired`,
+  400 `self` (kicking yourself).
+- Approving a join request restarts its 2-minute window; each approval admits one join. Joining a lobby you are
+  already in is idempotent and returns your slot.
+- A lobby whose code expires with only the host present ends with `lobby.ended` reason `expired`; a lobby with
+  guests keeps running and its stale code returns 410 `code_expired`.
+- Presence lobby summaries count the host: `size` includes the host and `max` is `maxGuests + 1`.
+- `Invite.dm` is `skipped_disabled` when no bot is configured.
+
 ### Sign-in (polling, no local listener)
 
 | Method and path | Body | Response |
@@ -194,6 +211,9 @@ and "Get OpenNOW" (the download URL from env `DOWNLOAD_URL`). Invalid or expired
 
 Authenticate with the first frame `{"type":"auth","token":"..."}` within 5 seconds. Server replies `{"type":"ready","user":User|null,"guest":{...}|null}`.
 Heartbeat: client sends `{"type":"ping"}` every 20 s; the server closes after 60 s of silence. Frames are at most 64 KiB.
+A bad frame gets `{"type":"error","error":{code,message}}` without closing. Close codes: 4001 no auth within 5 s,
+4003 bad auth, 4008 60 s of silence, 4009 more than 8 sockets, 4010 signed out or account deleted (do not reconnect;
+the account is unlinked), 1009 frame over 64 KiB, 1012 server restarting (reconnect).
 A user may hold several sockets; presence is the most recent `presence.set` across sockets and goes offline 30 s after the last socket closes.
 
 Client to server:

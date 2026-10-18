@@ -132,7 +132,10 @@ ApplicationWindow {
         "diagnostics", "feedback", "theme-store"].indexOf(activeRoute) < 0
     readonly property bool targetDesktopSurface: streamSurfaceLocked
         ? lockedStreamDesktopSurface : onboardingVisible || (desktopRequested && desktopEligibleRoute)
-    readonly property bool streamQmlOverlayActive: (activeRoute === "stream" || activeRoute === "inserting")
+    // Co-op lobby and confirmations compose above the stream and, without one, above the shell or the guest route.
+    readonly property bool streamQmlOverlayActive: (window.desktopSurfaceActive
+            && ["coop-lobby", "coop-end-confirm", "coop-leave-confirm"].indexOf(AppController.overlay) >= 0)
+        || (activeRoute === "stream" || activeRoute === "inserting")
         && ((window.desktopSurfaceActive && AppController.overlay.startsWith("desktop-stream-"))
             || ShellStore.isStreamStatsOverlay(AppController.overlay))
     property bool desktopSurfaceActive: targetDesktopSurface
@@ -372,6 +375,22 @@ ApplicationWindow {
         enabled: window.activeRoute === "stream" && ShellStore.microphoneToggleAvailable
             && sequence !== ""
         onActivated: ShellStore.toggleMicrophone()
+    }
+    Shortcut {
+        objectName: "coopAcceptShortcut"
+        sequence: "Ctrl+Shift+Y"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: window.desktopSurfaceActive && ShellStore.coop.promptPending
+        onActivated: ShellStore.applyStreamShortcutAction("coop-accept")
+    }
+    Shortcut {
+        objectName: "coopDeclineShortcut"
+        sequence: "Ctrl+Shift+N"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: window.desktopSurfaceActive && ShellStore.coop.promptPending
+        onActivated: ShellStore.applyStreamShortcutAction("coop-decline")
     }
     Shortcut {
         objectName: "consoleGuideExitShortcut"
@@ -731,6 +750,8 @@ ApplicationWindow {
             return updateScreen
         if (route === "feedback")
             return feedbackScreen
+        if (route === "coop-guest")
+            return coopGuestScreen
         return homeScreen
     }
 
@@ -1317,4 +1338,5 @@ ApplicationWindow {
     Component { id: diagnosticsScreen; DiagnosticsScreen {} }
     Component { id: updateScreen; UpdateScreen {} }
     Component { id: feedbackScreen; FeedbackScreen {} }
+    Component { id: coopGuestScreen; DesktopCoopGuestScreen {} }
 }

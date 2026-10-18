@@ -32,7 +32,11 @@ FocusScope {
         return String(root.streamer.status || ShellStore.streamState || "starting")
     }
     readonly property bool streaming: root.status === "streaming"
-    readonly property bool videoSurfaceActive: root.streaming || (root.streamer.status === "connecting" && root.status !== "error")
+    readonly property bool coopGuest: ShellStore.coop.role === "guest"
+        && (ShellStore.coop.guestPhase === "playing" || ShellStore.coop.guestPhase === "reconnecting")
+    property bool coopPanelDismissed: false
+    readonly property bool videoSurfaceActive: root.streaming || root.coopGuest
+        || (root.streamer.status === "connecting" && root.status !== "error")
     readonly property bool videoReady: streaming
         && root.streamer.firstFrameLatencyMs !== undefined
         && root.streamer.firstFrameLatencyMs !== null
@@ -150,6 +154,52 @@ FocusScope {
         onTriggered: root.clipboardPasteMessage = ""
     }
 
+    function toggleCoopPanel() {
+        if (!ShellStore.coop.guestStreaming)
+            return
+        if (root.coopPanelDismissed || !coopGuestOverlay.activeFocus) {
+            root.coopPanelDismissed = false
+            Qt.callLater(coopGuestOverlay.focusPanel)
+        } else {
+            root.closeCoopPanel()
+        }
+    }
+    function closeCoopPanel() {
+        root.coopPanelDismissed = true
+        Qt.callLater(root.restoreStreamFocus)
+    }
+    Connections {
+        target: ShellStore.coop
+        function onGuestStreamingChanged() { root.coopPanelDismissed = false }
+    }
+    Connections {
+        target: streamVideo
+        function onLocalShortcutRequested(action) {
+            if (root.coopGuest && action === "guide")
+                root.toggleCoopPanel()
+        }
+    }
+
+    DesktopCoopGuestOverlay {
+        id: coopGuestOverlay
+        anchors.fill: parent
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        visible: root.visible && ShellStore.coop.guestStreaming && !root.coopPanelDismissed
+        z: 6
+        onCloseRequested: root.closeCoopPanel()
+        onVisibleChanged: if (!visible && activeFocus) Qt.callLater(root.restoreStreamFocus)
+    }
+
+    DesktopCoopGuestReconnectToast {
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 70
+        layer.enabled: HdrOutput.chromeRequired
+        layer.effect: HdrChromeEffect {}
+        visible: root.visible && ShellStore.coop.role === "guest" && ShellStore.coop.guestPhase === "reconnecting"
+        z: 6
+    }
+
     StreamIdleWarning {
         layer.enabled: HdrOutput.chromeRequired
         layer.effect: HdrChromeEffect {}
@@ -200,6 +250,15 @@ FocusScope {
     Keys.onPressed: event => {
         if (event.isAutoRepeat)
             return
+        if (root.coopGuest) {
+            const modifiers = event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier | Qt.AltModifier | Qt.MetaModifier)
+            if ((event.key === Qt.Key_G && modifiers === Qt.ControlModifier)
+                    || event.key === Qt.Key_Escape || event.key === Qt.Key_Back) {
+                root.toggleCoopPanel()
+                event.accepted = true
+            }
+            return
+        }
         if (!root.streaming
                 && (event.key === Qt.Key_Escape || event.key === Qt.Key_Back)) {
             root.stopRequested()

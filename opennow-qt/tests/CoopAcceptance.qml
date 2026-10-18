@@ -1,0 +1,746 @@
+import QtQuick
+import OpenNOW
+
+// C2 co-op + Friends acceptance. Seeds FriendsState and CoopState through a mock core client and a
+// mock streamer (the real request/response and event paths), then walks every C2 scene and checks
+// that each scene's screens are on screen. Driven by src/acceptance/CoopAcceptance.cpp.
+QtObject {
+    id: fixture
+    property string scene: ""
+    property bool consoleSurface: false
+    property bool checkScreens: true
+    property int key: 0
+    property int modifiers: 0
+    property point click: Qt.point(-1, -1)
+    property point hover: Qt.point(-1, -1)
+    property string captureName: ""
+    property string failure: ""
+    property Item root: null
+    property var window: null
+    property int index: -1
+    property int tick: 0
+    property int settleTicks: 14
+    property bool verified: false
+    property Item frame: null
+    readonly property var walk: scene === "" ? sceneNames : [scene]
+    readonly property double now: Date.now()
+
+    // Scene name -> Paper artboard it reproduces (docs: C2 page p-8-1, Variation C page p-4-0).
+    readonly property var artboards: ({
+        "c2-01-friends-not-linked": "BP4-1",
+        "c2-01b-signed-out": "BP4-1",
+        "c2-02a-link-browser": "BUP-1",
+        "c2-02b-link-success": "C17-1",
+        "c2-03-friends-list": "C6Y-1",
+        "c2-04-lobby-invite-picker": "E6X-1",
+        "c2-05a-invite-toast": "GLT-1",
+        "c2-05c-invite-connecting": "H2M-1",
+        "c2-06-ask-to-join": "H3H-1",
+        "c2-06b-ask-joining": "H3H-1",
+        "c2-06c-ask-declined": "H3H-1",
+        "c2-06d-two-asks": "H3H-1",
+        "c2-07a-invite-edge-host": "EGQ-1",
+        "c2-07b-invites-inbox": "MFZ-1",
+        "c2-08a-settings-discord": "MQ9-1",
+        "c2-08b-unlink-confirm": "N41-1",
+        "c2-09-host-panel": "HAF-1",
+        "c2-10a-add-friend": "NJ7-1",
+        "c2-10a-add-friend-sent": "NJ7-1",
+        "c2-10a-add-friend-not-found": "NJ7-1",
+        "c2-10a-add-friend-already-friend": "NJ7-1",
+        "c2-10a-add-friend-already-asked": "NJ7-1",
+        "c2-10a-add-friend-self": "NJ7-1",
+        "c2-10b-requests": "NQW-1",
+        "c-01-home-play-coop": "4ZT-0",
+        "c-02-host-setup": "56C-0",
+        "c-03-host-lobby": "5C7-0",
+        "c-03b-lobby-expired": "",
+        "c-04-join-code": "5GF-0",
+        "c-05-connecting": "5JO-0",
+        "c-05b-error-invalid": "5KK-0",
+        "c-05b-error-full": "5KK-0",
+        "c-05b-error-host-ended": "5KK-0",
+        "c-05b-error-cant-connect": "5KK-0",
+        "c-05b-error-code-expired": "5KK-0",
+        "c-05b-error-already-in-lobby": "5KK-0",
+        "c-05b-error-ask-expired": "5KK-0",
+        "c-05c-relay-retry": "5JO-0",
+        "c-05c-relay-retry-failed": "5KK-0",
+        "c-06-waiting-room": "5LZ-0",
+        "c-07-guest-overlay": "5ON-0",
+        "c-08-host-panel": "5Q0-0",
+        "c-09-settings-coop": "5UT-0",
+        "c-10-reconnecting": "62P-0",
+        "c-10-host-ended": "62P-0",
+        "c-10-kicked": "62P-0",
+        "c-10-stream-lost": "62P-0",
+        "c-11-end-confirm": "",
+        "c-11-leave-confirm": ""
+    })
+    readonly property var sceneNames: Object.keys(artboards)
+
+    // Each scene's screens must be visible once it settles. Screen owners add their objectNames.
+    readonly property var expectations: ({
+        "c2-01-friends-not-linked": ["friendsNotLinked"],
+        "c2-01b-signed-out": ["friendsNotLinked"],
+        "c2-02a-link-browser": ["friendsLinking"],
+        "c2-02b-link-success": ["friendsLinked"],
+        "c2-03-friends-list": ["friendsList", "friendsLobbyBanner", "friendsHoverCard"],
+        "c2-04-lobby-invite-picker": ["coopLobby", "coopLobbyInviteStrip"],
+        "c2-05a-invite-toast": ["coopInviteToast", "coopInvitesInbox"],
+        "c2-05c-invite-connecting": ["coopConnecting"],
+        "c2-06-ask-to-join": ["coopAskToast"],
+        "c2-06b-ask-joining": ["coopHostNotice"],
+        "c2-06c-ask-declined": ["coopAskNotice"],
+        "c2-06d-two-asks": ["coopAskToast"],
+        "c2-07a-invite-edge-host": ["coopLobby", "coopInviteLookup"],
+        "c2-07b-invites-inbox": ["friendsInvites", "coopAskNotice"],
+        "c2-08a-settings-discord": ["settingsDiscord"],
+        "c2-08b-unlink-confirm": ["discordUnlinkConfirm"],
+        "c2-09-host-panel": ["streamCoopSection"],
+        "c2-10a-add-friend": ["friendsAdd"],
+        "c2-10a-add-friend-sent": ["friendsAdd"],
+        "c2-10a-add-friend-not-found": ["friendsAdd"],
+        "c2-10a-add-friend-already-friend": ["friendsAdd"],
+        "c2-10a-add-friend-already-asked": ["friendsAdd"],
+        "c2-10a-add-friend-self": ["friendsAdd"],
+        "c2-10b-requests": ["friendsRequests", "friendsManageMenu"],
+        "c-01-home-play-coop": ["homePlayCoop"],
+        "c-02-host-setup": ["coopSetup"],
+        "c-03-host-lobby": ["coopLobby"],
+        "c-03b-lobby-expired": [],
+        "c-04-join-code": ["coopJoinCode"],
+        "c-05-connecting": ["coopConnecting"],
+        "c-05b-error-invalid": ["coopJoinError"],
+        "c-05b-error-full": ["coopJoinError"],
+        "c-05b-error-host-ended": ["coopJoinError"],
+        "c-05b-error-cant-connect": ["coopJoinError"],
+        "c-05b-error-code-expired": ["coopJoinError"],
+        "c-05b-error-already-in-lobby": ["coopJoinError"],
+        "c-05b-error-ask-expired": ["coopJoinError"],
+        "c-05c-relay-retry": ["coopConnecting"],
+        "c-05c-relay-retry-failed": ["coopJoinError"],
+        "c-06-waiting-room": ["coopWaitingRoom"],
+        "c-07-guest-overlay": ["coopGuestOverlay"],
+        "c-08-host-panel": ["streamCoopSection"],
+        "c-09-settings-coop": ["settingsCoop"],
+        "c-10-reconnecting": ["coopReconnectingToast"],
+        "c-10-host-ended": ["coopEnded"],
+        "c-10-kicked": ["coopEnded"],
+        "c-10-stream-lost": ["coopEnded"],
+        "c-11-end-confirm": ["coopEndConfirm"],
+        "c-11-leave-confirm": ["coopLeaveConfirm"]
+    })
+
+    // Mock core client: answers social.* and coop.* asynchronously, records every call, and
+    // emits core events on behalf of the scene. Other methods stay pending.
+    property QtObject client: QtObject {
+        property string state: "ready"
+        property string lastError: ""
+        property int serial: 0
+        property var calls: []
+        property var failures: ({})
+        signal responseReceived(string requestId, var result)
+        signal requestFailed(string requestId, string code, string message)
+        signal eventReceived(string name, var payload)
+        function markUiReady() {}
+        function logShellDiagnostic(message) {}
+        function cancel(id) { return true }
+        function request(method, params, timeout) {
+            serial += 1
+            const id = "coop-fixture-" + serial
+            calls = calls.concat([{id: id, method: method, params: params}]).slice(-200)
+            queued = queued.concat([{id: id, method: method, params: params || {}}])
+            Qt.callLater(flush)
+            return id
+        }
+        // Qt.callLater collapses repeated calls to one function, so replies drain from a queue.
+        property var queued: []
+        function flush() {
+            const replies = queued
+            queued = []
+            for (const reply of replies)
+                fixture.answer(reply.id, reply.method, reply.params)
+        }
+        function emit(name, payload) { eventReceived(name, payload) }
+    }
+
+    // Mock streamer: records coop-* commands and emits coop-* events.
+    property QtObject runtime: QtObject {
+        property bool running: true
+        property bool coopSupported: true
+        property int serial: 0
+        property var sent: []
+        signal coopEventReceived(var event)
+        function command(type, params) {
+            serial += 1
+            sent = sent.concat([Object.assign({id: "coop-native-" + serial, type: type}, params || {})]).slice(-200)
+            return "coop-native-" + serial
+        }
+    }
+
+    function iso(offsetMs) { return new Date(now + offsetMs).toISOString() }
+    function art() { return "qrc:/qt/qml/OpenNOW/res/brand/desktop-renew.jpg" }
+    function user(id, name, username) {
+        return {id: "usr_" + id, discordId: "1000" + id.length, username: username, displayName: name, avatarUrl: null}
+    }
+    readonly property var mara: user("mara", "Mara", "mara.exe")
+    readonly property var lieke: user("lieke", "Lieke", "liekeplays")
+    readonly property var jonas: user("jonas", "Jonas", "jonasvb")
+    readonly property var noor: user("noor", "Noor", "noorhaddad")
+    readonly property var sam: user("sam", "Sam", "samwise_")
+    readonly property var ravi: user("ravi", "Ravi", "ravi.k")
+    readonly property var tess: user("tess", "Tess", "tessaaa")
+    readonly property var daan: user("daan", "Daan", "daan_dev")
+    readonly property var mika: user("mika", "Mika", "mika")
+    readonly property var elif: user("elif", "Elif", "elifyz")
+    readonly property var pieter: user("pieter", "Pieter", "pieter")
+    readonly property var anouk: user("anouk", "Anouk", "anouk")
+    readonly property var joris: user("joris", "Joris", "joris88")
+    readonly property var femke: user("femke", "Femke", "femke.gg")
+    readonly property var bas: user("bas", "Bas", "basbas")
+    readonly property var nina: user("nina", "Nina", "ninaplays")
+    readonly property var bram: user("bram", "Bram", "bram_")
+    function game(appId, title) { return {appId: appId, title: title, artUrl: art()} }
+    readonly property var bg3: game("100001", "Baldur’s Gate 3")
+    readonly property var stardew: game("100002", "Stardew Valley")
+    readonly property var cyberpunk: game("100003", "Cyberpunk 2077")
+    readonly property var fortnite: game("100004", "Fortnite")
+    readonly property var rocket: game("100005", "Rocket League")
+    readonly property var deepRock: game("100006", "Deep Rock Galactic")
+    readonly property var settingsDefaults: ({presenceVisibility: "friends", shareActivity: true,
+        joinRequests: "friends", botDmInvites: true})
+
+    function presence(activity, extra) {
+        return Object.assign({status: "online", activity: activity, game: null, since: null, queuePosition: null,
+            lobby: null, lastSeenAt: null}, extra || {})
+    }
+    function offline(agoMs) {
+        return {status: "offline", activity: null, game: null, since: null, queuePosition: null, lobby: null,
+            lastSeenAt: iso(-agoMs)}
+    }
+    function friendsSnapshot(withRequests) {
+        const friend = (person, presenceValue, sinceDays) => ({user: person, presence: presenceValue, since: iso(-sinceDays * 86400000)})
+        return {
+            friends: [
+                friend(noor, presence("in_lobby", {game: stardew, since: iso(-1800000), lobby: {id: "lob_noor", size: 2, max: 4, joinable: true}}), 300),
+                friend(jonas, presence("in_lobby", {game: bg3, since: iso(-600000), lobby: {id: "lob_mara", size: 2, max: 4, joinable: true}}), 400),
+                friend(sam, presence("playing", {game: cyberpunk, since: iso(-4320000)}), 220),
+                friend(ravi, presence("in_queue", {game: fortnite, since: iso(-120000), queuePosition: 14}), 120),
+                friend(lieke, presence("browsing_library"), 90),
+                friend(tess, presence("browsing_store"), 80),
+                friend(daan, presence("in_settings"), 60),
+                friend(mika, presence("online"), 40),
+                friend(elif, presence("idle", {since: iso(-720000)}), 30),
+                friend(pieter, offline(7200000), 20),
+                friend(anouk, offline(86400000 + 3600000), 15),
+                friend(joris, offline(3 * 86400000), 10)
+            ],
+            incoming: withRequests ? [{id: "frq_femke", user: femke, createdAt: iso(-300000)},
+                {id: "frq_bas", user: bas, createdAt: iso(-86400000)}] : [],
+            outgoing: withRequests ? [{id: "frq_nina", user: nina, createdAt: iso(-120000)},
+                {id: "frq_bram", user: bram, createdAt: iso(-4 * 86400000)}] : [],
+            blocked: []
+        }
+    }
+    function member(person, slotNumber, anonymous) {
+        return {userId: person.id, displayName: person.displayName, avatarUrl: null, slot: slotNumber,
+            anonymous: Boolean(anonymous), joinedAt: iso(-600000 + slotNumber * 1000)}
+    }
+    function lobby(state, members, maxGuests) {
+        return {id: "lob_mara", hostId: mara.id, code: "K7Q-4MX", joinUrl: "https://opennow.zortos.me/join/K7Q4MX",
+            codeExpiresAt: iso(1800000), game: bg3, maxGuests: maxGuests || 3, members: members, state: state || "open"}
+    }
+    function invite(id, from, to, state, ageMs, dm) {
+        return {id: id, lobbyId: from.id === mara.id ? "lob_mara" : "lob_" + from.username, from: from, to: to,
+            game: from.id === noor.id ? stardew : bg3, state: state, createdAt: iso(-ageMs), expiresAt: iso(600000 - ageMs),
+            dm: dm || "skipped_disabled"}
+    }
+    readonly property var iceResult: ({iceServers: [{urls: ["stun:nl-relay.example.invalid:3478"]},
+        {urls: ["turn:nl-relay.example.invalid:3478?transport=udp"], username: "fixture", credential: "fixture"}],
+        relays: [{id: "nl", name: "Netherlands", stunUrl: "stun:nl-relay.example.invalid:3478", turnUrls: []},
+            {id: "ca", name: "Canada", stunUrl: "stun:ca-relay.example.invalid:3478", turnUrls: []}], ttlSeconds: 21600})
+
+    // Core replies. A method listed in client.failures fails with that code instead.
+    function answer(id, method, params) {
+        const code = client.failures[method]
+        if (code) {
+            client.requestFailed(id, code, "fixture " + code)
+            return
+        }
+        let result = null
+        if (method === "social.state.get") result = {connection: "unlinked", account: null, guest: null}
+        else if (method === "social.link.start") result = {loginId: "login_fixture", expiresAt: iso(600000),
+            loginUrl: "https://discord.com/oauth2/authorize?client_id=1479944467112001669&scope=identify"}
+        else if (method === "social.friends.get") result = friendsSnapshot(true)
+        else if (method === "social.users.lookup") result = ({"jonasvb": {user: jonas, relation: "friend"},
+            "bram_": {user: bram, relation: "outgoing"}, "mara.exe": {user: mara, relation: "self"}})[params.username]
+            || {user: lieke, relation: "none"}
+        else if (method === "social.settings.update") result = {settings: Object.assign({}, ShellStore.friends.settings, params)}
+        else if (method === "coop.iceServers.get") result = iceResult
+        else if (method === "coop.invites.get") result = {incoming: ShellStore.coop.incomingInvites, outgoing: ShellStore.coop.outgoingInvites}
+        else if (method === "coop.lobby.create") result = {lobby: lobby("open", [member(mara, 0)], params.maxGuests)}
+        else if (method === "coop.lobby.invite") result = {invite: invite("inv_" + params.userId, mara,
+            ShellStore.friends.friendById(params.userId).user, "pending", 0, "pending")}
+        else if (method === "coop.join.code" || method === "coop.invite.accept" || method === "coop.join.approved")
+            result = {lobby: lobby("open", [member(mara, 0), member(jonas, 1), member(lieke, 2)]), slot: 2,
+                iceServers: iceResult.iceServers}
+        else if (method === "coop.join.ask") result = {joinRequest: {id: "jrq_" + params.lobbyId, lobbyId: params.lobbyId,
+            from: lieke, game: stardew, state: "pending", createdAt: iso(0), expiresAt: iso(120000)}}
+        else if (method.indexOf("social.") === 0 || method.indexOf("coop.") === 0) result = {}
+        if (result !== null)
+            client.responseReceived(id, result)
+    }
+
+    function check(condition, message) {
+        if (!condition)
+            throw new Error(message)
+    }
+    function find(item, name) {
+        if (!item)
+            return null
+        if (item.objectName === name)
+            return item
+        for (const child of item.children || []) {
+            const found = find(child, name)
+            if (found)
+                return found
+        }
+        return null
+    }
+    function shown(item) {
+        for (let current = item; current; current = current.parent) {
+            if (!current.visible || current.opacity <= 0.01)
+                return false
+        }
+        const box = item.mapToItem(null, 0, 0, item.width, item.height)
+        return item.width > 0 && item.height > 0 && box.x < window.width && box.y < window.height
+            && box.x + box.width > 0 && box.y + box.height > 0
+    }
+
+    function linkAs(person) {
+        client.emit("social.account.changed", {connection: "connected", guest: null,
+            account: {linked: true, user: person, settings: settingsDefaults}})
+    }
+    function seedFriends(withRequests) {
+        client.emit("social.friends.changed", friendsSnapshot(withRequests))
+    }
+    function seedHome() {
+        ShellStore.catalogGames = [{id: bg3.appId, title: bg3.title, launchAppId: bg3.appId, isAvailable: true,
+            isInLibrary: true, imageUrl: art(), heroImageUrl: art(), lastPlayed: iso(-3600000)}]
+    }
+    function fakeStream() {
+        ShellStore.selectedGame = {id: bg3.appId, title: bg3.title, launchAppId: bg3.appId, imageUrl: art(), heroImageUrl: art()}
+        ShellStore.streamerStartRequestId = "coop-fixture"
+        ShellStore.streamInputPauseRequestId = "coop-fixture"
+        ShellStore.streamStartedAtMs = now - 2530000
+        ShellStore.activeSession = {sessionId: "coop-fixture", phase: "streaming", status: 3, appId: bg3.appId,
+            negotiatedStreamProfile: {width: 1920, height: 1080, fps: 60, codec: "AV1"}}
+        ShellStore.streamState = "streaming"
+        ShellStore.streamer = {status: "streaming", sessionId: "coop-fixture", firstFrameLatencyMs: 37,
+            framesPerSecond: 60, bitrateMbps: 15, codec: "AV1", outputWidth: 1920, outputHeight: 1080}
+        AppController.navigate("stream")
+    }
+    function showFrame() {
+        const surface = find(window.contentItem, "streamSurfaceHost")
+        if (!surface || frame)
+            return
+        frame = frameComponent.createObject(surface.parent)
+    }
+    property Component frameComponent: Component {
+        Image {
+            objectName: "coopFixtureFrame"
+            anchors.fill: parent
+            z: 0.5
+            source: "qrc:/qt/qml/OpenNOW/res/brand/desktop-renew.jpg"
+            fillMode: Image.PreserveAspectCrop
+        }
+    }
+    function host(members, invites, maxGuests) {
+        const coop = ShellStore.coop
+        coop.startHosting(ShellStore.selectedGame, maxGuests || 3, 0)
+        Qt.callLater(() => {
+            client.emit("coop.lobby.updated", {lobby: lobby("open", members, maxGuests)})
+            for (const item of invites || [])
+                client.emit("coop.invite.updated", {invite: item})
+            runtime.coopEventReceived({type: "coop-host-stats", uploadKbps: 30000, capacityKbps: 40000, streamKbps: 15000,
+                hostToGfnPingMs: 18, peers: members.filter(item => item.slot > 0).map(item => ({peerId: item.userId,
+                    slot: item.slot, path: item.userId === lieke.id ? "relay" : "direct", relayId: item.userId === lieke.id ? "nl" : null,
+                    peerToHostPingMs: item.userId === lieke.id ? 41 : 24, lossPct: 0.1, sendKbps: 15000, inputMuted: false}))})
+            for (const item of members.filter(entry => entry.slot > 0))
+                runtime.coopEventReceived({type: "coop-peer-state", peerId: item.userId, state: "connected",
+                    path: item.userId === lieke.id ? "relay" : "direct", relayId: item.userId === lieke.id ? "nl" : null})
+        })
+    }
+    function joinAsGuest(source, stage) {
+        const coop = ShellStore.coop
+        linkAs(lieke)
+        if (source === "invite") {
+            client.emit("coop.invite.received", {invite: invite("inv_mara", mara, lieke, "pending", 20000, "sent")})
+            coop.acceptInvite("inv_mara")
+        } else {
+            coop.openJoin("K7Q-4MX")
+        }
+        Qt.callLater(() => {
+            if (stage)
+                runtime.coopEventReceived({type: "coop-guest-state", state: stage, path: stage === "relay" ? "relay" : null,
+                    relayId: stage === "relay" ? "nl" : null, reason: null})
+        })
+    }
+    function guestConnected(streaming) {
+        joinAsGuest("code", "")
+        Qt.callLater(() => {
+            runtime.coopEventReceived({type: "coop-guest-state", state: "relay", path: "relay", relayId: "nl", reason: null})
+            runtime.coopEventReceived({type: "coop-guest-state", state: "connected", path: "relay", relayId: "nl", reason: null})
+            runtime.coopEventReceived({type: "coop-guest-stats", hostToGfnPingMs: 18, guestToHostPingMs: 41, totalMs: 59,
+                quality: "good", lossPct: 0.1, slot: 2, inputMuted: false})
+            if (streaming)
+                client.emit("coop.lobby.updated", {lobby: lobby("streaming", [member(mara, 0), member(jonas, 1), member(lieke, 2)])})
+        })
+    }
+
+    function reset() {
+        const coop = ShellStore.coop
+        if (coop.role === "host")
+            coop.finishHosting()
+        coop.resetLobby()
+        coop.guestPhase = "idle"
+        coop.joinError = ""
+        coop.endReason = ""
+        coop.enteredCode = ""
+        coop.joinContext = null
+        coop.guestStartRequestId = ""
+        coop.incomingInvites = []
+        coop.inviteHistory = []
+        coop.inviteToastId = ""
+        coop.joinRequests = []
+        coop.myAsks = []
+        coop.askNotice = null
+        coop.hostNotice = null
+        coop.roomWatch = []
+        client.failures = ({})
+        client.calls = []
+        runtime.sent = []
+        ShellStore.friends.link = null
+        ShellStore.friends.welcomePending = false
+        ShellStore.friends.lookup = null
+        ShellStore.friends.requestResults = ({})
+        client.emit("social.account.changed", {connection: "unlinked", account: null, guest: null})
+        ShellStore.activeSession = null
+        ShellStore.streamState = "idle"
+        ShellStore.streamer = null
+        ShellStore.streamerStartRequestId = ""
+        ShellStore.streamInputPauseRequestId = ""
+        if (frame) {
+            frame.destroy()
+            frame = null
+        }
+        AppController.showOverlay("")
+        AppController.navigate("home")
+    }
+
+    function setupScene(name) {
+        const coop = ShellStore.coop
+        const friends = ShellStore.friends
+        const lobbyMembers = [member(mara, 0), member(jonas, 1)]
+        if (name === "c2-01-friends-not-linked") {
+            AppController.navigate("friends")
+        } else if (name === "c2-01b-signed-out") {
+            linkAs(mara)
+            seedFriends(false)
+            AppController.navigate("friends")
+            Qt.callLater(() => {
+                client.emit("social.connection.changed", {state: "unlinked"})
+                client.emit("social.account.changed", {connection: "unlinked", account: null, guest: null})
+            })
+        } else if (name === "c-03b-lobby-expired") {
+            linkAs(mara)
+            fakeStream()
+            host([member(mara, 0)], [])
+            Qt.callLater(() => Qt.callLater(() => client.emit("coop.lobby.ended", {lobbyId: "lob_mara", reason: "expired"})))
+        } else if (name === "c2-02a-link-browser") {
+            AppController.navigate("friends")
+            friends.startLink()
+        } else if (name === "c2-02b-link-success") {
+            AppController.navigate("friends")
+            client.emit("social.account.changed", {connection: "connected", guest: null,
+                account: {linked: true, user: mara, settings: settingsDefaults}, link: {loginId: "login_fixture", status: "complete"}})
+            client.emit("social.friends.changed", {friends: [], incoming: [], outgoing: [], blocked: []})
+        } else if (name === "c2-03-friends-list") {
+            linkAs(mara)
+            seedFriends(true)
+            fakeStream()
+            host(lobbyMembers, [invite("inv_lieke", mara, lieke, "pending", 24000, "sent")])
+            Qt.callLater(() => {
+                AppController.navigate("friends")
+                const screen = find(window.contentItem, "desktopFriendsScreen")
+                if (screen)
+                    screen.selectedUserId = sam.id
+            })
+        } else if (name === "c2-04-lobby-invite-picker" || name === "c2-07a-invite-edge-host" || name === "c-03-host-lobby") {
+            linkAs(mara)
+            seedFriends(false)
+            fakeStream()
+            const invites = name === "c2-07a-invite-edge-host"
+                ? [invite("inv_lieke", mara, lieke, "pending", 42000, "sent"), invite("inv_daan", mara, daan, "declined", 60000, "skipped_disabled"),
+                   invite("inv_tess", mara, tess, "expired", 600000, "skipped_not_member"), invite("inv_pieter", mara, pieter, "pending", 30000, "sent")]
+                : name === "c2-04-lobby-invite-picker" ? [invite("inv_lieke", mara, lieke, "pending", 24000, "sent")] : []
+            host(name === "c-03-host-lobby" ? [member(mara, 0), member(jonas, 1), member(lieke, 2)] : lobbyMembers, invites)
+            Qt.callLater(() => {
+                AppController.showOverlay("coop-lobby")
+                if (name === "c2-07a-invite-edge-host") {
+                    client.failures = ({"social.users.lookup": "user_not_found"})
+                    friends.lookupUser("kees_")
+                }
+            })
+        } else if (name === "c2-05a-invite-toast") {
+            linkAs(lieke)
+            seedFriends(false)
+            seedHome()
+            client.emit("coop.invite.received", {invite: invite("inv_noor", noor, lieke, "pending", 360000, "sent")})
+            client.emit("coop.invite.received", {invite: invite("inv_mara", mara, lieke, "pending", 20000, "sent")})
+        } else if (name === "c2-05c-invite-connecting") {
+            joinAsGuest("invite", "relay")
+        } else if (name === "c2-06c-ask-declined") {
+            linkAs(tess)
+            seedFriends(false)
+            seedHome()
+            coop.askNotice = {kind: "declined", user: mara, game: bg3, lobbyId: "lob_mara"}
+            AppController.navigate("home")
+        } else if (name.indexOf("c2-06") === 0) {
+            linkAs(mara)
+            seedFriends(false)
+            fakeStream()
+            host(lobbyMembers, [])
+            Qt.callLater(() => {
+                const ask = (id, person) => ({id: id, lobbyId: "lob_mara", from: person, game: bg3, state: "pending",
+                    createdAt: iso(-96000), expiresAt: iso(24000)})
+                if (name === "c2-06-ask-to-join" || name === "c2-06d-two-asks")
+                    client.emit("coop.joinRequest.received", {joinRequest: ask("jrq_tess", tess)})
+                if (name === "c2-06d-two-asks")
+                    client.emit("coop.joinRequest.received", {joinRequest: ask("jrq_daan", daan)})
+                if (name === "c2-06b-ask-joining") {
+                    client.emit("coop.joinRequest.received", {joinRequest: ask("jrq_tess", tess)})
+                    coop.respondJoinRequest("jrq_tess", true)
+                }
+            })
+        } else if (name === "c2-07b-invites-inbox") {
+            linkAs(lieke)
+            seedFriends(false)
+            client.emit("coop.invite.received", {invite: invite("inv_mara", mara, lieke, "pending", 20000, "sent")})
+            client.emit("coop.invite.updated", {invite: invite("inv_ravi", ravi, lieke, "expired", 1800000, "sent")})
+            client.emit("coop.invite.updated", {invite: invite("inv_tess", tess, lieke, "cancelled", 2400000, "sent")})
+            client.failures = ({"coop.join.ask": "lobby_full"})
+            coop.askToJoin(friends.friendById(noor.id))
+            coop.inviteToastId = ""
+            AppController.navigate("friends-invites")
+        } else if (name === "c2-08a-settings-discord" || name === "c2-08b-unlink-confirm") {
+            linkAs(mara)
+            seedFriends(true)
+            AppController.navigate("settings-account")
+            if (name === "c2-08b-unlink-confirm")
+                Qt.callLater(() => AppController.showOverlay("discord-unlink-confirm"))
+        } else if (name === "c2-09-host-panel" || name === "c-08-host-panel") {
+            linkAs(mara)
+            seedFriends(false)
+            fakeStream()
+            host(name === "c-08-host-panel" ? [member(mara, 0), member(jonas, 1), member(lieke, 2)] : lobbyMembers,
+                [invite("inv_lieke", mara, lieke, "pending", 24000, "sent")])
+            Qt.callLater(() => AppController.showOverlay("desktop-stream-menu"))
+        } else if (name.indexOf("c2-10a-add-friend") === 0) {
+            linkAs(mara)
+            seedFriends(true)
+            AppController.navigate("friends-add")
+            const variant = name.replace("c2-10a-add-friend", "")
+            if (variant === "-not-found")
+                client.failures = ({"social.users.lookup": "user_not_found"})
+            friends.lookupUser(variant === "-not-found" ? "kees_" : variant === "-already-friend" ? "jonasvb"
+                : variant === "-already-asked" ? "bram_" : variant === "-self" ? "mara.exe" : "liekeplays")
+            if (variant === "-sent")
+                Qt.callLater(() => friends.sendRequest("liekeplays"))
+        } else if (name === "c2-10b-requests") {
+            linkAs(mara)
+            seedFriends(true)
+            AppController.navigate("friends-requests")
+            const screen = find(window.contentItem, "desktopFriendsScreen")
+            if (screen)
+                screen.openManage(joris.id)
+        } else if (name === "c-01-home-play-coop") {
+            linkAs(mara)
+            seedHome()
+            AppController.navigate("home")
+        } else if (name === "c-02-host-setup") {
+            linkAs(mara)
+            AppController.navigate("home")
+            coop.openSetup({id: bg3.appId, title: bg3.title, launchAppId: bg3.appId, imageUrl: art()})
+        } else if (name === "c-04-join-code") {
+            coop.openJoin("")
+            coop.enteredCode = "K7Q"
+        } else if (name === "c-05-connecting") {
+            joinAsGuest("code", "relay")
+        } else if (name.indexOf("c-05b-error") === 0) {
+            const code = {"c-05b-error-invalid": "invalid_code", "c-05b-error-full": "lobby_full",
+                "c-05b-error-host-ended": "lobby_ended", "c-05b-error-cant-connect": "cant_connect",
+                "c-05b-error-code-expired": "code_expired", "c-05b-error-already-in-lobby": "already_in_lobby",
+                "c-05b-error-ask-expired": "join_request_expired"}[name]
+            if (code === "cant_connect") {
+                joinAsGuest("code", "")
+                Qt.callLater(() => runtime.coopEventReceived({type: "coop-guest-state", state: "ended", path: null, relayId: null, reason: "failed"}))
+            } else {
+                client.failures = ({"coop.join.code": code})
+                coop.openJoin("K7Q-4MX")
+            }
+        } else if (name === "c-05c-relay-retry" || name === "c-05c-relay-retry-failed") {
+            joinAsGuest("code", "")
+            const rejected = {type: "coop-guest-state", state: "ended", path: null, relayId: null, reason: "relay-credentials-rejected"}
+            Qt.callLater(() => {
+                runtime.coopEventReceived(rejected)
+                if (name === "c-05c-relay-retry-failed")
+                    Qt.callLater(() => Qt.callLater(() => runtime.coopEventReceived(rejected)))
+            })
+        } else if (name === "c-06-waiting-room") {
+            guestConnected(false)
+        } else if (name === "c-07-guest-overlay") {
+            guestConnected(true)
+        } else if (name === "c-09-settings-coop") {
+            linkAs(mara)
+            AppController.navigate("settings-coop")
+        } else if (name === "c-10-reconnecting") {
+            guestConnected(true)
+            Qt.callLater(() => runtime.coopEventReceived({type: "coop-guest-state", state: "reconnecting", path: "relay", relayId: "nl", reason: null}))
+        } else if (name === "c-10-host-ended" || name === "c-10-kicked" || name === "c-10-stream-lost") {
+            guestConnected(true)
+            Qt.callLater(() => {
+                if (name === "c-10-host-ended")
+                    client.emit("coop.lobby.ended", {lobbyId: "lob_mara", reason: "host_ended"})
+                else if (name === "c-10-kicked")
+                    client.emit("coop.lobby.kicked", {lobbyId: "lob_mara"})
+                else
+                    runtime.coopEventReceived({type: "coop-guest-state", state: "ended", path: null, relayId: null, reason: "host_stream_lost"})
+            })
+        } else if (name === "c-11-end-confirm") {
+            linkAs(mara)
+            fakeStream()
+            host(lobbyMembers, [])
+            Qt.callLater(() => coop.requestEndCoop())
+        } else if (name === "c-11-leave-confirm") {
+            guestConnected(true)
+            Qt.callLater(() => coop.requestLeave())
+        }
+    }
+
+    // Scene-specific state assertions on top of the visible screens.
+    function verifyScene(name) {
+        const coop = ShellStore.coop
+        const friends = ShellStore.friends
+        if (name === "c2-02a-link-browser")
+            check(friends.linkStatus === "pending" && friends.link.loginUrl.indexOf("scope=identify") > 0, "linking waits on the identify-scope page")
+        if (name === "c2-03-friends-list")
+            check(friends.onlineCount === 9 && coop.isHost && coop.lobby.code === "K7Q-4MX", "friends list sees 9 online and the open lobby")
+        if (name === "c2-04-lobby-invite-picker") {
+            check(runtime.sent.some(item => item.type === "coop-host-start" && item.maxGuests === 3 && item.relays.length === 2),
+                "the host fan-out starts with the relays")
+            check(runtime.sent.some(item => item.type === "coop-peer-add" && item.peerId === jonas.id && item.slot === 1),
+                "an existing guest becomes a streamer peer")
+        }
+        if (name === "c2-05a-invite-toast")
+            check(coop.inviteToast && coop.inviteToast.id === "inv_mara" && coop.incomingInvites.length === 2, "the newest invite is toasted")
+        if (name === "c2-05c-invite-connecting") {
+            check(coop.role === "guest" && coop.guestPhase === "connecting" && coop.connectStage === "relay", "accepting connects through relay")
+            check(runtime.sent.some(item => item.type === "coop-guest-start" && item.hostPeerId === mara.id && item.slot === 2),
+                "guests start with coop-guest-start")
+        }
+        if (name === "c2-06b-ask-joining")
+            check(client.calls.some(call => call.method === "coop.joinRequest.respond" && call.params.approve === true), "Let in approves")
+        if (name === "c2-07b-invites-inbox")
+            check(coop.inviteHistory.length === 2 && coop.myAsks.length === 1 && coop.myAsks[0].state === "full", "inbox history and a full lobby ask")
+        if (name === "c2-10a-add-friend-sent")
+            check(friends.requestResults["liekeplays"] && friends.requestResults["liekeplays"].state === "sent", "request sent")
+        if (name === "c-05b-error-invalid")
+            check(coop.guestPhase === "error" && coop.joinError === "invalid_code", "invalid code error")
+        if (name.indexOf("c-05b-error") === 0) {
+            const kind = {"c-05b-error-invalid": "invalid", "c-05b-error-full": "full", "c-05b-error-host-ended": "ended",
+                "c-05b-error-cant-connect": "cant_connect", "c-05b-error-code-expired": "invalid",
+                "c-05b-error-already-in-lobby": "unavailable", "c-05b-error-ask-expired": "ended"}[name]
+            check(coop.joinFailure && coop.joinFailure.kind === kind, name + ": join failure is " + kind)
+        }
+        if (name === "c-05b-error-cant-connect")
+            check(coop.joinFailure.title === "Couldn't reach Mara", "a failed connection names the host")
+        if (name === "c-05c-relay-retry")
+            check(coop.guestPhase === "connecting" && runtime.sent.filter(item => item.type === "coop-guest-start").length === 2
+                && client.calls.filter(call => call.method === "coop.iceServers.get").length >= 2,
+                "rejected relay credentials refetch ICE servers and restart the guest once")
+        if (name === "c-05c-relay-retry-failed")
+            check(coop.guestPhase === "error" && coop.joinError === "cant_connect", "a second rejection shows Can't connect")
+        if (name === "c-03b-lobby-expired")
+            check(coop.role === "none" && coop.hostNotice && coop.hostNotice.kind === "expired"
+                && runtime.sent.some(item => item.type === "coop-host-stop"), "an expired empty lobby ends hosting with a notice")
+        if (name === "c2-01b-signed-out")
+            check(!friends.linked && friends.connection === "unlinked" && friends.friends.length === 0,
+                "a 4010 sign-out unlinks and clears friends")
+        if (name === "c-06-waiting-room")
+            check(coop.guestPhase === "waiting" && coop.guestPath === "relay", "connected guests wait for the host")
+        if (name === "c-07-guest-overlay")
+            check(coop.guestPhase === "playing" && AppController.route === "stream", "the host's start puts guests in the stream")
+        if (name === "c-10-kicked")
+            check(coop.guestPhase === "ended" && coop.endReason === "kicked" && runtime.sent.some(item => item.type === "coop-guest-stop"),
+                "kicked guests stop their pipeline")
+    }
+
+    function run(parent) {
+        root = parent
+        window = parent.Window.window
+        const coop = ShellStore.coop
+        const friends = ShellStore.friends
+        friends.coreClient = client
+        friends.ready = true
+        coop.coreClient = client
+        coop.ready = true
+        coop.streamRuntime = runtime
+        coop.sendNativeCommand = (type, params) => runtime.command(type, params)
+        coop.launchGame = gameValue => {}
+        coop.applySetting = (keyName, value) => {}
+        return true
+    }
+
+    // 0 = continue, 1 = passed, 2 = failed.
+    function advance() {
+        try {
+            if (index < 0 || tick >= settleTicks) {
+                if (index >= 0 && !verified) {
+                    const name = walk[index]
+                    if (name.indexOf("c2-03") === 0 || name.indexOf("c2-04") === 0 || name.indexOf("c2-07a") === 0
+                            || name.indexOf("c2-06") === 0 || name.indexOf("c2-09") === 0 || name.indexOf("c-03") === 0
+                            || name.indexOf("c-07") === 0 || name.indexOf("c-08") === 0 || name === "c-10-reconnecting"
+                            || name.indexOf("c-11") === 0)
+                        showFrame()
+                    for (const objectName of checkScreens ? expectations[name] || [] : []) {
+                        const item = find(window.contentItem, objectName)
+                        check(item !== null, name + ": " + objectName + " is missing")
+                        check(shown(item), name + ": " + objectName + " is not on screen")
+                    }
+                    verifyScene(name)
+                    verified = true
+                    if (scene === "") {
+                        captureName = name
+                        return 0
+                    }
+                }
+                verified = false
+                index += 1
+                tick = 0
+                if (index >= walk.length)
+                    return 1
+                reset()
+                setupScene(walk[index])
+                return 0
+            }
+            tick += 1
+            return 0
+        } catch (error) {
+            failure = String(error && error.message || error)
+            console.error("Co-op acceptance: " + failure)
+            return 2
+        }
+    }
+}
