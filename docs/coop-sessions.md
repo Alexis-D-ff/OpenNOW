@@ -278,6 +278,16 @@ Events (core to Qt): `social.connection.changed {state:"connected"|"connecting"|
 `coop.joinRequest.received`, `coop.joinRequest.updated`, `coop.lobby.updated`, `coop.lobby.ended`,
 `coop.lobby.kicked`, `coop.signal {lobbyId, from, payload}`. Payloads match section 4.
 
+Core clarifications (additive; details in `core-protocol.md`, "Social and co-op"):
+
+- `socialBackendUrl` defaults to `""`, meaning the built-in production backend; any other value is an https origin
+  (http only for localhost).
+- `account.settings` is `null` until the core has loaded `GET /v1/me`.
+- `link.status` is `pending`, `complete`, `denied`, `expired` or `cancelled`; the final status is sent once.
+- `coop.join.code` uses `guestDisplayName` only when no account is linked; it defaults to `Guest`.
+- Besides `social_offline` and `social_not_linked`, the core returns the existing `invalid_params`, `busy`
+  (256 signal frames already queued) and `invalid_upstream_response` codes.
+
 Deep link: `opennow://join/<CODE>` is routed by `SingleInstance` to the shell, which opens the C2 join flow with the code filled in.
 
 ## 7. Native streamer JSON commands (`opennow_streamer_send`)

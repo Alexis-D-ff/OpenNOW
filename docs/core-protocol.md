@@ -523,8 +523,150 @@ and artwork only near the viewport, using the section's local category ID
 - `updater.state.get`, `updater.check`, `updater.download`, `updater.install`, `updater.startup.ack`
 - `updater.highlights.get`, `updater.highlights.ack`
 - `social.capabilities.get`
+- `social.state.get`, `social.link.start`, `social.link.cancel`, `social.unlink`,
+  `social.settings.update` (`social.v1`)
+- `social.friends.get`, `social.users.lookup`, `social.friends.request`,
+  `social.friends.accept`, `social.friends.decline`, `social.friends.cancel`,
+  `social.friends.remove`, `social.friends.block`, `social.friends.unblock`
+- `social.presence.set`
+- `coop.iceServers.get`, `coop.lobby.create`, `coop.lobby.update`,
+  `coop.lobby.regenerateCode`, `coop.lobby.close`, `coop.lobby.leave`, `coop.lobby.invite`
+- `coop.invite.cancel`, `coop.invite.accept`, `coop.invite.decline`, `coop.invites.get`
+- `coop.join.code`, `coop.join.ask`, `coop.join.approved`, `coop.joinRequest.respond`
+- `coop.member.kick`, `coop.member.slot`, `coop.signal.send`
 - `discord.activity.sync`, `discord.activity.clear`
 - `feedback.submit`, `bug_report.submit`, `bug_report.incident`, `analytics.track`
+
+### Social and co-op (`social.v1`)
+
+The `social.v1` capability adds OpenNOW Friends, presence, and co-op lobbies. The
+change is additive: the envelope and protocol version stay the same. The shapes of
+backend objects (`User`, `Presence`, `Lobby`, `Invite`, `JoinRequest`,
+`IceServer`, `RelaySite`) and every REST route are defined in
+[`coop-sessions.md`](coop-sessions.md). The older `social.capabilities.get`
+method and the `social.capabilitySurface` capability are unchanged.
+
+**Backend and proxy.** The core calls the social backend at the
+`socialBackendUrl` setting. The setting defaults to `""`, which selects the
+built-in backend (`PLACEHOLDER_SOCIAL_BACKEND_URL` in
+`native/opennow-core/src/social/mod.rs`). That constant is a placeholder until
+the production Railway domain exists; because saved settings keep `""`,
+changing the constant moves every install that did not choose its own backend.
+`settings.set` accepts an `https://` origin, or `http://` only for
+`localhost`, `127.0.0.1`, or `[::1]`. Paths, queries, fragments, and user
+information are rejected with `invalid_setting`; a valid value is stored as its
+lowercase origin. Changing the URL or the session proxy reconnects. REST calls
+use the session proxy like GFN requests. The WebSocket tunnels through
+`http://` (CONNECT), `socks5://`, and `socks4://` session proxies; an
+`https://` session proxy cannot carry the socket, so the connection stays
+`offline` while REST calls still work.
+
+**Token boundary.** The Discord-linked account token is stored under the OS
+credential service `app.opennow.social` and follows the session persistence
+rules above: the OS store is preferred and verified, an unavailable store falls
+back to a private file under `data_dir/fallback-social/`, and Steam Deck always
+uses that file. The anonymous guest token used for code joins lives only in
+memory for at most 23.5 hours. Neither token, nor the sign-in poll secret, is
+ever sent to the shell or written to diagnostics. An HTTP 401 for a token
+removes it: the account becomes unlinked (or the guest is dropped), the core
+emits `social.account.changed`, and the request fails with `social_not_linked`.
+
+**State.** `social.state.get` returns
+`{connection, account:{linked:true, user, settings}|null, guest:{id, displayName}|null}`.
+`account.settings` is `null` until the core has loaded `GET /v1/me`, which it
+does after linking and after every socket (re)connect. `connection` is
+`unlinked` when there is no account or guest token, `connecting` while the
+socket connects and authenticates, `connected` after the backend's `ready`
+frame, and `offline` while the socket waits to reconnect.
+
+**Linking.** `social.link.start` calls `POST /v1/auth/discord/start` and returns
+`{loginId, loginUrl, expiresAt}`; the shell opens `loginUrl` (always https) in the
+browser. The core then polls `POST /v1/auth/discord/poll` every `intervalMs`
+(clamped to 250–10000 ms) until the backend reports `complete`, `denied`, or
+`expired`, the deadline (`expiresAt`, at most 15 minutes) passes, or the shell
+calls `social.link.cancel {loginId}`. Transient failures (unreachable, 429, 5xx)
+keep polling; other backend errors end the attempt as `expired`. Starting a new
+link cancels the previous attempt. Every `social.account.changed` sent while an
+attempt is pending carries `link:{loginId, status:"pending"}`; the final event
+carries the terminal `status` (`complete`, `denied`, `expired`, or
+`cancelled`). Once a `complete` reply is being committed, cancellation no longer
+applies. Completing a link replaces any guest token.
+
+**Unlinking.** `social.unlink` calls `DELETE /v1/me` and, when it succeeds (or
+the token was already rejected), deletes the stored token, emits
+`social.account.changed`, and closes the socket. If the backend cannot be
+reached, the request fails with `social_offline` and the account stays linked
+so the deletion can be retried.
+
+**Requests.** Methods map one-to-one onto the REST routes in
+`coop-sessions.md` section 3 and return the backend's JSON body; a 204 returns
+`{}`. Identifiers must be 1–128 characters of `A–Z a–z 0–9 _ - .`. Friends,
+settings, lobby hosting, invites, join requests, and member management require
+a linked account. `coop.lobby.leave`, `coop.iceServers.get`, and
+`coop.signal.send` also accept a guest. `coop.join.code {code, guestDisplayName?}`
+first obtains a guest token from `POST /v1/auth/guest` when no account is linked
+and no unexpired guest token exists; `guestDisplayName` defaults to `Guest`
+(1–32 characters). `coop.iceServers.get` is cached per token until 10 minutes
+before `ttlSeconds` elapses.
+
+**Presence.** `social.presence.set {activity, game, since, queuePosition, lobbyId}`
+always returns `{}`. The core keeps only the latest value, sends it on the socket
+at most once per second while a linked account is connected, and replays it after
+every reconnect.
+
+**Signals.** `coop.signal.send {lobbyId, to, payload}` queues one
+`signal` frame. The payload must be an object of at most 16 KiB. It fails with
+`social_offline` unless the socket is `connected`, and with `busy` when 256
+frames are already waiting. Queued frames are dropped when the socket
+disconnects, because the peer connection must renegotiate anyway.
+
+**Socket.** The core opens `GET /v1/ws` (`wss` for https backends), sends the
+auth frame, and expects `ready` within 5 seconds. It sends `{"type":"ping"}` every
+20 seconds and reconnects after 60 seconds without a frame. Frames are limited
+to 64 KiB. Reconnect delays are a random point in the upper half of
+`min(60 s, 1 s × 2^(attempt − 1))`, reset after a successful `ready`. Close
+code 4010 (signed out or account deleted) discards the token like an HTTP 401
+and does not reconnect. Close code 4003 (bad auth) drops a guest token, or makes
+the core recheck an account with `GET /v1/me` (a 401 unlinks it) before the
+next attempt. Every other close (4001, 4008, 4009, 1009, 1012, or a dropped
+connection) reconnects with backoff. A backend `{"type":"error","error":{code}}`
+frame is logged by code and does not end the session.
+
+**Errors.** Backend errors keep the backend's stable `code` (for example
+`user_not_found`); the message ends with the HTTP status in parentheses. The
+core adds `social_not_linked`, `social_offline` (unreachable backend, or 429/5xx
+without an error body), `invalid_upstream_response` (any other unexpected
+reply), `invalid_params`, and `busy`. The shell maps these codes to copy. The
+backend codes it can receive include `invalid_request`, `guest_not_allowed`,
+`not_host`, `not_found`, `rate_limited`, `payload_too_large`, `internal`,
+`lobby_not_found`, `invite_not_found`, `join_request_not_found`,
+`member_not_found`, `request_not_found`, `user_not_found`, `already_friends`,
+`request_pending`, `self`, `blocked`, `friend_limit`, `request_limit`,
+`invite_limit`, `already_in_lobby`, `not_friends`, `lobby_full`,
+`too_many_guests`, `invite_pending`, `invite_not_pending`, `already_member`,
+`invite_expired`, `lobby_ended`, `invalid_code`, `code_expired`,
+`join_requests_disabled`, `join_request_not_pending`,
+`join_request_not_approved`, and `join_request_expired`. A 401 `unauthorized`
+never reaches the shell: it unlinks the token and returns `social_not_linked`.
+During linking, `login_not_found` ends the attempt as `expired`.
+
+**Events.** Socket frames become events; the payload is the frame without
+`type`:
+
+| Backend frame | Core event |
+|---|---|
+| `presence.update` | `social.presence.changed {userId, presence}` |
+| `friends.changed` | `social.friends.changed` with a fresh `GET /v1/friends` snapshot (also sent after every connect) |
+| `invite.received` / `invite.updated` | `coop.invite.received` / `coop.invite.updated {invite}` |
+| `joinRequest.received` / `joinRequest.updated` | `coop.joinRequest.received` / `coop.joinRequest.updated {joinRequest}` |
+| `lobby.updated` | `coop.lobby.updated {lobby}` |
+| `lobby.ended` | `coop.lobby.ended {lobbyId, reason}` |
+| `lobby.kicked` | `coop.lobby.kicked {lobbyId}` |
+| `signal` | `coop.signal {lobbyId, from, payload}` |
+
+`social.connection.changed {state}` is sent on every connection state change,
+and `social.account.changed` (the `social.state.get` shape, plus `link` while
+linking) whenever the account, guest, user profile, or social settings change.
 
 ### Usage & bug reports (`automaticBugReports.v2`)
 
