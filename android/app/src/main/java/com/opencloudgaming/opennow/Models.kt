@@ -2034,6 +2034,8 @@ data class SessionInfo(
     val gpuType: String? = null,
     val iceServers: List<IceServer> = emptyList(),
     val mediaConnectionInfo: MediaConnectionInfo? = null,
+    /** Explicit usage-17 BUNDLE mapping; native transport falls back to mediaConnectionInfo. */
+    val bundleConnectionInfo: MediaConnectionInfo? = null,
     val negotiatedStreamProfile: NegotiatedStreamProfile? = null,
     val monitorSnapshot: SessionMonitorSnapshot? = null,
     val requestedStreamingFeatures: StreamingFeatures? = null,
@@ -2057,6 +2059,7 @@ internal data class NativeStreamTransportIdentity(
     val rtspsEndpoints: List<String>,
     val iceServers: List<IceServer>,
     val mediaConnectionInfo: MediaConnectionInfo?,
+    val bundleConnectionInfo: MediaConnectionInfo?,
 )
 
 internal fun SessionInfo.nativeStreamTransportIdentity(): NativeStreamTransportIdentity =
@@ -2068,6 +2071,7 @@ internal fun SessionInfo.nativeStreamTransportIdentity(): NativeStreamTransportI
         rtspsEndpoints = rtspsEndpoints,
         iceServers = iceServers,
         mediaConnectionInfo = mediaConnectionInfo,
+        bundleConnectionInfo = bundleConnectionInfo,
     )
 
 @Serializable

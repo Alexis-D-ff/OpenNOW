@@ -29,30 +29,36 @@
 
 Use the standard Android interface, or enable **Space UI** for a landscape, console-style experience with large artwork and game galleries. Animated focus outlines highlight game selection and primary actions when a controller is connected; settings use subtler feedback.
 
+### Standard UI
+
+Portrait captures from the Android phone interface.
+
 <table>
   <tr>
-    <th width="50%">Standard UI</th>
-    <th width="50%">Space UI · Experimental</th>
+    <th width="25%">Store</th>
+    <th width="25%">Settings</th>
+    <th width="25%">Game details</th>
+    <th width="25%">Queue selector</th>
   </tr>
   <tr>
-    <td><img src="android/docs/google-play-tv-screenshots/01-store.png" alt="Standard Android TV interface with catalog browsing and side navigation" width="100%" /></td>
-    <td><img src="android/docs/screenshots/space-ui-catalog.png" alt="Space UI landscape catalog with vertical game covers" width="100%" /></td>
-  </tr>
-  <tr>
-    <td align="center">Catalog and controller navigation</td>
-    <td align="center">A console-style game catalog</td>
-  </tr>
-  <tr>
-    <td><img src="android/docs/google-play-tv-screenshots/02-settings.png" alt="Standard Android TV appearance settings" width="100%" /></td>
-    <td><img src="android/docs/screenshots/space-ui-game-details.png" alt="Space UI showing game information in two columns over the game's artwork" width="100%" /></td>
-  </tr>
-  <tr>
-    <td align="center">Appearance and interface settings</td>
-    <td align="center">Game information over full-screen artwork</td>
+    <td><a href="android/docs/screenshots/standard-store.png"><img src="android/docs/screenshots/standard-store.png" alt="Portrait Android Store page with new releases and game covers" width="100%" /></a></td>
+    <td><a href="android/docs/screenshots/standard-settings.png"><img src="android/docs/screenshots/standard-settings.png" alt="Portrait Android Settings page with a demo profile protecting account information" width="100%" /></a></td>
+    <td><a href="android/docs/screenshots/standard-game-details.png"><img src="android/docs/screenshots/standard-game-details.png" alt="Fortnite game-details landing screen in the standard portrait interface" width="100%" /></a></td>
+    <td><a href="android/docs/screenshots/standard-queue-selector.png"><img src="android/docs/screenshots/standard-queue-selector.png" alt="Portrait queue selector for Fortnite, showing available server locations" width="100%" /></a></td>
   </tr>
 </table>
 
-Enable Space UI in **Settings → Advanced → Experimental streaming → Space UI**, below L4S. It is optional, locks browsing to landscape, and works with touch or a controller. The standard interface remains the default. These are Android captures; the standard interface is shown on Android TV, and the experimental interface may change between builds.
+### Space UI · Experimental
+
+**Discover**
+
+<a href="android/docs/screenshots/space-ui-discover.png"><img src="android/docs/screenshots/space-ui-discover.png" alt="Space UI Discover landing screen with Fortnite selected, before scrolling" width="100%" /></a>
+
+**Game details**
+
+<a href="android/docs/screenshots/space-ui-game-details.png"><img src="android/docs/screenshots/space-ui-game-details.png" alt="Space UI Fortnite game-details landing screen, with artwork, title, publisher, Play, and favorite before scrolling" width="100%" /></a>
+
+Enable Space UI in **Settings → Advanced → Experimental streaming → Space UI**, below L4S. It is optional, locks browsing to landscape, and works with touch or a controller. The standard interface remains the default. Screenshots show the installed Android app; Space UI is experimental and may change between builds. The profile shown in Settings is demo data.
 
 ## Features
 

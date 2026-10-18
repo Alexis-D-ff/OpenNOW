@@ -86,6 +86,15 @@ internal fun nvstSessionContext(session: SessionInfo, settings: StreamSettings):
         put("sessionId", session.sessionId)
         put("serverIp", session.serverIp)
         session.mediaConnectionInfo?.let { put("mediaConnectionInfo", OpenNowJson.encodeToJsonElement(it)) }
+        session.bundleConnectionInfo?.let { bundle ->
+            putJsonArray("connectionInfo") {
+                add(buildJsonObject {
+                    put("ip", bundle.ip)
+                    put("port", bundle.port)
+                    put("usage", 17)
+                })
+            }
+        }
         put("rtspsEndpoints", JsonArray(session.rtspsEndpoints.map(::JsonPrimitive)))
     })
     put("settings", buildJsonObject {

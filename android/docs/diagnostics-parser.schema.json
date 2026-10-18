@@ -1463,6 +1463,12 @@
                 },
                 "recordingSharpeningAmount": {
                     "type": "number"
+                },
+                "recordingMicrophoneEnabled": {
+                    "type": "boolean"
+                },
+                "recordingCameraEnabled": {
+                    "type": "boolean"
                 }
             },
             "required": [],
@@ -1839,6 +1845,16 @@
                     }
                 },
                 "mediaConnectionInfo": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/MediaConnectionInfo"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "bundleConnectionInfo": {
                     "anyOf": [
                         {
                             "$ref": "#/$defs/MediaConnectionInfo"
@@ -2461,6 +2477,9 @@
                     "type": "boolean"
                 },
                 "mousePad": {
+                    "type": "boolean"
+                },
+                "mouseWithTouchController": {
                     "type": "boolean"
                 },
                 "keyboardModeEnabled": {
