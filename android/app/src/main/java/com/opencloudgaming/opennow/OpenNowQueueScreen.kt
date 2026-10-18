@@ -111,6 +111,13 @@ internal fun QueueLoadingScreen(state: OpenNowUiState, viewModel: OpenNowViewMod
     val visibleQueuePosition = rememberStableQueuePosition(session?.sessionId, queuePosition)
     val launchStatus = queueLaunchStatus(state, visibleQueuePosition)
     val queueCopy = queueLaunchStatusText(state, visibleQueuePosition)
+    if (state.settings.experimentalSpaceUi && (ad == null || mediaUrl == null)) {
+        SpaceLaunchScreen(state, queueCopy,
+            queuePosition = visibleQueuePosition.takeIf { launchStatus.kind == QueueLaunchStatusKind.QueuePosition },
+            onMinimize = viewModel::minimizeStreamLaunch,
+            onCancel = { viewModel.stopStream(StreamStopOrigin.QueueCancel) })
+        return
+    }
     val isSettingUp = launchStatus.kind == QueueLaunchStatusKind.ConnectingStream ||
         launchStatus.kind == QueueLaunchStatusKind.SettingUpRig
     val setupProgress = remember(session?.sessionId) { Animatable(0f) }
@@ -138,10 +145,12 @@ internal fun QueueLoadingScreen(state: OpenNowUiState, viewModel: OpenNowViewMod
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
+            .then(if (state.settings.experimentalSpaceUi) Modifier.spaceSafeViewport() else Modifier)
             .clipToBounds(),
         contentAlignment = Alignment.Center,
     ) {
-        QueueAmbientBackdrop(
+        if (state.settings.experimentalSpaceUi) Box(Modifier.fillMaxSize().background(SpaceInk))
+        else QueueAmbientBackdrop(
             accent = state.settings.uiAccent.color,
             queuePosition = visibleQueuePosition,
         )
@@ -398,19 +407,22 @@ private fun QueueSignalField(
 }
 
 @Composable
-private fun AnimatedQueueStatusText(
+internal fun AnimatedQueueStatusText(
     queueCopy: String,
     queuePosition: Int?,
     compact: Boolean,
     modifier: Modifier = Modifier,
+    style: TextStyle? = null,
+    contentColor: Color = TextMuted,
 ) {
+    val textStyle = style ?: (if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium)
+        .copy(fontWeight = FontWeight.Normal)
     if (queuePosition == null) {
         Text(
             queueCopy,
             modifier = modifier,
-            color = queueIdleStatusColor(queueCopy),
-            style = (if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium)
-                .copy(fontWeight = FontWeight.Normal),
+            color = if (style == null) queueIdleStatusColor(queueCopy) else contentColor,
+            style = textStyle,
             textAlign = TextAlign.Center,
         )
         return
@@ -426,7 +438,8 @@ private fun AnimatedQueueStatusText(
     val reduceMotion = LocalReduceMotion.current
     val glow: State<Float>
     val moleculePhase: State<Float>
-    if (reduceMotion) {
+    val animate = !reduceMotion && androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    if (!animate || !hotQueue) {
         glow = remember { mutableFloatStateOf(0.72f) }
         moleculePhase = remember { mutableFloatStateOf(0f) }
     } else {
@@ -453,8 +466,8 @@ private fun AnimatedQueueStatusText(
         )
     }
     val statusColor by animateColorAsState(
-        targetValue = queueUrgencyColor(queuePosition),
-        animationSpec = tween(durationMillis = 240),
+        targetValue = if (hotQueue) queueUrgencyColor(queuePosition) else contentColor,
+        animationSpec = tween(durationMillis = if (animate) 240 else 0),
         label = "queue-status-color",
     )
 
@@ -472,7 +485,11 @@ private fun AnimatedQueueStatusText(
         previousQueuePosition = current
     }
 
-    LaunchedEffect(numberTrigger) {
+    LaunchedEffect(numberTrigger, animate) {
+        if (!animate) {
+            numberProgress.snapTo(1f)
+            return@LaunchedEffect
+        }
         if (numberTrigger == 0) return@LaunchedEffect
         numberProgress.snapTo(0f)
         numberProgress.animateTo(
@@ -485,8 +502,6 @@ private fun AnimatedQueueStatusText(
         (if (hotQueue) (0.45f + heat * 1.45f).dp else 0.dp).toPx()
     }
     val parts = queueStatusParts(queueCopy, queuePosition)
-    val textStyle = (if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium)
-        .copy(fontWeight = FontWeight.Normal)
     val numberAnimating = numberTrigger > 0 && numberFrom != numberTo
     val numberTravelPx = with(LocalDensity.current) { (if (compact) 18.dp else 22.dp).toPx() }
 
@@ -497,7 +512,7 @@ private fun AnimatedQueueStatusText(
     ) {
         Text(
             parts.prefix,
-            color = TextMuted,
+            color = contentColor,
             style = textStyle,
             textAlign = TextAlign.Center,
         )
@@ -523,7 +538,7 @@ private fun AnimatedQueueStatusText(
         )
         Text(
             parts.suffix,
-            color = TextMuted,
+            color = contentColor,
             style = textStyle,
             textAlign = TextAlign.Center,
         )

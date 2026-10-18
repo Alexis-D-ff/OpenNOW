@@ -27,7 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.opencloudgaming.opennow.SettingsOutlinedButton as OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -134,6 +134,11 @@ internal fun AppDataSettingsPanel(viewModel: OpenNowViewModel) {
             color = SettingsTextMuted,
             style = MaterialTheme.typography.bodySmall,
         )
+        if (LocalSpaceUiPresentation.current) {
+            SettingsActionButton(stringResource(R.string.settings_clear_cache), { clearCacheConfirmOpen = true }, Modifier.fillMaxWidth())
+            SettingsActionButton(stringResource(R.string.settings_reset_tutorial), viewModel::resetStreamTutorial, Modifier.fillMaxWidth())
+            SettingsActionButton(stringResource(R.string.settings_reset_settings), { resetSettingsConfirmOpen = true }, Modifier.fillMaxWidth())
+        } else {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { clearCacheConfirmOpen = true }, modifier = Modifier.weight(1f)) {
@@ -147,12 +152,14 @@ internal fun AppDataSettingsPanel(viewModel: OpenNowViewModel) {
                 Text(stringResource(R.string.settings_reset_settings), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+        }
     }
 }
 
 @Composable
 internal fun AndroidUpdatePanel(state: OpenNowUiState, viewModel: OpenNowViewModel) {
     val update = state.androidUpdate
+    val space = LocalSpaceUiPresentation.current
     if (!update.updateChecksSupported) {
         AndroidUpdateUnavailablePanel(update)
         return
@@ -172,8 +179,8 @@ internal fun AndroidUpdatePanel(state: OpenNowUiState, viewModel: OpenNowViewMod
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        color = if (update.status in updateAvailableStatuses) {
+        shape = RoundedCornerShape(if (space) 4.dp else 22.dp),
+        color = if (space) SpaceWhite.copy(alpha = .035f) else if (update.status in updateAvailableStatuses) {
             MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
         } else {
             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
@@ -190,7 +197,7 @@ internal fun AndroidUpdatePanel(state: OpenNowUiState, viewModel: OpenNowViewMod
                         color = SettingsText,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
+                        maxLines = if (space) 2 else 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
@@ -201,7 +208,7 @@ internal fun AndroidUpdatePanel(state: OpenNowUiState, viewModel: OpenNowViewMod
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                UpdateStatusBadge(update.status)
+                if (!space) UpdateStatusBadge(update.status)
             }
             UpdateVersionSummary(update)
             if (update.status == AndroidUpdateStatus.Downloading) {
@@ -342,8 +349,8 @@ private fun UpdateVersionSummary(update: AndroidUpdateState) {
     val availableVersion = formatAvailableUpdateVersion(update)
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
+        shape = RoundedCornerShape(if (LocalSpaceUiPresentation.current) 4.dp else 16.dp),
+        color = if (LocalSpaceUiPresentation.current) androidx.compose.ui.graphics.Color.Transparent else MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
@@ -391,8 +398,8 @@ private fun UpdateReleaseNotes(notes: String?) {
     val releaseNotes = notes?.trim()?.takeIf { it.isNotBlank() } ?: return
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
+        shape = RoundedCornerShape(if (LocalSpaceUiPresentation.current) 4.dp else 16.dp),
+        color = if (LocalSpaceUiPresentation.current) androidx.compose.ui.graphics.Color.Transparent else MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
@@ -1219,7 +1226,8 @@ private fun AccountConnectorsPanel(
     onDisconnect: (AccountConnector) -> Unit,
     openExternal: (String) -> Unit,
 ) {
-    var disconnecting by remember { mutableStateOf<AccountConnector?>(null) }
+    val demoMode = LocalDemoMode.current
+    var disconnecting by remember(demoMode) { mutableStateOf<AccountConnector?>(null) }
     val controllerNavigationEnabled = LocalSettingsControllerNavigationEnabled.current
     disconnecting?.let { connector ->
         AlertDialog(
@@ -1292,7 +1300,8 @@ private fun ConnectorRow(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
-    val actionEnabled = !busy && (connector.isLinked || connector.supported)
+    val demoMode = LocalDemoMode.current
+    val actionEnabled = !demoMode && !busy && (connector.isLinked || connector.supported)
     val badge = launcherBadgeForStoreKey(splitGameStoreKeys(connector.store).firstOrNull())
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -1308,7 +1317,9 @@ private fun ConnectorRow(
             Text(connector.label, color = SettingsText, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(connectorStatusText(connector), color = SettingsTextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (connector.isLinked) {
+        if (demoMode) {
+            Text(stringResource(R.string.dev_demo_connected), color = MaterialTheme.colorScheme.primary)
+        } else if (connector.isLinked) {
             OutlinedButton(onClick = onDisconnect, enabled = !busy, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
                 Text(if (busy) "Removing..." else "Disconnect")
             }

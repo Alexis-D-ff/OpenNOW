@@ -32,6 +32,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.opencloudgaming.opennow.LocalSpaceUiPresentation
+import com.opencloudgaming.opennow.rememberSpaceInteraction
 import com.opencloudgaming.opennow.R
 import com.opencloudgaming.opennow.InteractionFocusFrame
 import com.opencloudgaming.opennow.LocalAbsoluteCinemaEverywhere
@@ -179,7 +181,9 @@ internal fun ControlSliderRow(
     var descriptionExpanded by remember(label) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     var focused by remember { mutableStateOf(false) }
-    val hoverInteraction = remember { MutableInteractionSource() }
+    val space = LocalSpaceUiPresentation.current
+    val motion = if (space) rememberSpaceInteraction(focused) else null
+    val hoverInteraction = motion?.source ?: remember { MutableInteractionSource() }
     val hovered by hoverInteraction.collectIsHoveredAsState()
     val showFocus = style.showFocusRing && focused
     val bonanzaActive = LocalAbsoluteCinemaEverywhere.current
@@ -188,8 +192,9 @@ internal fun ControlSliderRow(
         Column(
             Modifier
                 .fillMaxWidth()
+                .then(motion?.modifier ?: Modifier)
                 .hoverable(hoverInteraction)
-                .controlRowContainer(style = style, showFocus = showFocus),
+                .controlRowContainer(style = style, showFocus = showFocus, emphasis = motion?.emphasis),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -241,6 +246,7 @@ internal fun ControlSliderRow(
                             onChange(local)
                         }
                     },
+                interactionSource = hoverInteraction,
                 value = local,
                 onValueChange = {
                     local = quantize(it)
@@ -261,7 +267,7 @@ internal fun ControlSliderRow(
             }
         }
         InteractionFocusFrame(
-            visible = focused || (hovered && bonanzaActive),
+            visible = !space && (focused || (hovered && bonanzaActive)),
             cornerRadius = 14.dp,
             cinemaEffectEnabled = bonanzaActive,
         )

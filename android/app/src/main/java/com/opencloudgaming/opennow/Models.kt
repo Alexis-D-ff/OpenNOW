@@ -662,7 +662,7 @@ data class AppSettings(
     val libraryFilterIds: List<String> = emptyList(),
     val launchPage: AppLaunchPage = AppLaunchPage.Store,
     val nerdMode: Boolean = false,
-    /** Opt-in console shell. Only active while a physical controller is connected. */
+    /** Opt-in experimental console shell. */
     val experimentalSpaceUi: Boolean = false,
     val hideStreamButtons: Boolean = false,
     val streamKeyboardClearConfirmationDisabled: Boolean = false,
@@ -752,6 +752,8 @@ data class AppSettings(
      * `AndroidDeveloperOptions.kt`.
      */
     val developerOptionsUnlocked: Boolean = false,
+    /** Masks account and ownership presentation for screenshots and demonstrations. */
+    val demoMode: Boolean = false,
 )
 
 internal const val MIN_GAME_CARD_SCALE = 0.75f

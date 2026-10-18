@@ -1,13 +1,19 @@
 package com.opencloudgaming.opennow
 
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,11 +36,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -52,37 +62,33 @@ import com.opencloudgaming.opennow.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
-private val SpaceInk = Color(0xFF080E18)
-private val SpaceWhite = Color(0xFFF4F7FC)
-private val SpaceMuted = Color(0xFFB0BCCC)
-private val SpaceIce = Color(0xFFB8E6EF)
+internal val SpaceInk = Color(0xFF080E18)
+internal val SpaceWhite = Color(0xFFF4F7FC)
+internal val SpaceMuted = Color(0xFFB0BCCC)
+internal val SpaceIce = Color(0xFFB8E6EF)
 
-/** A saved preference is never enough to enter a controller-only shell, including on cold start. */
-internal fun shouldUseSpaceUi(enabled: Boolean, controllerConnected: Boolean, page: AppPage): Boolean =
-    enabled && controllerConnected && page != AppPage.Stream
+/** The experimental preference selects the shell; live video keeps its streaming surface. */
+internal fun shouldUseSpaceUi(enabled: Boolean, page: AppPage): Boolean =
+    enabled && page != AppPage.Stream
+
+/** Browsing uses immersive bars only in landscape; stream bars retain their existing owner. */
+internal fun shouldHideSpaceUiSystemBars(enabled: Boolean, landscape: Boolean, page: AppPage): Boolean =
+    shouldUseSpaceUi(enabled, page) && landscape
 
 @Composable
-internal fun SpaceUiSettingsToggle(checked: Boolean, controllerConnected: Boolean, onCheckedChange: (Boolean) -> Unit) {
+internal fun SpaceUiSettingsToggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     SettingSwitch(
         label = stringResource(R.string.space_ui_name),
         checked = checked,
-        enabled = controllerConnected || checked,
-        description = stringResource(
-            if (controllerConnected) R.string.space_ui_description else R.string.space_ui_controller_required,
-        ),
-        onCheckedChange = { if (!it || controllerConnected) onCheckedChange(it) },
+        onCheckedChange = onCheckedChange,
     )
-    if (!controllerConnected) {
-        Text(stringResource(R.string.space_ui_controller_required), color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall)
-    }
 }
 
 /** Shares catalog derivations with the regular shell; no second catalog or launch owner. */
 internal fun spaceUiGames(state: OpenNowUiState): List<GameInfo> = if (state.page == AppPage.Library) {
     val terms = searchTermsFor(state.librarySearch)
     sortLibraryGames(favoriteOrderedGames(state.libraryGames, state.settings.favoriteGameIds), state.librarySortId)
-        .filter { gameMatchesSearch(it, terms) && gameMatchesLibraryFilters(it, state.libraryFilterIds) }
+        .filter { gameMatchesSearch(it, terms) && gameMatchesLibraryFilters(it, state.libraryFilterIds, state.settings.demoMode) }
 } else {
     filterCatalogGamesForLocalControls(state.games.ifEmpty { state.catalogResult.games }, state.catalogFilterIds)
 }
@@ -100,10 +106,11 @@ internal fun SpaceUiScreen(
     catalogControls: @Composable () -> Unit = {},
     libraryContent: @Composable () -> Unit = {},
     queueContent: @Composable () -> Unit = {},
+    onOpenLocalApps: () -> Unit = { onNavigate(AppPage.Settings) },
 ) {
     val games = remember(state.page, state.games, state.catalogResult.games, state.libraryGames,
         state.catalogFilterIds, state.libraryFilterIds, state.librarySearch, state.librarySortId,
-        state.settings.favoriteGameIds) { spaceUiGames(state) }
+        state.settings.favoriteGameIds, state.settings.demoMode) { spaceUiGames(state) }
     var storeSelectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var librarySelectedId by rememberSaveable { mutableStateOf<String?>(null) }
     val selectedId = if (state.page == AppPage.Library) librarySelectedId else storeSelectedId
@@ -111,42 +118,62 @@ internal fun SpaceUiScreen(
     var searchOpen by rememberSaveable(state.page) { mutableStateOf(false) }
     val query = if (state.page == AppPage.Library) state.librarySearch else state.catalogSearch
     val listState = rememberLazyListState()
+    val discoveryScroll = rememberScrollState()
+    var discoverCatalog by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = inputEnabled && state.page == AppPage.Home && discoverCatalog) { discoverCatalog = false }
+    LaunchedEffect(discoverCatalog) { if (!discoverCatalog) discoveryScroll.scrollTo(0) }
+    val storeGridState = rememberLazyGridState()
+    val libraryGridState = rememberLazyGridState()
+    val gridState = if (state.page == AppPage.Library) libraryGridState else storeGridState
+    val portraitLayout = LocalConfiguration.current.screenWidthDp < LocalConfiguration.current.screenHeightDp
+    val profileRequester = remember { FocusRequester() }
     val selectedRequester = remember { FocusRequester() }
     val navigationRequester = remember { FocusRequester() }
     val searchRequester = remember { FocusRequester() }
+    val settingsEntryRequester = remember { FocusRequester() }
     val reduceMotion = LocalReduceMotion.current
     val context = LocalContext.current
     var backdropUrl by remember { mutableStateOf(game?.let { gameTvBannerImageUrl(context, it) }) }
-    LaunchedEffect(game?.id, reduceMotion) {
+    LaunchedEffect(game?.id, reduceMotion, discoverCatalog) {
+        if (discoverCatalog && state.page == AppPage.Home) { backdropUrl = null; return@LaunchedEffect }
         // Let fast D-pad traversal settle before starting another full-width artwork request.
         if (!reduceMotion) delay(100)
         backdropUrl = game?.let { gameTvBannerImageUrl(context, it) }
     }
     val family = rememberPhysicalControllerFamily(enabled = true)
-    val selectHint = if (family == AndroidControllerFamily.PlayStation) "×" else "A"
-    val backHint = if (family == AndroidControllerFamily.PlayStation) "○" else "B"
-    val tabsHint = if (family == AndroidControllerFamily.PlayStation) "L1 / R1" else "LB / RB"
+    val keyboardNavigation = family != null || LocalInputModeManager.current.inputMode == InputMode.Keyboard
     val pages = remember { listOf(AppPage.Home, AppPage.Library, AppPage.Settings) }
     val searchVisible = searchOpen || query.isNotBlank()
     val windowFocused = LocalWindowInfo.current.isWindowFocused
-    LaunchedEffect(state.page, games.isNotEmpty(), inputEnabled, windowFocused) {
-        if (inputEnabled && windowFocused) {
-            if (games.isNotEmpty() && state.page != AppPage.Settings) {
-                listState.scrollToItem(games.indexOfFirst { it.id == game?.id }.coerceAtLeast(0))
-                snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.key == game?.id } }.first { it }
-                selectedRequester.requestFocus()
+    LaunchedEffect(state.page, games.isNotEmpty(), inputEnabled, windowFocused, portraitLayout, keyboardNavigation, discoverCatalog) {
+        if (inputEnabled && windowFocused && (!portraitLayout || keyboardNavigation)) {
+            if (searchVisible && state.page != AppPage.Settings && !(discoverCatalog && state.page == AppPage.Home)) {
+                requestFocusWithRetry(searchRequester, initialDelayMs = 0L)
+            } else if (games.isNotEmpty() && state.page != AppPage.Settings) {
+                val index = games.indexOfFirst { it.id == game?.id }.coerceAtLeast(0)
+                if (state.page == AppPage.Library || discoverCatalog) {
+                    gridState.scrollToItem(index + if (portraitLayout && state.page == AppPage.Library) 1 else 0)
+                    snapshotFlow { gridState.layoutInfo.visibleItemsInfo.any { it.key == game?.id } }.first { it }
+                } else {
+                    listState.scrollToItem(index)
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.key == game?.id } }.first { it }
+                }
+                requestFocusWithRetry(selectedRequester, initialDelayMs = 0L)
             } else {
-                navigationRequester.requestFocus()
+                requestFocusWithRetry(navigationRequester, initialDelayMs = 0L)
             }
         }
     }
     LaunchedEffect(searchOpen) {
         if (searchOpen) {
-            searchRequester.requestFocus()
+            requestFocusWithRetry(searchRequester)
         }
     }
+    val fastNavigation = rememberSpaceFastNavigation(listState, game?.id,
+        enabled = inputEnabled && state.page == AppPage.Home && !discoverCatalog && !reduceMotion)
+    CompositionLocalProvider(LocalSpaceFastNavigation provides fastNavigation) {
     BoxWithConstraints(
-        Modifier.fillMaxSize().testTag("space-ui").background(SpaceInk)
+        Modifier.fillMaxSize().testTag("space-ui").spaceSafeViewport()
             .onPreviewKeyEvent { event ->
                 if (!inputEnabled || event.key !in listOf(Key.ButtonL1, Key.ButtonR1)) false
                 else {
@@ -158,51 +185,68 @@ internal fun SpaceUiScreen(
                 }
             },
     ) {
-        val compact = maxHeight < 500.dp
+        val compact = maxHeight < 560.dp
         val portrait = maxWidth < maxHeight
-        val inset = if (compact) 22.dp else 36.dp
-        if (state.page != AppPage.Settings) {
-            // A single bounded image transition, never a video or an idle animation loop.
-            Crossfade(backdropUrl, animationSpec = tween(if (reduceMotion) 0 else 320), label = "space-art") { url ->
-                if (url != null) UrlImage(url, Modifier.fillMaxSize())
-            }
-        }
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(SpaceInk.copy(alpha = .96f), SpaceInk.copy(alpha = .30f)))))
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(SpaceInk.copy(alpha = .40f), Color.Transparent, SpaceInk))))
-        Column(Modifier.fillMaxSize().padding(horizontal = inset, vertical = if (compact) 10.dp else 20.dp)) {
-            Row(Modifier.fillMaxWidth().focusGroup(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (portrait) 8.dp else 14.dp)) {
-                if (!portrait) {
-                    Column(Modifier.padding(end = 18.dp)) {
-                        Text("OPENNOW", color = SpaceWhite, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
-                        Text(stringResource(R.string.space_ui_name), color = SpaceIce, fontSize = 10.sp, letterSpacing = 2.sp)
-                    }
-                }
-                pages.forEach { page ->
-                    SpaceControl(
-                        label = stringResource(when (page) {
-                            AppPage.Home -> R.string.nav_store
-                            AppPage.Library -> R.string.nav_library
-                            else -> R.string.nav_settings
-                        }),
-                        active = state.page == page,
-                        modifier = if (page == state.page) Modifier.focusRequester(navigationRequester) else Modifier,
-                        onClick = { onNavigate(page) },
-                    )
-                }
-                Spacer(Modifier.weight(1f))
+        val inset = if (compact) 22.dp else if (portrait) 20.dp else 36.dp
+        SpaceSceneBackdrop(backdropUrl.takeUnless { portrait || state.page == AppPage.Settings })
+        Column(Modifier.fillMaxSize().testTag("space-scene-content").padding(horizontal = inset, vertical = if (compact) 10.dp else 20.dp)) {
+            Row(Modifier.fillMaxWidth().focusGroup(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TopBarProfileMenu(
+                    state = state, focusRequester = profileRequester, nextFocusRequester = navigationRequester,
+                    onOpenSettings = { onNavigate(AppPage.Settings) }, onOpenLocalApps = onOpenLocalApps,
+                )
+                if (portrait) Spacer(Modifier.weight(1f))
+                else SpaceNavigationTabs(state.page, pages, false, navigationRequester, onNavigate, Modifier.weight(1f), settingsEntryRequester)
                 if (state.page != AppPage.Settings) {
-                    SpaceControl(label = stringResource(R.string.nav_search), onClick = { searchOpen = !searchOpen }) {
-                        Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                    SpaceControl(stringResource(R.string.nav_search), onClick = { searchOpen = !searchOpen }) {
+                        Icon(Icons.Outlined.Search, null, Modifier.size(20.dp))
                     }
-                    if (!portrait) SpaceControl(label = stringResource(R.string.space_ui_refresh), onClick = onRefresh) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
+                    SpaceControl(stringResource(R.string.space_ui_refresh), onClick = onRefresh) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(20.dp))
                     }
                 }
+            }
+            if (portrait) {
+                SpaceNavigationTabs(state.page, pages, true, navigationRequester, onNavigate,
+                    Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp), settingsEntryRequester)
             }
             if (state.page == AppPage.Settings) {
-                Box(Modifier.weight(1f).padding(top = 12.dp).clip(RoundedCornerShape(24.dp)).background(SpaceInk.copy(alpha = .85f))) {
-                    settingsContent()
+                Box(Modifier.weight(1f).spaceArrival(state.page).padding(top = 12.dp).clip(RoundedCornerShape(24.dp)).background(SpaceInk.copy(alpha = .85f))) {
+                    CompositionLocalProvider(LocalSpaceSettingsEntry provides settingsEntryRequester) { settingsContent() }
                 }
+            } else if (portrait && state.page == AppPage.Library) {
+                if (searchVisible) {
+                    NativeSearchField(query, onSearchChange, stringResource(R.string.nav_search),
+                        searching = state.loadingGames, focusRequester = searchRequester, gamepadImeMode = family != null,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp))
+                }
+                SpacePortraitCatalog(state, games, game, gridState, selectedRequester,
+                    modifier = Modifier.weight(1f).spaceArrival(state.page),
+                    onFocused = { id ->
+                        if (state.page == AppPage.Library) librarySelectedId = id else storeSelectedId = id
+                    }, onSelectGame = onSelectGame, onRefresh = onRefresh,
+                    catalogControls = catalogControls, libraryContent = libraryContent,
+                    onResumeSession = onResumeSession)
+            } else if (state.page == AppPage.Library) {
+                if (searchVisible) {
+                    NativeSearchField(query, onSearchChange, stringResource(R.string.nav_search),
+                        focusRequester = searchRequester, gamepadImeMode = true,
+                        modifier = Modifier.padding(top = 10.dp).fillMaxWidth())
+                }
+                Box(Modifier.weight(1f).spaceArrival(state.page)) {
+                    SpaceLibraryBody(state, games, game, gridState, selectedRequester,
+                        compact = compact, portrait = portrait,
+                        onFocused = { librarySelectedId = it }, onSelectGame = onSelectGame,
+                        onRefresh = onRefresh, catalogControls = catalogControls, libraryContent = libraryContent)
+                }
+            } else if (discoverCatalog) {
+                if (searchVisible) NativeSearchField(query, onSearchChange, stringResource(R.string.nav_search),
+                    searching = state.loadingGames, focusRequester = searchRequester, gamepadImeMode = family != null,
+                    modifier = Modifier.padding(top = 10.dp).fillMaxWidth())
+                SpaceDiscoverCatalog(games, game?.id, storeGridState, selectedRequester, compact,
+                    Modifier.weight(1f), onFocused = { storeSelectedId = it }, onSelectGame = onSelectGame,
+                    onBack = { discoverCatalog = false }, catalogControls = catalogControls)
             } else {
                 if (searchVisible) {
                     NativeSearchField(query = query, onQueryChange = onSearchChange,
@@ -214,131 +258,226 @@ internal fun SpaceUiScreen(
                     Text(error, color = Color(0xFFFFB5A9), fontSize = 12.sp, maxLines = 2,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                 }
-                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = if (compact) 14.dp else 32.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(Modifier.size(5.dp).background(SpaceIce, CircleShape))
-                        Text(stringResource(R.string.space_ui_experimental), color = SpaceIce, fontSize = 10.sp, letterSpacing = 2.sp)
-                    }
-                    Spacer(Modifier.height(if (compact) 10.dp else 22.dp))
-                    if (state.activeSession != null) {
-                        SpaceControl(label = stringResource(R.string.action_resume), onClick = onResumeSession)
-                    }
-                    if (game != null) {
-                        Text(game.title, color = SpaceWhite, fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light,
-                            fontSize = if (compact) 32.sp else if (portrait) 38.sp else 54.sp,
-                            lineHeight = if (compact) 36.sp else 58.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth(if (portrait) 1f else .72f))
-                        val metadata = (game.genres.take(2) + listOfNotNull(game.publisherName)).joinToString("   /   ")
-                        if (metadata.isNotBlank()) Text(metadata, color = SpaceIce, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (!compact) gameDescriptionForDetails(game)?.let { description ->
-                            Text(description, color = SpaceMuted, fontSize = 14.sp, lineHeight = 22.sp,
-                                maxLines = if (portrait) 3 else 2, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 16.dp).fillMaxWidth(if (portrait) 1f else .58f))
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()
+                    .expandSpaceCatalogOnSwipe(inputEnabled && games.isNotEmpty()) { discoverCatalog = true }) {
+                    val heroHeight = (maxHeight - if (compact) 192.dp else 228.dp).coerceAtLeast(if (compact) 76.dp else 150.dp)
+                    Column(Modifier.fillMaxSize().testTag("space-discover-scroll")
+                        .verticalScroll(discoveryScroll).padding(bottom = 32.dp)) {
+                        Column(Modifier.heightIn(min = heroHeight)
+                            .padding(top = if (compact) 14.dp else if (portrait) 20.dp else 32.dp)) {
+                            if (state.activeSession != null) SpaceControl(stringResource(R.string.action_resume), onClick = onResumeSession)
+                            if (game != null) SpaceDiscoveryHero(game, compact, portrait)
+                            else if (state.loadingGames) CircularProgressIndicator(color = SpaceIce, modifier = Modifier.size(28.dp))
+                            else {
+                                Text(stringResource(R.string.no_games_loaded), color = SpaceWhite, fontSize = 26.sp)
+                                Text(stringResource(R.string.space_ui_empty), color = SpaceMuted, modifier = Modifier.padding(top = 12.dp))
+                                SpaceControl(label = stringResource(R.string.space_ui_refresh), onClick = onRefresh)
+                            }
                         }
-                        Spacer(Modifier.height(if (compact) 10.dp else 22.dp))
-                        SpaceControl(label = stringResource(R.string.space_ui_view_game), filled = true, onClick = { onSelectGame(game) }) {
-                            Icon(Icons.Outlined.SportsEsports, null, Modifier.size(19.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Text(stringResource(R.string.space_ui_view_game), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(stringResource(if (state.page == AppPage.Library) R.string.nav_library else R.string.nav_store), color = SpaceMuted, fontSize = 11.sp, letterSpacing = 2.sp)
+                                Spacer(Modifier.weight(1f))
+                                Text("${if (game == null) 0 else games.indexOf(game) + 1} / ${games.size}", color = SpaceMuted, fontSize = 11.sp)
+                                Spacer(Modifier.width(12.dp))
+                                catalogControls()
                         }
-                    } else {
-                        if (state.loadingGames) CircularProgressIndicator(color = SpaceIce, modifier = Modifier.size(28.dp))
-                        else {
-                            Text(stringResource(R.string.no_games_loaded), color = SpaceWhite, fontSize = 26.sp)
-                            Text(stringResource(R.string.space_ui_empty), color = SpaceMuted, modifier = Modifier.padding(top = 12.dp))
-                            SpaceControl(label = stringResource(R.string.space_ui_refresh), onClick = onRefresh)
+                        if (games.isNotEmpty()) {
+                            LazyRow(state = listState, modifier = Modifier.fillMaxWidth().focusGroup().testTag("space-game-rail")
+                                .onPreviewKeyEvent { event ->
+                                    if (inputEnabled && event.key == Key.DirectionDown) {
+                                        if (event.type == KeyEventType.KeyDown) discoverCatalog = true
+                                        true
+                                    } else false
+                                },
+                                contentPadding = PaddingValues(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                                itemsIndexed(games, key = { _, item -> item.id }) { index, item ->
+                                    SpaceGameTile(game = item, selected = game?.id == item.id,
+                                        compact = compact, reduceMotion = reduceMotion,
+                                        modifier = Modifier.spaceArrival(item.id, (index.coerceAtMost(5) * 24)).then(if (game?.id == item.id) Modifier.focusRequester(selectedRequester) else Modifier),
+                                        onFocused = {
+                                            if (state.page == AppPage.Library) librarySelectedId = item.id
+                                            else storeSelectedId = item.id
+                                        }, onClick = { onSelectGame(item) })
+                                }
+                            }
                         }
-                    }
-                    if (state.page == AppPage.Library) libraryContent()
-                }
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(stringResource(if (state.page == AppPage.Library) R.string.nav_library else R.string.nav_store), color = SpaceMuted, fontSize = 11.sp, letterSpacing = 2.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text("${if (game == null) 0 else games.indexOf(game) + 1} / ${games.size}", color = SpaceMuted, fontSize = 11.sp)
-                        Spacer(Modifier.width(12.dp))
-                        catalogControls()
-                }
-                if (games.isNotEmpty()) {
-                    LazyRow(state = listState, modifier = Modifier.fillMaxWidth().focusGroup().testTag("space-game-rail"),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        itemsIndexed(games, key = { _, item -> item.id }) { _, item ->
-                            SpaceGameTile(game = item, selected = game?.id == item.id,
-                                compact = compact, reduceMotion = reduceMotion,
-                                modifier = if (game?.id == item.id) Modifier.focusRequester(selectedRequester) else Modifier,
-                                onFocused = {
-                                    if (state.page == AppPage.Library) librarySelectedId = item.id
-                                    else storeSelectedId = item.id
-                                }, onClick = { onSelectGame(item) })
+                        game?.let(::gameDescriptionForDetails)?.let { description ->
+                            Text(description, color = SpaceMuted, fontSize = 14.sp, lineHeight = 24.sp,
+                                modifier = Modifier.testTag("space-discover-details").padding(top = 12.dp, bottom = 16.dp)
+                                    .fillMaxWidth(if (portrait) 1f else .72f))
                         }
                     }
                 }
             }
             queueContent()
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (portrait) 14.dp else 24.dp)) {
-                SpaceHint("✥", stringResource(R.string.space_ui_navigate))
-                SpaceHint(selectHint, stringResource(R.string.space_ui_select))
-                SpaceHint(backHint, stringResource(R.string.space_ui_back))
-                if (!portrait) SpaceHint(tabsHint, stringResource(R.string.space_ui_tabs))
+        }
+    }
+    }
+}
+
+@Composable
+private fun SpaceNavigationTabs(page: AppPage, pages: List<AppPage>, portrait: Boolean, requester: FocusRequester,
+    onNavigate: (AppPage) -> Unit, modifier: Modifier = Modifier, settingsEntryRequester: FocusRequester) {
+    Row(modifier.then(if (portrait) Modifier else Modifier.horizontalScroll(rememberScrollState())),
+        horizontalArrangement = Arrangement.spacedBy(if (portrait) 4.dp else 14.dp)) {
+        pages.forEach { destination ->
+            SpaceControl(stringResource(when (destination) {
+                AppPage.Home -> R.string.space_ui_discover
+                AppPage.Library -> R.string.nav_library
+                else -> R.string.nav_settings
+            }), active = page == destination,
+                modifier = (if (portrait) Modifier.weight(1f) else Modifier).then(
+                    if (page == destination) Modifier.focusRequester(requester) else Modifier)
+                    .onPreviewKeyEvent { event ->
+                        if (page == AppPage.Settings && event.key == Key.DirectionDown && event.type == KeyEventType.KeyDown) {
+                            runCatching { settingsEntryRequester.requestFocus() }.getOrDefault(false)
+                        } else false
+                    },
+                onClick = { onNavigate(destination) })
+        }
+    }
+}
+
+@Composable
+private fun SpaceDiscoveryHero(game: GameInfo, compact: Boolean, portrait: Boolean) {
+    val title: @Composable () -> Unit = {
+        Text(game.title, color = SpaceWhite, fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light,
+            fontSize = if (compact) 32.sp else if (portrait) 38.sp else 54.sp,
+            lineHeight = if (compact) 36.sp else if (portrait) 44.sp else 58.sp,
+            maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+        val metadata = storeHeroSubtitle(game).orEmpty()
+        if (metadata.isNotBlank()) Text(metadata, color = SpaceIce, fontSize = 12.sp,
+            modifier = Modifier.padding(top = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    Column(Modifier.fillMaxWidth(if (portrait) 1f else .72f).spaceArrival(game.id)) { title() }
+
+}
+
+@Composable
+private fun SpaceLibraryBody(
+    state: OpenNowUiState,
+    games: List<GameInfo>,
+    selectedGame: GameInfo?,
+    gridState: LazyGridState,
+    selectedRequester: FocusRequester,
+    compact: Boolean,
+    portrait: Boolean,
+    onFocused: (String) -> Unit,
+    onSelectGame: (GameInfo) -> Unit,
+    onRefresh: () -> Unit,
+    catalogControls: @Composable () -> Unit,
+    libraryContent: @Composable () -> Unit,
+) {
+    val reduceMotion = LocalReduceMotion.current
+    val overview: @Composable () -> Unit = {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(end = if (portrait) 0.dp else 24.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 20.dp)) {
+            Text(stringResource(R.string.space_ui_collection), color = SpaceIce, fontSize = 11.sp, letterSpacing = 3.sp)
+            Text(selectedGame?.title ?: stringResource(R.string.nav_library), color = SpaceWhite,
+                fontWeight = FontWeight.Light, fontSize = if (portrait || compact) 26.sp else 40.sp,
+                lineHeight = if (portrait || compact) 32.sp else 46.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            if (!portrait && !compact) selectedGame?.let(::gameDescriptionForDetails)?.let { description ->
+                Text(description, color = SpaceMuted, fontSize = 14.sp, lineHeight = 23.sp,
+                    maxLines = 4, overflow = TextOverflow.Ellipsis)
+            }
+            libraryContent()
+        }
+    }
+    val collection: @Composable () -> Unit = {
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.library_count, games.size), color = SpaceMuted, fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
-                if (!compact && !portrait) Text(stringResource(R.string.space_ui_controller_connected), color = SpaceMuted, fontSize = 10.sp)
+                catalogControls()
+            }
+            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            if (games.isEmpty()) {
+                Text(stringResource(R.string.no_games_loaded), color = SpaceWhite, fontSize = 20.sp)
+                Text(stringResource(R.string.space_ui_empty), color = SpaceMuted, fontSize = 13.sp)
+                SpaceControl(stringResource(R.string.space_ui_refresh), onClick = onRefresh)
+            } else LazyVerticalGrid(columns = GridCells.Adaptive(if (compact) 122.dp else if (portrait) 140.dp else 158.dp), state = gridState,
+                contentPadding = PaddingValues(6.dp), verticalArrangement = Arrangement.spacedBy(0.dp),
+                horizontalArrangement = Arrangement.spacedBy(0.dp), modifier = Modifier.weight(1f).testTag("space-library-grid")) {
+                gridItemsIndexed(games, key = { _, game -> game.id }) { _, game ->
+                    SpaceGameTile(game, selectedGame?.id == game.id, compact, reduceMotion,
+                        modifier = Modifier.fillMaxWidth().aspectRatio(1f).then(
+                            if (selectedGame?.id == game.id) Modifier.focusRequester(selectedRequester) else Modifier),
+                        onFocused = { onFocused(game.id) }, onClick = { onSelectGame(game) })
+                }
+            }
+        }
+    }
+    if (portrait) Column(Modifier.fillMaxSize().padding(top = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        overview()
+        Box(Modifier.weight(1f)) { collection() }
+    } else Row(Modifier.fillMaxSize().padding(top = if (compact) 16.dp else 40.dp)) {
+        Box(Modifier.weight(.34f)) { overview() }
+        Box(Modifier.weight(.66f)) { collection() }
+    }
+}
+
+@Composable
+internal fun SpaceGameTile(game: GameInfo, selected: Boolean, compact: Boolean, reduceMotion: Boolean,
+    modifier: Modifier, onFocused: () -> Unit, onClick: () -> Unit, portraitArtwork: Boolean = false) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = rememberSpaceInteraction(focused, tile = true, reduceMotion = reduceMotion)
+    val latestOnFocused by rememberUpdatedState(onFocused)
+    LaunchedEffect(interaction.hovered) { if (interaction.hovered) latestOnFocused() }
+    val shape = RoundedCornerShape(14.dp)
+    val focusManager = LocalFocusManager.current
+    // The focus target includes the frame's gutter, so scroll-to-focus cannot crop its glow at a list edge.
+    Box(modifier.onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused() }
+        .hoverable(interaction.source)
+        .onPreviewKeyEvent { handleDpadFocusMove(it, focusManager) }
+        .focusProperties { canFocus = true }
+        .clickable(interactionSource = interaction.source, indication = null, onClick = {
+            latestOnFocused()
+            onClick()
+        })
+        .semantics { contentDescription = game.title; this.selected = selected }
+        .testTag("space-game-${game.id}").padding(12.dp)) {
+        Box((if (portraitArtwork) Modifier.fillMaxWidth().aspectRatio(628f / 888f) else Modifier.size(if (compact) 98.dp else 134.dp))
+            .testTag("space-game-art-${game.id}").then(interaction.modifier)
+            .spaceFocusFrame(focused || interaction.hovered, 14.dp)
+            .border(1.dp, if (selected) SpaceIce.copy(alpha = .3f) else SpaceWhite.copy(alpha = .16f), shape)) {
+            Box(Modifier.fillMaxSize().clip(shape).background(SpaceInk)) {
+                UrlImage(catalogCardImageUrl(game, tvProfile = !portraitArtwork, requestWidth = if (portraitArtwork) 512 else 272), Modifier.fillMaxSize())
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, SpaceInk.copy(alpha = .92f)))))
+                Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(SpaceWhite.copy(alpha = .12f * interaction.emphasis), Color.Transparent))))
+                Text(game.title, color = SpaceWhite, fontSize = if (portraitArtwork) 14.sp else if (compact) 10.sp else 12.sp,
+                    lineHeight = if (portraitArtwork) 19.sp else 15.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(10.dp))
             }
         }
     }
 }
 
 @Composable
-private fun SpaceGameTile(game: GameInfo, selected: Boolean, compact: Boolean, reduceMotion: Boolean,
-    modifier: Modifier, onFocused: () -> Unit, onClick: () -> Unit) {
+internal fun SpaceControl(label: String, modifier: Modifier = Modifier, active: Boolean = false,
+    filled: Boolean = false, rectangular: Boolean = false, enabled: Boolean = true, minHeight: androidx.compose.ui.unit.Dp = if (filled) 52.dp else 42.dp, onClick: () -> Unit, content: (@Composable RowScope.() -> Unit)? = null) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(if (reduceMotion) 0 else 160), label = "space-tile")
-    val shape = RoundedCornerShape(14.dp)
+    val interaction = rememberSpaceInteraction(focused, enabled = enabled)
+    val shape = RoundedCornerShape(if (rectangular) 4.dp else 50.dp)
     val focusManager = LocalFocusManager.current
-    Box(modifier.size(if (compact) 98.dp else 134.dp).graphicsLayer { scaleX = scale; scaleY = scale }
-        .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused() }
-        .clip(shape).background(SpaceInk)
-        .border(if (focused) 2.dp else 1.dp, if (focused) SpaceWhite else if (selected) SpaceIce.copy(alpha = .5f) else SpaceWhite.copy(alpha = .16f), shape)
-        .onPreviewKeyEvent { event ->
-            if (isTvActivateKey(event)) { onClick(); true } else handleDpadFocusMove(event, focusManager)
-        }
-        .clickable(onClick = onClick)
-        .semantics { contentDescription = game.title; this.selected = selected }
-        .testTag("space-game-${game.id}")) {
-        UrlImage(catalogCardImageUrl(game, tvProfile = true, requestWidth = 272), Modifier.fillMaxSize())
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, SpaceInk.copy(alpha = .92f)))))
-        Text(game.title, color = SpaceWhite, fontSize = if (compact) 10.sp else 12.sp, lineHeight = 15.sp,
-            fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.BottomStart).padding(10.dp))
-    }
-}
-
-@Composable
-private fun SpaceControl(label: String, modifier: Modifier = Modifier, active: Boolean = false,
-    filled: Boolean = false, onClick: () -> Unit, content: (@Composable RowScope.() -> Unit)? = null) {
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(50)
-    val focusManager = LocalFocusManager.current
-    Row(modifier.defaultMinSize(minHeight = 42.dp, minWidth = 42.dp)
+    Row(modifier.defaultMinSize(minHeight = minHeight, minWidth = if (filled) 132.dp else 42.dp)
+        .then(interaction.modifier)
         .onFocusChanged { focused = it.isFocused }
-        .clip(shape).background(when { filled -> SpaceWhite; active -> SpaceWhite.copy(alpha = .12f); else -> Color.Transparent })
-        .border(1.dp, if (focused) SpaceIce else Color.Transparent, shape)
+        .hoverable(interaction.source, enabled = enabled)
+        .graphicsLayer { alpha = if (enabled) 1f else .38f }
+        .clip(shape).background(when { filled -> SpaceWhite; else -> SpaceWhite.copy(alpha = (if (active) .12f else 0f) + .13f * interaction.emphasis) })
+        .border(1.dp, SpaceIce.copy(alpha = interaction.emphasis), shape)
         .onPreviewKeyEvent { event ->
-            if (isTvActivateKey(event)) { onClick(); true } else handleDpadFocusMove(event, focusManager)
+            handleDpadFocusMove(event, focusManager)
         }
-        .clickable(onClick = onClick)
+        .focusProperties { canFocus = enabled }
+        .clickable(interactionSource = interaction.source, indication = null, enabled = enabled, onClick = onClick)
         .semantics { contentDescription = label; selected = active }
-        .padding(horizontal = 16.dp, vertical = 9.dp),
+        .padding(horizontal = if (filled) 24.dp else 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides if (filled) SpaceInk else SpaceWhite) {
             if (content != null) content()
             else Text(label, color = if (filled) SpaceInk else SpaceWhite, fontSize = 13.sp, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
         }
-    }
-}
-
-@Composable
-private fun SpaceHint(button: String, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(button, color = SpaceWhite, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Text(label, color = SpaceMuted, fontSize = 10.sp)
     }
 }

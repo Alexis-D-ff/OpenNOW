@@ -191,6 +191,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
@@ -552,7 +553,19 @@ fun OpenNowApp(
     viewModel: OpenNowViewModel,
     onMicrophoneCaptureActiveChange: (Boolean) -> Unit = {},
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    val actualState by viewModel.state.collectAsStateWithLifecycle()
+    val state = rememberDemoPresentation(actualState)
+    CompositionLocalProvider(LocalDemoMode provides actualState.settings.demoMode) {
+        OpenNowAppContent(viewModel, state, onMicrophoneCaptureActiveChange)
+    }
+}
+
+@Composable
+private fun OpenNowAppContent(
+    viewModel: OpenNowViewModel,
+    state: OpenNowUiState,
+    onMicrophoneCaptureActiveChange: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val physicalControllerConnected = rememberPhysicalControllerConnected(enabled = true)
@@ -752,190 +765,192 @@ fun OpenNowApp(
         physicalControllerConnected = physicalControllerConnected,
         runtimeCodecReport = state.codecReport,
     ) {
-        val primaryColor = MaterialTheme.colorScheme.primary
-        CompositionLocalProvider(
-            LocalTvLoadingProfile provides state.androidTvProfile,
-            LocalControllerFocusEnabled provides controllerFocusEnabled,
-            LocalGameDetailsTransitionRegistry provides gameDetailsTransitionRegistry,
-        ) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        if (systemWallpaperVisible) Color.Transparent
-                        else MaterialTheme.colorScheme.background,
-                    )
-                    .drawWithCache {
-                        if (systemWallpaperVisible) {
-                            onDrawBehind { }
-                        } else {
-                            val brush = Brush.radialGradient(
-                                colors = listOf(
-                                    primaryColor.copy(alpha = 0.15f),
-                                    Color.Transparent,
-                                ),
-                                center = Offset(size.width, 0f),
-                                radius = size.width.coerceAtLeast(size.height) * 0.8f,
-                            )
-                            onDrawBehind {
-                                drawRect(brush)
+        SpaceUiTheme(enabled = state.settings.experimentalSpaceUi && state.authSession != null && !showSetupFlow && (state.page != AppPage.Stream || state.pendingStoreChoiceGame != null || state.pendingPrintedWasteGame != null)) {
+            val primaryColor = MaterialTheme.colorScheme.primary
+            CompositionLocalProvider(
+                LocalTvLoadingProfile provides state.androidTvProfile,
+                LocalControllerFocusEnabled provides controllerFocusEnabled,
+                LocalGameDetailsTransitionRegistry provides gameDetailsTransitionRegistry,
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            if (systemWallpaperVisible) Color.Transparent
+                            else MaterialTheme.colorScheme.background,
+                        )
+                        .drawWithCache {
+                            if (systemWallpaperVisible) {
+                                onDrawBehind { }
+                            } else {
+                                val brush = Brush.radialGradient(
+                                    colors = listOf(
+                                        primaryColor.copy(alpha = 0.15f),
+                                        Color.Transparent,
+                                    ),
+                                    center = Offset(size.width, 0f),
+                                    radius = size.width.coerceAtLeast(size.height) * 0.8f,
+                                )
+                                onDrawBehind {
+                                    drawRect(brush)
+                                }
                             }
                         }
-                    }
-            ) {
-                Surface(Modifier.fillMaxSize(), color = Color.Transparent) {
-                    when {
-                        showSetupFlow -> SetupFlowScreen(state = state, viewModel = viewModel)
-                        state.authSession != null -> MainShell(
-                            state = state,
-                            viewModel = viewModel,
-                            musicControl = musicControl,
-                            onMicrophoneCaptureActiveChange = onMicrophoneCaptureActiveChange,
-                        )
-                        else -> LoginScreen(state, viewModel)
-                    }
-                }
-                if (state.awaitingLaunchInputModeChoice) {
-                    StreamLaunchInputModeDialog(
-                        keyboardMouseConnected = connectedPhysicalKeyboardMouse().connected,
-                        websiteClientMode = state.activeStreamSettings?.forProviderInput(state.authSession?.provider?.code)?.browserClientMode == true,
-                        onNativeTouch = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.NativeTouch, remember) },
-                        onController = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.KeyboardMouse, remember) },
-                        onDismiss = viewModel::cancelLaunchInputModeChoice,
-                    )
-                }
-                if (state.pendingGfnMembershipActivation) {
-                    GfnMembershipActivationDialog(
-                        onOpenMemberships = {
-                            if (openExternalUrl(context, GFN_MEMBERSHIP_URL)) {
-                                viewModel.dismissGfnMembershipActivation()
-                            }
-                        },
-                        onDismiss = viewModel::dismissGfnMembershipActivation,
-                    )
-                }
-                state.sessionReport?.takeIf { showSessionReport }?.let { report ->
-                    SessionReportDialog(
-                        report = report,
-                        onDismiss = { dontShowAgain ->
-                            if (dontShowAgain) {
-                                viewModel.updateSettings(
-                                    state.settings.copy(showSessionReportAfterStream = false),
-                                )
-                            }
-                            viewModel.dismissSessionReport()
-                        },
-                        onReportBug = { dontShowAgain ->
-                            if (dontShowAgain) {
-                                viewModel.updateSettings(
-                                    state.settings.copy(showSessionReportAfterStream = false),
-                                )
-                            }
-                            viewModel.resetBugReportSubmission()
-                            completedSessionBugReportOpen = true
-                        },
-                    )
-                }
-                if (showCompletedSessionBugReport) {
-                    CompletedSessionBugReportDialog(
-                        submission = state.bugReportSubmission,
-                        versionCheck = state.bugReportVersionCheck,
-                        update = state.androidUpdate,
-                        experimentalNvstEnabled = state.settings.stream.experimentalNvst,
-                        onSubmit = { title, description, knownIssueOverrideKey, details, files ->
-                            viewModel.submitBugReport(title, description, knownIssueOverrideKey, details, files)
-                        },
-                        onReset = viewModel::resetBugReportSubmission,
-                        onVersionCheck = viewModel::verifyBugReportVersion,
-                        onOpenUpdate = viewModel::performAndroidUpdatePrimaryAction,
-                        preflightProvider = {
-                            buildBugReportPreflightDeck(
-                                BugReportPreflightEvidence(
-                                    requestedSettings = state.settings.stream,
-                                    recommendedSettings = state.recommendedStreamSettings,
-                                    nativeLowLatencyDecoderEnabled = state.settings.nativeLowLatencyDecoder,
-                                    runtimeDiagnostics = AndroidRuntimeDiagnostics.snapshot(context),
-                                    sessionReport = state.sessionReport,
-                                    codecReport = state.codecReport,
-                                    androidTvProfile = state.androidTvProfile,
-                                    serverZone = state.streamSession?.zone,
-                                    manuallySelectedServer = state.manuallySelectedServerForReport,
-                                    inputDiagnostics = NativeInputDiagnostics.snapshot(),
-                                ),
+                ) {
+                    Surface(Modifier.fillMaxSize(), color = Color.Transparent) {
+                        when {
+                            showSetupFlow -> SetupFlowScreen(state = state, viewModel = viewModel)
+                            state.authSession != null -> MainShell(
+                                state = state,
+                                viewModel = viewModel,
+                                musicControl = musicControl,
+                                onMicrophoneCaptureActiveChange = onMicrophoneCaptureActiveChange,
                             )
-                        },
-                        onDismiss = {
-                            if (!state.bugReportSubmission.uploading) {
-                                completedSessionBugReportOpen = false
-                                viewModel.dismissSessionReport()
-                                viewModel.resetBugReportSubmission()
-                            }
-                        },
-                    )
-                }
-                updatePromptKey?.takeIf { showUpdatePrompt }?.let { promptKey ->
-                    AndroidUpdatePromptDialog(
-                        update = state.androidUpdate,
-                        onPrimary = {
-                            hiddenUpdatePromptKey = promptKey
-                            when (state.androidUpdate.status) {
-                                AndroidUpdateStatus.Available -> viewModel.performAndroidUpdatePrimaryAction()
-                                AndroidUpdateStatus.Downloaded -> viewModel.installAndroidUpdate()
-                                else -> Unit
-                            }
-                        },
-                        onDetails = {
-                            hiddenUpdatePromptKey = promptKey
-                            viewModel.openAndroidUpdateSettings()
-                        },
-                        onDismiss = viewModel::dismissAndroidUpdateNotice,
-                    )
-                }
-                if (showChangelogPrompt) {
-                    ChangelogDialog(pendingChangelogs) {
-                        changelogRepository.markSeen()
-                        pendingChangelogs = emptyList()
+                            else -> LoginScreen(state, viewModel)
+                        }
                     }
-                }
-                if (!messageCheckBlocked && !showSetupFlow && !showUpdatePrompt && !showChangelogPrompt && !showSessionReport &&
-                    !showCompletedSessionBugReport && !diagnosticDialogVisible &&
-                    state.deviceLoginPrompt == null && state.pendingStoreChoiceGame == null &&
-                    state.pendingMembershipNotice == null && state.pendingPrintedWasteGame == null &&
-                    !state.pendingGfnMembershipActivation &&
-                    state.pendingBatteryOptimizationLaunch == null && state.pendingLaunchRecovery == null &&
-                    state.error == null && !state.loginToolsVisible) {
-                    state.appMessage?.let { message ->
-                        AlertDialog(
-                            onDismissRequest = {},
-                            title = { Text(message.title) },
-                            text = {
-                                Text(
-                                    formattedAppMessageBody(
-                                        message.body,
-                                        linkColor = MaterialTheme.colorScheme.primary,
-                                        redColor = MaterialTheme.colorScheme.error,
+                    if (state.awaitingLaunchInputModeChoice) {
+                        StreamLaunchInputModeDialog(
+                            keyboardMouseConnected = connectedPhysicalKeyboardMouse().connected,
+                            websiteClientMode = state.activeStreamSettings?.forProviderInput(state.authSession?.provider?.code)?.browserClientMode == true,
+                            onNativeTouch = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.NativeTouch, remember) },
+                            onController = { remember -> viewModel.chooseLaunchInputMode(StreamInputMode.KeyboardMouse, remember) },
+                            onDismiss = viewModel::cancelLaunchInputModeChoice,
+                        )
+                    }
+                    if (state.pendingGfnMembershipActivation) {
+                        GfnMembershipActivationDialog(
+                            onOpenMemberships = {
+                                if (openExternalUrl(context, GFN_MEMBERSHIP_URL)) {
+                                    viewModel.dismissGfnMembershipActivation()
+                                }
+                            },
+                            onDismiss = viewModel::dismissGfnMembershipActivation,
+                        )
+                    }
+                    state.sessionReport?.takeIf { showSessionReport }?.let { report ->
+                        SessionReportDialog(
+                            report = report,
+                            onDismiss = { dontShowAgain ->
+                                if (dontShowAgain) {
+                                    viewModel.updateSettings(
+                                        state.settings.copy(showSessionReportAfterStream = false),
+                                    )
+                                }
+                                viewModel.dismissSessionReport()
+                            },
+                            onReportBug = { dontShowAgain ->
+                                if (dontShowAgain) {
+                                    viewModel.updateSettings(
+                                        state.settings.copy(showSessionReportAfterStream = false),
+                                    )
+                                }
+                                viewModel.resetBugReportSubmission()
+                                completedSessionBugReportOpen = true
+                            },
+                        )
+                    }
+                    if (showCompletedSessionBugReport) {
+                        CompletedSessionBugReportDialog(
+                            submission = state.bugReportSubmission,
+                            versionCheck = state.bugReportVersionCheck,
+                            update = state.androidUpdate,
+                            experimentalNvstEnabled = state.settings.stream.experimentalNvst,
+                            onSubmit = { title, description, knownIssueOverrideKey, details, files ->
+                                viewModel.submitBugReport(title, description, knownIssueOverrideKey, details, files)
+                            },
+                            onReset = viewModel::resetBugReportSubmission,
+                            onVersionCheck = viewModel::verifyBugReportVersion,
+                            onOpenUpdate = viewModel::performAndroidUpdatePrimaryAction,
+                            preflightProvider = {
+                                buildBugReportPreflightDeck(
+                                    BugReportPreflightEvidence(
+                                        requestedSettings = state.settings.stream,
+                                        recommendedSettings = state.recommendedStreamSettings,
+                                        nativeLowLatencyDecoderEnabled = state.settings.nativeLowLatencyDecoder,
+                                        runtimeDiagnostics = AndroidRuntimeDiagnostics.snapshot(context),
+                                        sessionReport = state.sessionReport,
+                                        codecReport = state.codecReport,
+                                        androidTvProfile = state.androidTvProfile,
+                                        serverZone = state.streamSession?.zone,
+                                        manuallySelectedServer = state.manuallySelectedServerForReport,
+                                        inputDiagnostics = NativeInputDiagnostics.snapshot(),
                                     ),
-                                    Modifier.verticalScroll(rememberScrollState()),
                                 )
                             },
-                            confirmButton = {
-                                TextButton(onClick = { viewModel.acknowledgeAppMessage(message) }) {
-                                    Text(stringResource(android.R.string.ok))
+                            onDismiss = {
+                                if (!state.bugReportSubmission.uploading) {
+                                    completedSessionBugReportOpen = false
+                                    viewModel.dismissSessionReport()
+                                    viewModel.resetBugReportSubmission()
                                 }
                             },
                         )
                     }
+                    updatePromptKey?.takeIf { showUpdatePrompt }?.let { promptKey ->
+                        AndroidUpdatePromptDialog(
+                            update = state.androidUpdate,
+                            onPrimary = {
+                                hiddenUpdatePromptKey = promptKey
+                                when (state.androidUpdate.status) {
+                                    AndroidUpdateStatus.Available -> viewModel.performAndroidUpdatePrimaryAction()
+                                    AndroidUpdateStatus.Downloaded -> viewModel.installAndroidUpdate()
+                                    else -> Unit
+                                }
+                            },
+                            onDetails = {
+                                hiddenUpdatePromptKey = promptKey
+                                viewModel.openAndroidUpdateSettings()
+                            },
+                            onDismiss = viewModel::dismissAndroidUpdateNotice,
+                        )
+                    }
+                    if (showChangelogPrompt) {
+                        ChangelogDialog(pendingChangelogs) {
+                            changelogRepository.markSeen()
+                            pendingChangelogs = emptyList()
+                        }
+                    }
+                    if (!messageCheckBlocked && !showSetupFlow && !showUpdatePrompt && !showChangelogPrompt && !showSessionReport &&
+                        !showCompletedSessionBugReport && !diagnosticDialogVisible &&
+                        state.deviceLoginPrompt == null && state.pendingStoreChoiceGame == null &&
+                        state.pendingMembershipNotice == null && state.pendingPrintedWasteGame == null &&
+                        !state.pendingGfnMembershipActivation &&
+                        state.pendingBatteryOptimizationLaunch == null && state.pendingLaunchRecovery == null &&
+                        state.error == null && !state.loginToolsVisible) {
+                        state.appMessage?.let { message ->
+                            AlertDialog(
+                                onDismissRequest = {},
+                                title = { Text(message.title) },
+                                text = {
+                                    Text(
+                                        formattedAppMessageBody(
+                                            message.body,
+                                            linkColor = MaterialTheme.colorScheme.primary,
+                                            redColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                        Modifier.verticalScroll(rememberScrollState()),
+                                    )
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = { viewModel.acknowledgeAppMessage(message) }) {
+                                        Text(stringResource(android.R.string.ok))
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    UselessMascotOverlay(
+                        settings = state.settings,
+                        allowed = !showSetupFlow && state.authSession != null &&
+                            state.streamStatus != "streaming" && state.streamStatus != "connecting",
+                    )
+                    DiagnosticShareDialog(
+                        state = state,
+                        onUpload = viewModel::uploadDiagnosticShare,
+                        onDismiss = viewModel::dismissDiagnosticShare,
+                    )
                 }
-                UselessMascotOverlay(
-                    settings = state.settings,
-                    allowed = !showSetupFlow && state.authSession != null &&
-                        state.streamStatus != "streaming" && state.streamStatus != "connecting",
-                )
-                DiagnosticShareDialog(
-                    state = state,
-                    onUpload = viewModel::uploadDiagnosticShare,
-                    onDismiss = viewModel::dismissDiagnosticShare,
-                )
             }
         }
     }
@@ -959,7 +974,8 @@ private fun MainShell(
         state.pendingLaunchRecovery != null
     val tvProfile = state.androidTvProfile
     val physicalControllerConnected = rememberPhysicalControllerConnected(enabled = !inStream)
-    val spaceUi = shouldUseSpaceUi(state.settings.experimentalSpaceUi, physicalControllerConnected, state.page)
+    val spaceUi = shouldUseSpaceUi(state.settings.experimentalSpaceUi, state.page)
+    val spaceUiStateHolder = rememberSaveableStateHolder()
     val navAudioController = remember(context) { AndroidNerdAudioController(context.applicationContext) }
     var visibleSearchTarget by remember { mutableStateOf<SearchTarget?>(null) }
     var settingsSearchQuery by remember { mutableStateOf("") }
@@ -1025,7 +1041,7 @@ private fun MainShell(
         viewModel.clearSelectedGame()
     }
     BackHandler(
-        enabled = (tvProfile || physicalControllerConnected) &&
+        enabled = (spaceUi || tvProfile || physicalControllerConnected) &&
             !inStream &&
             state.selectedGame == null &&
             !modalPickerOpen &&
@@ -1075,7 +1091,7 @@ private fun MainShell(
 
         Scaffold(
             containerColor = Color.Transparent,
-            contentWindowInsets = if (streamingActive || tvProfile) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
+            contentWindowInsets = if (streamingActive || tvProfile || (spaceUi && horizontalChrome)) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
             bottomBar = {
                 if (!inStream && !showNavigationRail && !spaceUi) {
                     Column {
@@ -1142,81 +1158,87 @@ private fun MainShell(
             ) {
                 if (spaceUi) {
                     Box(Modifier.fillMaxSize().padding(screenEdgePadding)) {
-                        SpaceUiScreen(
-                            state = state,
-                            onNavigate = ::navigateFromAppChrome,
-                            onSelectGame = { viewModel.selectGame(it) },
-                            onRefresh = viewModel::refreshGames,
-                            onResumeSession = viewModel::resumeActiveSession,
-                            onSearchChange = { query ->
-                                if (state.page == AppPage.Library) viewModel.setLibrarySearch(query)
-                                else viewModel.setCatalogSearch(query)
-                            },
-                            inputEnabled = state.selectedGame == null && !modalPickerOpen,
-                            catalogControls = {
-                                if (state.page == AppPage.Library) {
-                                    val touchLabel = stringResource(R.string.catalog_filter_touch_controls)
-                                    val options = remember(state.libraryGames, touchLabel) {
-                                        libraryStoreFilterOptions(state.libraryGames, touchLabel)
-                                    }
-                                    CatalogSortFilterMenu(
-                                        sortOptions = librarySortOptions(),
-                                        selectedSortId = state.librarySortId,
-                                        filterOptions = options,
-                                        selectedFilterIds = state.libraryFilterIds,
-                                        onSortChange = viewModel::setLibrarySort,
-                                        onFilterToggle = viewModel::toggleLibraryFilter,
-                                    )
-                                } else {
-                                    val options = rememberCatalogFilterOptions(
-                                        remember(state.catalogResult.filterGroups) {
-                                            catalogVisibleFilterGroups(state.catalogResult.filterGroups)
-                                        },
-                                    )
-                                    CatalogSortFilterMenu(
-                                        sortOptions = state.catalogResult.sortOptions,
-                                        selectedSortId = state.catalogSortId,
-                                        filterOptions = options,
-                                        selectedFilterIds = state.catalogFilterIds,
-                                        onSortChange = viewModel::setCatalogSort,
-                                        onFilterToggle = viewModel::toggleCatalogFilter,
-                                    )
-                                }
-                            },
-                            settingsContent = {
-                                SettingsScreen(
+                        spaceUiStateHolder.SaveableStateProvider("space-ui") {
+                            SpaceUiTheme {
+                                SpaceUiScreen(
                                     state = state,
-                                    viewModel = viewModel,
-                                    tvProfile = tvProfile,
-                                    searchRequested = visibleSearchTarget == SearchTarget.Settings,
-                                    searchQuery = settingsSearchQuery,
-                                    backRequestToken = settingsBackRequestToken,
-                                    onSearchQueryChange = { settingsSearchQuery = it },
-                                    onDetailRouteChange = { settingsDetailRouteOpen = it },
+                                    onNavigate = ::navigateFromAppChrome,
+                                    onSelectGame = { viewModel.selectGame(it) },
+                                    onRefresh = viewModel::refreshGames,
+                                    onResumeSession = viewModel::resumeActiveSession,
+                                    onOpenLocalApps = viewModel::openInterfaceSettings,
+                                    onSearchChange = { query ->
+                                        if (state.page == AppPage.Library) viewModel.setLibrarySearch(query)
+                                        else viewModel.setCatalogSearch(query)
+                                    },
+                                    inputEnabled = state.selectedGame == null && !modalPickerOpen,
+                                    catalogControls = {
+                                        if (state.page == AppPage.Library) {
+                                            val touchLabel = stringResource(R.string.catalog_filter_touch_controls)
+                                            val options = remember(state.libraryGames, touchLabel, state.settings.demoMode) {
+                                                libraryStoreFilterOptions(state.libraryGames, touchLabel, state.settings.demoMode)
+                                            }
+                                            CatalogSortFilterMenu(
+                                                sortOptions = librarySortOptions(),
+                                                selectedSortId = state.librarySortId,
+                                                filterOptions = options,
+                                                selectedFilterIds = state.libraryFilterIds,
+                                                onSortChange = viewModel::setLibrarySort,
+                                                onFilterToggle = viewModel::toggleLibraryFilter,
+                                            )
+                                        } else {
+                                            val options = rememberCatalogFilterOptions(
+                                                remember(state.catalogResult.filterGroups) {
+                                                    catalogVisibleFilterGroups(state.catalogResult.filterGroups)
+                                                },
+                                            )
+                                            CatalogSortFilterMenu(
+                                                sortOptions = state.catalogResult.sortOptions,
+                                                selectedSortId = state.catalogSortId,
+                                                filterOptions = options,
+                                                selectedFilterIds = state.catalogFilterIds,
+                                                onSortChange = viewModel::setCatalogSort,
+                                                onFilterToggle = viewModel::toggleCatalogFilter,
+                                            )
+                                        }
+                                    },
+                                    settingsContent = {
+                                        SettingsScreen(
+                                            state = state,
+                                            viewModel = viewModel,
+                                            tvProfile = tvProfile,
+                                            searchRequested = visibleSearchTarget == SearchTarget.Settings,
+                                            searchQuery = settingsSearchQuery,
+                                            backRequestToken = settingsBackRequestToken,
+                                            onSearchQueryChange = { settingsSearchQuery = it },
+                                            onDetailRouteChange = { settingsDetailRouteOpen = it },
+                                            spacePresentation = true,
+                                        )
+                                    },
+                                    libraryContent = {
+                                        if (state.settings.localAppsEnabled && BuildConfig.LOCAL_APP_LAUNCHER_SUPPORTED) {
+                                            LocalAppsShelf(
+                                                packageNames = state.settings.localAppPackageNames,
+                                                collapsed = state.settings.localAppsCollapsed,
+                                                onCollapsedChange = viewModel::setLocalAppsCollapsed,
+                                                onAddPackage = viewModel::addLocalApp,
+                                                onRemovePackage = viewModel::removeLocalApp,
+                                                horizontalPadding = 0.dp,
+                                            )
+                                        }
+                                    },
+                                    queueContent = {
+                                        if (showMinimizedQueueDock) {
+                                            MinimizedQueueDock(
+                                                state = state,
+                                                onRestore = viewModel::restoreStreamLaunch,
+                                                onCancel = { viewModel.stopStream(StreamStopOrigin.MinimizedQueueCancel) },
+                                            )
+                                        }
+                                    },
                                 )
-                            },
-                            libraryContent = {
-                                if (state.settings.localAppsEnabled && BuildConfig.LOCAL_APP_LAUNCHER_SUPPORTED) {
-                                    LocalAppsShelf(
-                                        packageNames = state.settings.localAppPackageNames,
-                                        collapsed = state.settings.localAppsCollapsed,
-                                        onCollapsedChange = viewModel::setLocalAppsCollapsed,
-                                        onAddPackage = viewModel::addLocalApp,
-                                        onRemovePackage = viewModel::removeLocalApp,
-                                        horizontalPadding = 0.dp,
-                                    )
-                                }
-                            },
-                            queueContent = {
-                                if (showMinimizedQueueDock) {
-                                    MinimizedQueueDock(
-                                        state = state,
-                                        onRestore = viewModel::restoreStreamLaunch,
-                                        onCancel = { viewModel.stopStream(StreamStopOrigin.MinimizedQueueCancel) },
-                                    )
-                                }
-                            },
-                        )
+                            }
+                        }
                     }
                 } else Row(
                     Modifier
@@ -1317,8 +1339,8 @@ private fun MainShell(
                                             )
                                         }
                                         val touchFilterLabel = stringResource(R.string.catalog_filter_touch_controls)
-                                        val libraryFilterOptions = remember(orderedLibraryGames, touchFilterLabel) {
-                                            libraryStoreFilterOptions(orderedLibraryGames, touchFilterLabel)
+                                        val libraryFilterOptions = remember(orderedLibraryGames, touchFilterLabel, state.settings.demoMode) {
+                                            libraryStoreFilterOptions(orderedLibraryGames, touchFilterLabel, state.settings.demoMode)
                                         }
                                         Spacer(Modifier.weight(1f))
                                         CatalogSortFilterMenu(
@@ -1415,7 +1437,7 @@ private fun MainShell(
                 }
                 state.selectedGame?.takeIf { !inStream && !modalPickerOpen }?.let { game ->
                     val libraryVariants = game.variants.filter(::isOwnedGameVariant)
-                    val libraryRemoval = state.page == AppPage.Library &&
+                    val libraryRemoval = !state.settings.demoMode && state.page == AppPage.Library &&
                         state.libraryGames.any { gameTrackingKey(it) == gameTrackingKey(game) } &&
                         libraryVariants.isNotEmpty()
                     val removeLabel = when (state.selectedGameRail) {
@@ -1451,7 +1473,21 @@ private fun MainShell(
                     ControllerModalOverlay(onDismissRequest = viewModel::clearSelectedGame) {
                         // Keep details in the app's window so the activated artwork and destination
                         // banner share coordinates and the first visible frame follows the haptic.
-                        GameDetailsSheet(
+                        if (spaceUi) SpaceGameHub(
+                            game = game,
+                            favorite = game.id in state.settings.favoriteGameIds,
+                            defaultVariantId = state.settings.defaultGameVariantIds[game.id],
+                            onPlay = viewModel::play,
+                            onChooseStore = viewModel::chooseStore,
+                            onFavorite = viewModel::updateFavorites,
+                            connectedTvName = state.localTvConnector.connectedTvName,
+                            onPlayOnTv = viewModel::playOnLocalTv,
+                            removeLabel = removeLabel,
+                            removeConfirmationText = removeConfirmationText,
+                            removeEnabled = state.removingLibraryGameId == null,
+                            onRemove = onRemove,
+                            onDismiss = viewModel::clearSelectedGame,
+                        ) else GameDetailsSheet(
                             game = game,
                             favorite = game.id in state.settings.favoriteGameIds,
                             defaultVariantId = state.settings.defaultGameVariantIds[game.id],
@@ -2086,7 +2122,7 @@ private fun TopBarRefreshButton(
 }
 
 @Composable
-private fun TopBarProfileMenu(
+internal fun TopBarProfileMenu(
     state: OpenNowUiState,
     focusRequester: FocusRequester,
     nextFocusRequester: FocusRequester?,

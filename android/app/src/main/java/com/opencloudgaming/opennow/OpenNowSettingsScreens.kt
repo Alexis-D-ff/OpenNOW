@@ -54,7 +54,7 @@ import androidx.compose.material.icons.outlined.Tv
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.opencloudgaming.opennow.SettingsOutlinedButton as OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -309,6 +309,7 @@ internal fun SettingsScreen(
     backRequestToken: Int,
     onSearchQueryChange: (String) -> Unit,
     onDetailRouteChange: (Boolean) -> Unit,
+    spacePresentation: Boolean = false,
 ) {
     var showSessionProxyWarning by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
@@ -397,7 +398,7 @@ internal fun SettingsScreen(
         if (detailOpen && !tvProfile) {
             detailListState.scrollToItem(0)
         }
-        if (detailOpen && controllerNavigationEnabled) {
+        if (detailOpen && controllerNavigationEnabled && !spacePresentation) {
             delay(90)
             runCatching { detailFocusRequester.requestFocus() }
         }
@@ -430,7 +431,17 @@ internal fun SettingsScreen(
                 },
             )
         }
-        if (tvProfile) {
+        if (spacePresentation) {
+            SpaceSettingsLayout(
+                state = state,
+                viewModel = viewModel,
+                selectedCategory = selectedCategory ?: SettingsCategory.General,
+                categories = categories,
+                detailFocusRequester = detailFocusRequester,
+                onSelectCategory = { onSearchQueryChange(""); selectedCategory = it },
+                showSessionProxyWarning = { showSessionProxyWarning = true },
+            )
+        } else if (tvProfile) {
             SwipeToRefreshContainer(
                 refreshing = state.settingsRefreshing,
                 onRefresh = viewModel::refreshSettings,
@@ -541,6 +552,31 @@ internal fun SettingsScreen(
         }
     }
 }
+
+/** Console settings keep the section rail visible beside the live controls. */
+@Composable
+private fun SpaceSettingsLayout(
+    state: OpenNowUiState,
+    viewModel: OpenNowViewModel,
+    selectedCategory: SettingsCategory,
+    categories: List<SettingsCategory>,
+    detailFocusRequester: FocusRequester,
+    onSelectCategory: (SettingsCategory) -> Unit,
+    showSessionProxyWarning: () -> Unit,
+) {
+    val sections = categories.map { category ->
+        SpaceSettingsSection(category.name, stringResource(category.titleRes), stringResource(category.summaryRes), category.icon)
+    }
+    SpaceSettingsFrame(sections, selectedCategory.name,
+        onSelect = { id -> onSelectCategory(SettingsCategory.valueOf(id)) }) {
+        Column(Modifier.fillMaxWidth().focusRequester(detailFocusRequester).focusGroup(),
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            SettingsContent(state, viewModel, searchQuery = "", selectedCategory = selectedCategory,
+                onSelectCategory = onSelectCategory, showSessionProxyWarning = showSessionProxyWarning)
+        }
+    }
+}
+
 
 /**
  * Slides only the incoming Settings route using layout placement.
@@ -681,7 +717,6 @@ private fun SettingsContent(
     }
     val gyroscopeAvailable = remember(context) { hasMobileGyroscope(context) }
     val deviceHasBattery = rememberDeviceHasBattery()
-    val spaceControllerConnected = rememberPhysicalControllerConnected(enabled = true)
     val fallbackMembershipTier = state.authSession?.user?.membershipTier
     var pendingMicrophoneMode by remember { mutableStateOf<MicrophoneMode?>(null) }
     var showStreamMenuShortcutDialog by remember { mutableStateOf(false) }
@@ -1983,12 +2018,14 @@ private fun SettingsContent(
                     showTitle = false,
                 )
             }
-    CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, stringResource(R.string.settings_experimental_streaming), "experimental", "stream", "network", "dynamic", "adjustment", "nvst", "l4s", "session", "launch", "failure", "battery", "optimization", "background", "allow", "run") {
-                Text(
-                    stringResource(R.string.settings_experimental_streaming_warning),
-                    color = SettingsTextMuted,
-                    style = MaterialTheme.typography.labelSmall,
-                )
+    CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, stringResource(R.string.settings_experimental_streaming), "experimental", "stream", "network", "dynamic", "adjustment", "nvst", "l4s", "space", "ui", "console", "session", "launch", "failure", "battery", "optimization", "background", "allow", "run") {
+                if (!LocalSpaceUiPresentation.current) {
+                    Text(
+                        stringResource(R.string.settings_experimental_streaming_warning),
+                        color = SettingsTextMuted,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
                 SettingSwitch(
                     label = "NVST transport (Experimental)",
                     checked = settings.stream.experimentalNvst,
@@ -2030,6 +2067,10 @@ private fun SettingsContent(
                 ) {
                     viewModel.updateStreamSettings { s -> s.copy(enableL4S = it) }
                 }
+                SpaceUiSettingsToggle(
+                    checked = settings.experimentalSpaceUi,
+                    onCheckedChange = { viewModel.updateSettings(settings.copy(experimentalSpaceUi = it)) },
+                )
                 if (deviceHasBattery) {
                     Text(
                         text = stringResource(R.string.settings_battery_optimization_title),
@@ -2039,13 +2080,6 @@ private fun SettingsContent(
                     BatteryOptimizationPanel()
                 }
             }
-    CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, stringResource(R.string.space_ui_experimental), "experimental", "space", "ui", "controller", "console") {
-        SpaceUiSettingsToggle(
-            checked = settings.experimentalSpaceUi,
-            controllerConnected = spaceControllerConnected,
-            onCheckedChange = { viewModel.updateSettings(settings.copy(experimentalSpaceUi = it)) },
-        )
-    }
     CategorySettingsSection(selectedCategory, SettingsCategory.Advanced, searchQuery, "Codec Diagnostics", "codec", "diagnostics", "probe", "av1", "h264", "h265", "hevc", "decode") {
                     CodecDiagnosticsPanel(state.codecReport)
                 }
@@ -2071,7 +2105,7 @@ private fun SettingsContent(
                 ThanksPanel()
             }
     if (settings.developerOptionsUnlocked) {
-        CategorySettingsSection(selectedCategory, SettingsCategory.Developer, searchQuery, stringResource(R.string.settings_category_developer), "developer", "developer options", "debug", "reset", "wipe", "diagnostics", "runtime", "environment", "flows", "onboarding", "cache") {
+        CategorySettingsSection(selectedCategory, SettingsCategory.Developer, searchQuery, stringResource(R.string.settings_category_developer), "developer", "developer options", "demo", "mask", "screenshots", "debug", "reset", "wipe", "diagnostics", "runtime", "environment", "flows", "onboarding", "cache") {
                     DeveloperOptionsPanel(state = state, viewModel = viewModel)
                 }
     }
