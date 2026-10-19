@@ -277,13 +277,7 @@ impl TurnClient {
                 let _ = socket.send(bytes);
             }
             Link::Connecting { .. } | Link::Tcp(_) | Link::Tls(_) => {
-                if self.write_backlog.len() + bytes.len() <= MAX_STREAM_BUFFER {
-                    self.write_backlog.extend_from_slice(bytes);
-                    if bytes.len() % 4 != 0 && stun::is_channel_data(bytes) {
-                        self.write_backlog
-                            .resize(self.write_backlog.len() + (4 - bytes.len() % 4), 0);
-                    }
-                }
+                admit_frame(&mut self.write_backlog, bytes);
                 self.flush_stream();
             }
             Link::Closed => {}
@@ -294,23 +288,8 @@ impl TurnClient {
         let result = match &mut self.link {
             Link::Tcp(stream) => write_some(stream, &mut self.write_backlog),
             Link::Tls(stream) => {
-                if !self.write_backlog.is_empty() {
-                    let backlog = std::mem::take(&mut self.write_backlog);
-                    let _ = stream.conn.writer().write_all(&backlog);
-                }
-                let mut result = Ok(());
-                while stream.conn.wants_write() {
-                    match stream.conn.write_tls(&mut stream.sock) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(error) => {
-                            result = Err(error);
-                            break;
-                        }
-                    }
-                }
-                result
+                let stream = &mut **stream;
+                flush_tls(&mut stream.conn, &mut stream.sock, &mut self.write_backlog)
             }
             _ => Ok(()),
         };
@@ -724,6 +703,52 @@ fn refresh_delay(lifetime: u32) -> Duration {
     Duration::from_secs(u64::from(lifetime.saturating_sub(60).max(30)))
 }
 
+/// Queues one whole STUN message or ChannelData frame, padded to 4 bytes as streams require.
+/// A frame that does not fit the bound is dropped whole, so the stream framing never breaks.
+fn admit_frame(backlog: &mut Vec<u8>, frame: &[u8]) -> bool {
+    let padding = if stun::is_channel_data(frame) {
+        (4 - frame.len() % 4) % 4
+    } else {
+        0
+    };
+    if backlog.len() + frame.len() + padding > MAX_STREAM_BUFFER {
+        return false;
+    }
+    backlog.extend_from_slice(frame);
+    backlog.resize(backlog.len() + padding, 0);
+    true
+}
+
+/// Moves as much of 'backlog' into rustls as it accepts and writes TLS records to 'socket'.
+/// Bytes rustls refuses stay at the front of 'backlog' for the next flush.
+fn flush_tls(
+    connection: &mut ClientConnection,
+    socket: &mut impl Write,
+    backlog: &mut Vec<u8>,
+) -> io::Result<()> {
+    loop {
+        while !backlog.is_empty() {
+            let accepted = connection.writer().write(backlog)?;
+            if accepted == 0 {
+                break;
+            }
+            backlog.drain(..accepted);
+        }
+        let mut wrote = false;
+        while connection.wants_write() {
+            match connection.write_tls(socket) {
+                Ok(0) => break,
+                Ok(_) => wrote = true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        if backlog.is_empty() || !wrote {
+            return Ok(());
+        }
+    }
+}
+
 fn write_some(stream: &mut TcpStream, backlog: &mut Vec<u8>) -> io::Result<()> {
     while !backlog.is_empty() {
         match stream.write(backlog) {
@@ -813,5 +838,119 @@ mod tests {
         assert_eq!(frames[0], stun);
         assert_eq!(frames[1], [0x40, 0x00, 0x00, 0x03, 9, 8, 7, 0]);
         assert_eq!(buffer, [0x40, 0x01, 0x00]);
+    }
+
+    /// Accepts at most three bytes per write and refuses every other call.
+    #[derive(Default)]
+    struct TrickleSocket {
+        written: Vec<u8>,
+        calls: usize,
+    }
+
+    impl Write for TrickleSocket {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls % 2 == 0 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let accepted = bytes.len().min(3);
+            self.written.extend_from_slice(&bytes[..accepted]);
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    macro_rules! feed {
+        ($source:expr, $connection:expr) => {{
+            let mut bytes = &$source[..];
+            while !bytes.is_empty() {
+                $connection.read_tls(&mut bytes).unwrap();
+                $connection.process_new_packets().unwrap();
+            }
+            $source.clear();
+        }};
+    }
+
+    #[test]
+    fn tls_flush_keeps_refused_bytes_and_whole_frames() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certified.cert.der().clone()).unwrap();
+        let mut client = ClientConnection::new(
+            tls_config_with_roots(roots),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        client.set_buffer_limit(Some(4 * 1024));
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key)
+        .unwrap();
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+
+        let mut backlog = Vec::new();
+        let mut expected = Vec::new();
+        let mut admitted = 0;
+        for index in 0..200_u16 {
+            let mut frame = vec![0x40, 0x00];
+            frame.extend_from_slice(&1_001_u16.to_be_bytes());
+            frame.extend(std::iter::repeat_n(index as u8, 1_001));
+            let before = backlog.len();
+            if admit_frame(&mut backlog, &frame) {
+                admitted += 1;
+                expected.extend_from_slice(&backlog[before..]);
+            } else {
+                assert_eq!(
+                    backlog.len(),
+                    before,
+                    "a refused frame leaves no partial bytes"
+                );
+            }
+        }
+        assert!(admitted < 200 && backlog.len() <= MAX_STREAM_BUFFER);
+        assert_eq!(expected.len() % 4, 0);
+
+        let mut socket = TrickleSocket::default();
+        let mut received = Vec::new();
+        for _ in 0..2_000_000 {
+            flush_tls(&mut client, &mut socket, &mut backlog).unwrap();
+            feed!(socket.written, server);
+            let mut to_client = Vec::new();
+            while server.wants_write() {
+                server.write_tls(&mut to_client).unwrap();
+            }
+            feed!(to_client, client);
+            let mut chunk = [0_u8; 16 * 1024];
+            loop {
+                match server.reader().read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(length) => received.extend_from_slice(&chunk[..length]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            if received.len() >= expected.len() && backlog.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(received.len(), expected.len());
+        assert!(
+            received == expected,
+            "the TLS stream carries every admitted frame intact"
+        );
+        let frames = take_stream_frames(&mut received);
+        assert_eq!(frames.len(), admitted);
+        for (index, frame) in frames.iter().enumerate() {
+            assert!(frame[4..4 + 1_001].iter().all(|byte| *byte == index as u8));
+        }
     }
 }

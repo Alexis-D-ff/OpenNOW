@@ -259,6 +259,11 @@ struct HostPeer {
     created_at: Instant,
     sent_bytes_at_stats: u64,
     send_kbps: f64,
+    /// Host-extended sequence where this peer's video numbering starts. A peer's SRTP
+    /// context starts at rollover counter zero, so each peer counts from the cycle it joined
+    /// in while the low 16 bits stay the sender's wire sequence.
+    video_base: Option<u64>,
+    audio_base: Option<u64>,
 }
 
 fn path_fields(path: Option<&Path>) -> (Value, Value) {
@@ -269,8 +274,8 @@ fn path_fields(path: Option<&Path>) -> (Value, Value) {
     }
 }
 
-/// Extends a 16-bit RTP sequence to the value closest to 'last'. The first packet starts at
-/// rollover counter zero, which is where the guest's SRTP context starts too.
+/// Extends a 16-bit RTP sequence to the value closest to 'last'. This is the host's own
+/// numbering; each peer rebases it to the cycle it joined in.
 fn extend_seq(last: &mut Option<u64>, wire: u16) -> u64 {
     let extended = match *last {
         None => u64::from(wire),
@@ -424,6 +429,8 @@ impl HostWorker {
                     created_at: now,
                     sent_bytes_at_stats: 0,
                     send_kbps: 0.0,
+                    video_base: None,
+                    audio_base: None,
                 });
                 self.emit_state(self.peers.len() - 1);
                 Ok(())
@@ -546,27 +553,30 @@ impl HostWorker {
             CoopMediaKind::Video => (extend_seq(&mut self.video_seq, wire), VIDEO_PT),
             CoopMediaKind::Audio => (extend_seq(&mut self.audio_seq, wire), AUDIO_PT),
         };
-        let entry = RingEntry {
-            seq,
-            packet: Arc::clone(bytes),
-            rtp_time,
-            marker,
-        };
         let now = Instant::now();
         for peer in &mut self.peers {
             if !peer.link.is_connected() {
                 continue;
             }
-            let mid = match packet.kind {
-                CoopMediaKind::Video => peer.link.video_mid,
-                CoopMediaKind::Audio => peer.link.audio_mid,
+            let (mid, base) = match packet.kind {
+                CoopMediaKind::Video => (peer.link.video_mid, &mut peer.video_base),
+                CoopMediaKind::Audio => (peer.link.audio_mid, &mut peer.audio_base),
             };
             let Some(mid) = mid else {
                 continue;
             };
+            let Some(peer_seq) = seq.checked_sub(*base.get_or_insert(seq & !0xffff)) else {
+                continue;
+            };
+            let entry = RingEntry {
+                seq: peer_seq,
+                packet: Arc::clone(bytes),
+                rtp_time,
+                marker,
+            };
             peer.link.write_rtp(mid, pt, &entry, now);
             if packet.kind == CoopMediaKind::Video {
-                peer.ring.push(entry.clone());
+                peer.ring.push(entry);
             }
         }
     }

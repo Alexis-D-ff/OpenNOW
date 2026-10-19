@@ -126,6 +126,25 @@ fn rewrite(payload: &Value, via: SocketAddr, real: &Mutex<Option<SocketAddr>>) -
 
 #[test]
 fn direct_loopback_forwards_repairs_and_injects_input() {
+    run_loopback(&[], 65_000, 20);
+}
+
+/// The host's own sequence has wrapped before the guest joins; the guest's SRTP context
+/// still starts at rollover counter zero. Frame 29 crosses the guest's own wrap and loses
+/// its middle packet (wire sequence 2), which the ring must repair.
+#[test]
+fn late_joiner_after_host_wrap_authenticates_and_repairs_across_its_own_wrap() {
+    run_loopback(
+        &[65_530, 65_535, 0, 9, 20_000, 40_000, 60_000, 65_440],
+        65_450,
+        29,
+    );
+}
+
+/// Feeds 'pre_join_wire' video sequences through the tap before the guest exists, then
+/// forwards 60 frames starting at 'first_seq' and drops the first copy of the middle packet
+/// of 'lost_frame'.
+fn run_loopback(pre_join_wire: &[u16], first_seq: u16, lost_frame: u32) {
     let proxy = Proxy::start();
     let backend = Arc::new(Backend::default());
     let rumble = Arc::new(RumbleRouter::default());
@@ -163,6 +182,15 @@ fn direct_loopback_forwards_repairs_and_injects_input() {
         guest_events,
     )
     .unwrap();
+    for wire in pre_join_wire {
+        tap.send(CoopRtpPacket {
+            kind: CoopMediaKind::Video,
+            packet: Arc::from(nvst_packet(*wire, 0, 0, 0, 0, &[0])),
+            received_at: Instant::now(),
+        })
+        .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(50));
     host.add_peer("guest-1", 2).unwrap();
 
     let started = Instant::now();
@@ -211,8 +239,7 @@ fn direct_loopback_forwards_repairs_and_injects_input() {
         }
         received
     });
-    let lost_frame = 20_u32;
-    let mut seq = 65_000_u16;
+    let mut seq = first_seq;
     let mut expected = Vec::new();
     let mut sent_at = Vec::new();
     for index in 0..frames {
@@ -234,10 +261,17 @@ fn direct_loopback_forwards_repairs_and_injects_input() {
         std::thread::sleep(Duration::from_millis(4));
     }
     let collected = collector.join().unwrap();
-    assert_eq!(
-        collected.len(),
-        frames as usize,
-        "every frame reaches the guest decoder queue"
+    let missing: Vec<u32> = (0..frames)
+        .filter(|index| {
+            !collected
+                .iter()
+                .any(|(_, frame)| frame.frame_index == Some(index + 1))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "frames {missing:?} never reached the guest decoder queue; dropped-packet copies: {}",
+        proxy.copies_of_dropped.load(Ordering::Acquire)
     );
     let mut latencies = Vec::new();
     let mut received = Vec::new();

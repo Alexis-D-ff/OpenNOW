@@ -91,7 +91,16 @@ pub fn description() -> StreamDescription {
     .unwrap()
 }
 
-pub fn nvst_packet(seq: u16, flags: u8, frame_index: u32, timestamp: u32, media: &[u8]) -> Vec<u8> {
+/// One NVST video packet. 'stream_index' is the sender's 24-bit stream packet index, which
+/// keeps counting when the 16-bit RTP sequence wraps.
+pub fn nvst_packet(
+    seq: u16,
+    stream_index: u32,
+    flags: u8,
+    frame_index: u32,
+    timestamp: u32,
+    media: &[u8],
+) -> Vec<u8> {
     let marker = if flags & FLAG_EOF != 0 { 0x80 } else { 0 };
     let mut packet = vec![0x90, marker | 96];
     packet.extend_from_slice(&seq.to_be_bytes());
@@ -99,7 +108,7 @@ pub fn nvst_packet(seq: u16, flags: u8, frame_index: u32, timestamp: u32, media:
     packet.extend_from_slice(&0x1122_3344_u32.to_be_bytes());
     packet.extend_from_slice(&0x4753_u16.to_be_bytes());
     packet.extend_from_slice(&4_u16.to_be_bytes());
-    packet.extend_from_slice(&(u32::from(seq) << 8).to_le_bytes());
+    packet.extend_from_slice(&((stream_index & 0x00ff_ffff) << 8).to_le_bytes());
     packet.extend_from_slice(&frame_index.to_le_bytes());
     packet.push(flags);
     packet.extend_from_slice(&[0; 7]);
@@ -130,6 +139,7 @@ pub fn frame_packets(index: u32, first_seq: u16) -> (Vec<Vec<u8>>, Vec<u8>) {
         .map(|(part, media)| {
             nvst_packet(
                 first_seq.wrapping_add(part as u16),
+                1 + index * 3 + part as u32,
                 flags[part],
                 index + 1,
                 timestamp,

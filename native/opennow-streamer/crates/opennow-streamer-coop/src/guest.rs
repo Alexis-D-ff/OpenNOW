@@ -295,6 +295,7 @@ impl GuestWorker {
     fn finish(&mut self, reason: &str) {
         self.link.close();
         self.link.drive(Instant::now());
+        self.receiver = None;
         self.media.stop();
         self.state = GuestState::Ended;
         self.emit_state(Some(reason));
