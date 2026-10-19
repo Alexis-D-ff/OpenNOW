@@ -146,7 +146,7 @@ Backend clarifications (additive):
 | POST /v1/auth/logout | | 204 |
 | GET /v1/me | | `{user, settings}` |
 | PATCH /v1/me/settings | partial SocialSettings | `{settings}` |
-| DELETE /v1/me | | 204; unlinks: deletes the account, friendships, requests, blocks |
+| DELETE /v1/me | | 204; deletes the account, friendships, requests, blocks. `social.unlink` does not use it; it signs out with POST /v1/auth/logout and keeps friends. |
 
 `loginUrl` is Discord's authorize URL with `scope=identify`, `state` bound to the login, and PKCE. The client secret never leaves the backend.
 

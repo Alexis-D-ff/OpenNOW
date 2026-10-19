@@ -592,11 +592,12 @@ carries the terminal `status` (`complete`, `denied`, `expired`, or
 `cancelled`). Once a `complete` reply is being committed, cancellation no longer
 applies. Completing a link replaces any guest token.
 
-**Unlinking.** `social.unlink` calls `DELETE /v1/me` and, when it succeeds (or
-the token was already rejected), deletes the stored token, emits
-`social.account.changed`, and closes the socket. If the backend cannot be
-reached, the request fails with `social_offline` and the account stays linked
-so the deletion can be retried.
+**Unlinking.** `social.unlink` signs out with `POST /v1/auth/logout`, which revokes
+the token but keeps the OpenNOW account, friends, requests and blocks, so linking the
+same Discord account again restores them. When it succeeds (or the token was already
+rejected), the core deletes the stored token, emits `social.account.changed`, and
+closes the socket. If the backend cannot be reached, the request fails with
+`social_offline` and the account stays linked so the sign-out can be retried.
 
 **Requests.** Methods map one-to-one onto the REST routes in
 `coop-sessions.md` section 3 and return the backend's JSON body; a 204 returns
