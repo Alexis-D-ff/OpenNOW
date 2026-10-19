@@ -7,6 +7,7 @@ use std::time::Duration;
 
 const MAXIMUM_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAXIMUM_ERROR_MESSAGE_CHARS: usize = 512;
+const WAKE_RETRY_DELAY: Duration = Duration::from_millis(750);
 
 pub(super) struct Backend {
     client: Client,
@@ -19,6 +20,12 @@ pub(super) struct Failure {
     pub status: Option<u16>,
     pub transient: bool,
     pub error: SocialError,
+}
+
+impl Failure {
+    fn waking(&self) -> bool {
+        self.error.code == "social_offline" && matches!(self.status, None | Some(502 | 503))
+    }
 }
 
 pub(super) struct Call<'a> {
@@ -63,10 +70,28 @@ impl Backend {
         Ok(Self { client })
     }
 
+    /// Retries once when the backend is waking from Railway's app sleep: the
+    /// edge answers 502/503 without the backend's error envelope, or the
+    /// connection fails before a response arrives.
     pub fn send(
         &self,
         config: &Config,
         call: Call<'_>,
+        token: Option<&Token>,
+    ) -> Result<Value, Failure> {
+        match self.send_once(config, &call, token) {
+            Err(failure) if failure.waking() => {
+                std::thread::sleep(WAKE_RETRY_DELAY);
+                self.send_once(config, &call, token)
+            }
+            result => result,
+        }
+    }
+
+    fn send_once(
+        &self,
+        config: &Config,
+        call: &Call<'_>,
         token: Option<&Token>,
     ) -> Result<Value, Failure> {
         let mut url = config.base.clone();
@@ -86,7 +111,7 @@ impl Backend {
                 }
             })?;
         let mut request = client
-            .request(call.method, url)
+            .request(call.method.clone(), url)
             .header(
                 "User-Agent",
                 format!("opennow/{}", crate::version::APPLICATION_VERSION),

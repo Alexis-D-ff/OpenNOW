@@ -532,6 +532,48 @@ fn backend_errors_map_to_stable_codes() {
     assert!(!harness.all_output().contains(ACCOUNT_TOKEN));
 }
 
+#[test]
+fn a_waking_backend_is_retried_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static FRIENDS: AtomicUsize = AtomicUsize::new(0);
+    let backend = MockBackend::start(|request| match request.path.as_str() {
+        "/v1/friends" if FRIENDS.fetch_add(1, Ordering::SeqCst) == 0 => Reply::empty(502),
+        "/v1/friends" => Reply::json(200, json!({"friends":[]})),
+        "/v1/invites" => Reply::empty(503),
+        "/v1/lobbies/join" => Reply::error(503, "overloaded"),
+        _ => echo(request),
+    });
+    let harness = Harness::new(&backend.url, true);
+    assert_eq!(
+        harness.call("social.friends.get", json!({})).unwrap()["friends"],
+        json!([])
+    );
+    assert_eq!(
+        harness
+            .call("coop.invites.get", json!({}))
+            .unwrap_err()
+            .code,
+        "social_offline"
+    );
+    assert_eq!(
+        harness
+            .call("coop.join.code", json!({"code":"K7Q4MX"}))
+            .unwrap_err()
+            .code,
+        "overloaded"
+    );
+    let count = |path: &str| {
+        backend
+            .requests()
+            .iter()
+            .filter(|request| request.path == path)
+            .count()
+    };
+    assert_eq!(count("/v1/friends"), 2);
+    assert_eq!(count("/v1/invites"), 2);
+    assert_eq!(count("/v1/lobbies/join"), 1);
+}
+
 fn link_backend(poll_replies: Vec<Value>, expires_in: chrono::Duration) -> MockBackend {
     let replies = Mutex::new(poll_replies.into_iter());
     let expires_at = (chrono::Utc::now() + expires_in).to_rfc3339();
@@ -736,7 +778,7 @@ fn a_saved_account_is_restored_without_exposing_the_token() {
 #[test]
 fn unlink_signs_out_then_deletes_the_saved_token() {
     let backend = MockBackend::start(|request| match request.path.as_str() {
-        "/v1/auth/logout" if request.method == "POST" => Reply::empty(503),
+        "/v1/auth/logout" if request.method == "POST" => Reply::empty(500),
         _ => echo(request),
     });
     let mut harness = Harness::new(&backend.url, true);

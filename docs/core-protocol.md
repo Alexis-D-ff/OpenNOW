@@ -548,10 +548,12 @@ method and the `social.capabilitySurface` capability are unchanged.
 
 **Backend and proxy.** The core calls the social backend at the
 `socialBackendUrl` setting. The setting defaults to `""`, which selects the
-built-in backend (`PLACEHOLDER_SOCIAL_BACKEND_URL` in
-`native/opennow-core/src/social/mod.rs`). That constant is a placeholder until
-the production Railway domain exists; because saved settings keep `""`,
-changing the constant moves every install that did not choose its own backend.
+built-in backend (`DEFAULT_SOCIAL_BACKEND_URL` in
+`native/opennow-core/src/social/mod.rs`, the production Railway deployment);
+because saved settings keep `""`, changing the constant moves every install
+that did not choose its own backend. The backend sleeps when idle, so a request
+that gets a 502/503 without an error envelope, or no connection, is retried once
+after 750 ms while it wakes.
 `settings.set` accepts an `https://` origin, or `http://` only for
 `localhost`, `127.0.0.1`, or `[::1]`. Paths, queries, fragments, and user
 information are rejected with `invalid_setting`; a valid value is stored as its

@@ -26,11 +26,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use url::Url;
 
-/// Social backend used while the `socialBackendUrl` setting is empty. The
-/// production Railway domain is not assigned yet: replace this placeholder
-/// once the backend is deployed. Saved settings keep `""`, so changing this
+/// Social backend used while the `socialBackendUrl` setting is empty: the
+/// production Railway deployment. Saved settings keep `""`, so changing this
 /// constant moves every install that did not choose its own backend.
-pub const PLACEHOLDER_SOCIAL_BACKEND_URL: &str = "https://opennow-social-production.up.railway.app";
+pub const DEFAULT_SOCIAL_BACKEND_URL: &str = "https://opennow-social-production.up.railway.app";
 
 pub const METHODS: &[&str] = &[
     "social.state.get",
@@ -160,7 +159,7 @@ impl Config {
         let base = configured
             .and_then(|url| Url::parse(&url).ok())
             .unwrap_or_else(|| {
-                Url::parse(PLACEHOLDER_SOCIAL_BACKEND_URL).expect("placeholder URL is valid")
+                Url::parse(DEFAULT_SOCIAL_BACKEND_URL).expect("default URL is valid")
             });
         Self {
             base,
