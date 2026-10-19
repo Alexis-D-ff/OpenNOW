@@ -23,8 +23,12 @@ pub(super) struct Failure {
 }
 
 impl Failure {
-    fn waking(&self) -> bool {
-        self.error.code == "social_offline" && matches!(self.status, None | Some(502 | 503))
+    pub(super) fn waking(&self, method: &Method) -> bool {
+        self.error.code == "social_offline"
+            && match self.status {
+                Some(status) => matches!(status, 502 | 503),
+                None => *method == Method::GET,
+            }
     }
 }
 
@@ -71,8 +75,9 @@ impl Backend {
     }
 
     /// Retries once when the backend is waking from Railway's app sleep: the
-    /// edge answers 502/503 without the backend's error envelope, or the
-    /// connection fails before a response arrives.
+    /// edge answers 502/503 without the backend's error envelope, so the app
+    /// never saw the request. A failure with no response at all is retried
+    /// only for GET, because a POST may already have been handled.
     pub fn send(
         &self,
         config: &Config,
@@ -80,7 +85,7 @@ impl Backend {
         token: Option<&Token>,
     ) -> Result<Value, Failure> {
         match self.send_once(config, &call, token) {
-            Err(failure) if failure.waking() => {
+            Err(failure) if failure.waking(&call.method) => {
                 std::thread::sleep(WAKE_RETRY_DELAY);
                 self.send_once(config, &call, token)
             }

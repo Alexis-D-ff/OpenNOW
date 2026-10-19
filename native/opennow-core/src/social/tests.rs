@@ -572,6 +572,17 @@ fn a_waking_backend_is_retried_once() {
     assert_eq!(count("/v1/friends"), 2);
     assert_eq!(count("/v1/invites"), 2);
     assert_eq!(count("/v1/lobbies/join"), 1);
+
+    let failure = |status| super::backend::Failure {
+        status,
+        transient: true,
+        error: SocialError::new("social_offline", "offline"),
+    };
+    assert!(failure(None).waking(&reqwest::Method::GET));
+    assert!(!failure(None).waking(&reqwest::Method::POST));
+    assert!(failure(Some(502)).waking(&reqwest::Method::POST));
+    assert!(failure(Some(503)).waking(&reqwest::Method::DELETE));
+    assert!(!failure(Some(500)).waking(&reqwest::Method::GET));
 }
 
 fn link_backend(poll_replies: Vec<Value>, expires_in: chrono::Duration) -> MockBackend {
