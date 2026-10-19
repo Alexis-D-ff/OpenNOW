@@ -734,9 +734,9 @@ fn a_saved_account_is_restored_without_exposing_the_token() {
 }
 
 #[test]
-fn unlink_deletes_the_account_then_the_saved_token() {
+fn unlink_signs_out_then_deletes_the_saved_token() {
     let backend = MockBackend::start(|request| match request.path.as_str() {
-        "/v1/me" if request.method == "DELETE" => Reply::empty(503),
+        "/v1/auth/logout" if request.method == "POST" => Reply::empty(503),
         _ => echo(request),
     });
     let mut harness = Harness::new(&backend.url, true);
@@ -750,14 +750,19 @@ fn unlink_deletes_the_account_then_the_saved_token() {
 
     backend.set_handler(echo);
     assert_eq!(harness.call("social.unlink", json!({})).unwrap(), json!({}));
-    let deletes = backend
-        .requests()
+    let requests = backend.requests();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method == "DELETE" && request.path == "/v1/me")
+    );
+    let logouts = requests
         .into_iter()
-        .filter(|request| request.method == "DELETE" && request.path == "/v1/me")
+        .filter(|request| request.method == "POST" && request.path == "/v1/auth/logout")
         .collect::<Vec<_>>();
-    assert_eq!(deletes.len(), 2);
+    assert_eq!(logouts.len(), 2);
     assert_eq!(
-        deletes[1].authorization.as_deref(),
+        logouts[1].authorization.as_deref(),
         Some(&*format!("Bearer {ACCOUNT_TOKEN}"))
     );
     assert_eq!(harness.vault().load(ACCOUNT_KEY).unwrap(), None);

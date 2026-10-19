@@ -794,7 +794,10 @@ impl Shared {
                 None => return Ok(json!({})),
             }
         };
-        match self.call(Auth::Account, Call::delete(&["v1", "me"])) {
+        match self.call(
+            Auth::Account,
+            Call::post(&["v1", "auth", "logout"], json!({})),
+        ) {
             Ok(_) => {}
             Err(error) if error.code == "social_not_linked" => return Ok(json!({})),
             Err(error) => return Err(error),
@@ -809,7 +812,7 @@ impl Shared {
         }
         if self.vault.delete(&self.account_key).is_err() {
             eprintln!(
-                "social: the deleted account's token could not be removed from the OS credential store"
+                "social: the signed-out account's token could not be removed from the OS credential store"
             );
         }
         state.account = None;
