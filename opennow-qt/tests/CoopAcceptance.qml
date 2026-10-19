@@ -55,6 +55,10 @@ QtObject {
         "c-02-host-setup": "56C-0",
         "c-03-host-lobby": "5C7-0",
         "c-03b-lobby-expired": "",
+        "c-03c-host-session-ended": "",
+        "c-03d-code-join-held": "",
+        "c-03e-code-join-let-in": "",
+        "c-03f-code-join-declined": "",
         "c-04-join-code": "5GF-0",
         "c-05-connecting": "5JO-0",
         "c-05b-error-invalid": "5KK-0",
@@ -66,13 +70,17 @@ QtObject {
         "c-05b-error-ask-expired": "5KK-0",
         "c-05c-relay-retry": "5JO-0",
         "c-05c-relay-retry-failed": "5KK-0",
+        "c-05d-relay-disabled": "5JO-0",
+        "c-05e-join-cancelled": "",
         "c-06-waiting-room": "5LZ-0",
+        "c-06b-waiting-approval": "",
         "c-07-guest-overlay": "5ON-0",
         "c-08-host-panel": "5Q0-0",
         "c-09-settings-coop": "5UT-0",
         "c-10-reconnecting": "62P-0",
         "c-10-host-ended": "62P-0",
         "c-10-kicked": "62P-0",
+        "c-10-declined": "",
         "c-10-stream-lost": "62P-0",
         "c-11-end-confirm": "",
         "c-11-leave-confirm": ""
@@ -109,6 +117,10 @@ QtObject {
         "c-02-host-setup": ["coopSetup"],
         "c-03-host-lobby": ["coopLobby"],
         "c-03b-lobby-expired": [],
+        "c-03c-host-session-ended": [],
+        "c-03d-code-join-held": ["coopAskToast"],
+        "c-03e-code-join-let-in": ["coopHostNotice"],
+        "c-03f-code-join-declined": [],
         "c-04-join-code": ["coopJoinCode"],
         "c-05-connecting": ["coopConnecting"],
         "c-05b-error-invalid": ["coopJoinError"],
@@ -120,13 +132,17 @@ QtObject {
         "c-05b-error-ask-expired": ["coopJoinError"],
         "c-05c-relay-retry": ["coopConnecting"],
         "c-05c-relay-retry-failed": ["coopJoinError"],
+        "c-05d-relay-disabled": ["coopConnecting"],
+        "c-05e-join-cancelled": [],
         "c-06-waiting-room": ["coopWaitingRoom"],
+        "c-06b-waiting-approval": ["coopWaitingRoom", "coopWaitingTitle"],
         "c-07-guest-overlay": ["coopGuestOverlay"],
         "c-08-host-panel": ["streamCoopSection"],
         "c-09-settings-coop": ["settingsCoop"],
         "c-10-reconnecting": ["coopReconnectingToast"],
         "c-10-host-ended": ["coopEnded"],
         "c-10-kicked": ["coopEnded"],
+        "c-10-declined": ["coopEnded"],
         "c-10-stream-lost": ["coopEnded"],
         "c-11-end-confirm": ["coopEndConfirm"],
         "c-11-leave-confirm": ["coopLeaveConfirm"]
@@ -419,6 +435,8 @@ QtObject {
         coop.hostNotice = null
         coop.roomWatch = []
         client.failures = ({})
+        coop.setPreference("allowRelay", true)
+        coop.setPreference("requireApproval", false)
         client.calls = []
         runtime.sent = []
         ShellStore.friends.link = null
@@ -598,6 +616,45 @@ QtObject {
                 if (name === "c-05c-relay-retry-failed")
                     Qt.callLater(() => Qt.callLater(() => runtime.coopEventReceived(rejected)))
             })
+        } else if (name === "c-05d-relay-disabled") {
+            coop.setPreference("allowRelay", false)
+            joinAsGuest("code", "")
+        } else if (name === "c-05e-join-cancelled") {
+            coop.openJoin("K7Q-4MX")
+            coop.closeGuestFlow()
+        } else if (name === "c-03c-host-session-ended") {
+            linkAs(mara)
+            fakeStream()
+            host([member(mara, 0), member(jonas, 1)], [])
+            Qt.callLater(() => Qt.callLater(() => {
+                ShellStore.streamState = "idle"
+                ShellStore.streamer = null
+                ShellStore.activeSession = null
+            }))
+        } else if (name.indexOf("c-03") === 0 && name.indexOf("code-join") > 0) {
+            linkAs(mara)
+            seedFriends(false)
+            fakeStream()
+            host([member(mara, 0), member(jonas, 1)], [])
+            Qt.callLater(() => Qt.callLater(() => {
+                coop.setPreference("requireApproval", true)
+                coop.invite(lieke.id)
+                client.emit("coop.lobby.updated", {lobby: lobby("open", [member(mara, 0), member(jonas, 1), member(tess, 2),
+                    member(lieke, 3)])})
+                client.emit("coop.signal", {lobbyId: "lob_mara", from: tess.id, payload: {type: "offer", sdp: "fixture"}})
+                if (name === "c-03e-code-join-let-in")
+                    coop.respondToFirstJoinRequest(true)
+                else if (name === "c-03f-code-join-declined")
+                    coop.respondToFirstJoinRequest(false)
+            }))
+        } else if (name === "c-06b-waiting-approval" || name === "c-10-declined") {
+            joinAsGuest("code", "")
+            Qt.callLater(() => Qt.callLater(() => {
+                client.emit("coop.signal", {lobbyId: "lob_mara", from: mara.id, payload: {type: "opennow-admission", state: "pending"}})
+                client.emit("coop.lobby.updated", {lobby: lobby("streaming", [member(mara, 0), member(jonas, 1), member(lieke, 2)])})
+                if (name === "c-10-declined")
+                    client.emit("coop.lobby.kicked", {lobbyId: "lob_mara"})
+            }))
         } else if (name === "c-06-waiting-room") {
             guestConnected(false)
         } else if (name === "c-07-guest-overlay") {
@@ -672,6 +729,48 @@ QtObject {
                 "rejected relay credentials refetch ICE servers and restart the guest once")
         if (name === "c-05c-relay-retry-failed")
             check(coop.guestPhase === "error" && coop.joinError === "cant_connect", "a second rejection shows Can't connect")
+        if (name === "c-05d-relay-disabled") {
+            const start = runtime.sent.find(item => item.type === "coop-guest-start")
+            check(start && start.relays.length === 0 && start.iceServers.every(server => server.urls.every(url => !/^turns?:/.test(url))),
+                "relay fallback off sends no TURN servers or relays")
+        }
+        if (name === "c-05e-join-cancelled")
+            check(coop.guestPhase === "idle" && coop.role === "none"
+                && client.calls.some(call => call.method === "coop.lobby.leave" && call.params.lobbyId === "lob_mara"),
+                "a join that succeeds after cancelling leaves the lobby")
+        if (name === "c-03c-host-session-ended")
+            check(coop.role === "none" && !coop.fanoutStarted && client.calls.some(call => call.method === "coop.lobby.close"),
+                "ending the host's stream closes co-op")
+        if (name.indexOf("code-join") > 0) {
+            const peerAdds = id => runtime.sent.filter(item => item.type === "coop-peer-add" && item.peerId === id).length
+            const admission = state => client.calls.some(call => call.method === "coop.signal.send" && call.params.to === tess.id
+                && call.params.payload.type === "opennow-admission" && call.params.payload.state === state)
+            check(peerAdds(lieke.id) === 1, name + ": an invited friend skips approval")
+            check(admission("pending"), name + ": the code guest hears it is held")
+            check(!runtime.sent.some(item => item.type === "coop-signal-in" && item.peerId === tess.id),
+                name + ": a held guest's signalling never reaches the streamer")
+            if (name === "c-03d-code-join-held")
+                check(peerAdds(tess.id) === 0 && coop.joinRequests.length === 1 && coop.joinRequests[0].kind === "code"
+                    && coop.joinRequests[0].from.id === tess.id && coop.promptPending,
+                    "a code join waits for the host before it gets the stream")
+            if (name === "c-03e-code-join-let-in")
+                check(peerAdds(tess.id) === 1 && admission("admitted") && coop.joinRequests.length === 0
+                    && coop.hostNotice && coop.hostNotice.kind === "joining", "Let in adds the code guest as a streamer peer")
+            if (name === "c-03f-code-join-declined")
+                check(peerAdds(tess.id) === 0 && coop.joinRequests.length === 0
+                    && client.calls.some(call => call.method === "coop.member.kick" && call.params.userId === tess.id),
+                    "Decline removes the code guest from the lobby")
+        }
+        if (name === "c-06b-waiting-approval") {
+            const title = find(window.contentItem, "coopWaitingTitle")
+            check(coop.admissionPending && coop.guestPhase === "waiting" && AppController.route === "coop-guest"
+                && runtime.sent.some(item => item.type === "coop-guest-stop"),
+                "a held code guest waits even after the host starts")
+            check(!checkScreens || (title && title.text === "Waiting for Mara to let you in"), "the waiting room says the host must let you in")
+        }
+        if (name === "c-10-declined")
+            check(coop.guestPhase === "ended" && coop.endReason === "declined" && !coop.admissionPending,
+                "a held guest who is removed sees they weren't let in")
         if (name === "c-03b-lobby-expired")
             check(coop.role === "none" && coop.hostNotice && coop.hostNotice.kind === "expired"
                 && runtime.sent.some(item => item.type === "coop-host-stop"), "an expired empty lobby ends hosting with a notice")

@@ -168,7 +168,8 @@ ApplicationWindow {
     readonly property var streamerSnapshotForSmokeTest: ShellStore.streamer
     readonly property bool shellCaptureEnabledForSmokeTest: ControllerInput.shellCaptureEnabled
     readonly property bool consoleStreamReady: window.activeRoute === "stream"
-        && !window.desktopSurfaceActive && routeLoader.item && routeLoader.item.videoReady === true
+        && !window.desktopSurfaceActive && routeLoader.item
+        && (routeLoader.item.videoReady === true || routeLoader.item.coopGuest === true)
     onConsoleStreamReadyChanged: {
         if (!consoleStreamReady)
             pendingConsoleScreenshotSession = ""
@@ -314,10 +315,13 @@ ApplicationWindow {
         function onActiveFocusItemChanged() { Qt.callLater(window.restoreConsoleModalFocus) }
     }
 
+    readonly property bool coopGuest: Boolean(ShellStore.coop && ShellStore.coop.role === "guest")
+    onCoopGuestChanged: syncInputOwnership()
     function syncInputOwnership() {
         const shellOwnsInput = !window.active || AppController.route !== "stream"
             || (!window.desktopSurfaceActive && !window.consoleStreamReady)
-            || (window.desktopSurfaceActive && !ShellStore.authRestorePending && !ShellStore.signedIn)
+            || (window.desktopSurfaceActive && !ShellStore.authRestorePending && !ShellStore.signedIn
+                && !window.coopGuest)
             || ShellStore.streamOverlayBlocksGameplayInput(AppController.overlay)
         ControllerInput.inputSuspended = !window.active
             || (shellOwnsInput && ShellStore.settings.controllerMode === false)
@@ -733,7 +737,7 @@ ApplicationWindow {
         if (route === "inserting")
             return insertingScreen
         if (route === "stream")
-            return streamScreen
+            return window.coopGuest ? coopGuestStreamScreen : streamScreen
         if (route === "accounts")
             return accountsScreen
         if (route === "profile-pin")
@@ -1330,6 +1334,8 @@ ApplicationWindow {
     Component { id: joiningScreen; JoiningScreen {} }
     Component { id: insertingScreen; InsertingScreen {} }
     Component { id: streamScreen; StreamScreen {} }
+    // Guests present the host's media through the guest-aware stream screen on both surfaces.
+    Component { id: coopGuestStreamScreen; DesktopStreamScreen {} }
     Component { id: accountsScreen; DesktopAccountPicker { consoleMode: true } }
     Component { id: profilePinScreen; ProfilePinScreen {} }
     Component { id: gameAccountsScreen; GameAccountsScreen {} }

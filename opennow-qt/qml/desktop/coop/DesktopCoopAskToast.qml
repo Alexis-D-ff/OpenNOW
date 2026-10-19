@@ -12,6 +12,7 @@ Item {
     readonly property var request: coop.joinRequests.length > 0 ? coop.joinRequests[0] : null
     readonly property bool collapsed: coop.joinRequests.length > 1
     readonly property string name: request ? friends.displayName(request.from) : ""
+    readonly property bool codeJoin: request !== null && request.kind === "code"
     readonly property real createdMs: request ? Date.parse(String(request.createdAt || "")) : 0
     readonly property real expiresMs: request ? Date.parse(String(request.expiresAt || "")) : 0
     readonly property real remainingMs: Math.max(0, expiresMs - now)
@@ -37,7 +38,9 @@ Item {
     DesktopCoopNoticeCard {
         id: summary
         visible: root.collapsed
-        title: qsTr("%1 friends want to join").arg(root.coop.joinRequests.length)
+        title: root.coop.joinRequests.every(item => item.kind === "code")
+            ? qsTr("%1 guests joined with your code").arg(root.coop.joinRequests.length)
+            : qsTr("%1 friends want to join").arg(root.coop.joinRequests.length)
         body: qsTr("Press Ctrl+G to answer them in the drawer")
         trailingIcon: "qrc:/qt/qml/OpenNOW/res/icons/desktop-users-violet.svg"
         onActivated: {
@@ -59,7 +62,9 @@ Item {
         border.color: "#24FFFFFF"
         clip: true
         Accessible.role: Accessible.AlertMessage
-        Accessible.name: qsTr("%1 wants to join. Ctrl+Shift+Y lets them in, Ctrl+Shift+N declines.").arg(root.name)
+        Accessible.name: root.codeJoin
+            ? qsTr("%1 joined with your code. Ctrl+Shift+Y lets them in, Ctrl+Shift+N removes them.").arg(root.name)
+            : qsTr("%1 wants to join. Ctrl+Shift+Y lets them in, Ctrl+Shift+N declines.").arg(root.name)
 
         Column {
             id: body
@@ -83,7 +88,8 @@ Item {
                         height: 22
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("%1 wants to join").arg(root.name)
+                            text: root.codeJoin ? qsTr("%1 joined with your code").arg(root.name)
+                                : qsTr("%1 wants to join").arg(root.name)
                             color: "#FFFFFF"
                             font.family: DesktopTokens.bodyFont
                             font.pixelSize: 15
@@ -100,7 +106,7 @@ Item {
                             Text {
                                 id: pill
                                 anchors.centerIn: parent
-                                text: qsTr("ASK TO JOIN")
+                                text: root.codeJoin ? qsTr("CODE") : qsTr("ASK TO JOIN")
                                 color: "#A78BFA"
                                 font.family: DesktopTokens.monoFont
                                 font.pixelSize: 10
@@ -112,7 +118,8 @@ Item {
                     Text {
                         readonly property int slot: root.coop.nextFreeSlot()
                         width: parent.width
-                        text: slot > 0 ? qsTr("Friend · %1 · would take P%2").arg(root.activityText()).arg(slot + 1)
+                        text: root.codeJoin ? qsTr("Holding P%1 · no stream or controller until you let them in").arg(root.request.slot + 1)
+                            : slot > 0 ? qsTr("Friend · %1 · would take P%2").arg(root.activityText()).arg(slot + 1)
                             : qsTr("Friend · %1 · your lobby is full").arg(root.activityText())
                         color: "#A3FFFFFF"
                         font.family: DesktopTokens.bodyFont
@@ -158,7 +165,8 @@ Item {
                 }
                 Text {
                     readonly property int seconds: Math.ceil(root.remainingMs / 1000)
-                    text: qsTr("Declines by itself in %1 · your game keeps running")
+                    text: root.codeJoin ? qsTr("Waits for your answer · your game keeps running")
+                        : qsTr("Declines by itself in %1 · your game keeps running")
                         .arg("%1:%2".arg(Math.floor(seconds / 60)).arg(String(seconds % 60).padStart(2, "0")))
                     color: "#66FFFFFF"
                     font.family: DesktopTokens.bodyFont
@@ -170,6 +178,7 @@ Item {
         }
 
         Rectangle {
+            visible: !root.codeJoin
             x: 12
             anchors.bottom: parent.bottom
             width: 360

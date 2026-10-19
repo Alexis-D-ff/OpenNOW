@@ -123,6 +123,7 @@ QtObject {
             root.launchSelectedGame(false)
         }
         hostStreaming: root.activeSession !== null && root.streamerStatus === "streaming"
+        hostSessionActive: root.activeSession !== null
         persistPreferences: !SmokeTestMode
         onAccessibilityAnnounced: message => root.accessibilityMessage = message
     }

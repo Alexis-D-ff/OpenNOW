@@ -9,6 +9,7 @@ FocusScope {
     readonly property string host: String(coop.hostName || "")
     readonly property string hostId: coop.joinContext ? String(coop.joinContext.hostId || "") : ""
     readonly property bool streamLost: reason === "stream_lost" || reason === "host_lost"
+    readonly property bool removed: reason === "kicked" || reason === "declined"
     readonly property int waitSeconds: 120
     property double waitStartedMs: 0
     property double nowMs: Date.now()
@@ -61,8 +62,9 @@ FocusScope {
         spacing: 10
 
         DesktopCoopGuestText {
-            text: root.reason === "kicked" ? qsTr("REMOVED") : root.streamLost ? qsTr("STREAM LOST") : qsTr("CO-OP ENDED")
-            color: root.reason === "kicked" ? "#FFD166" : root.streamLost ? "#FF8A80" : "#7FD4FF"
+            text: root.reason === "declined" ? qsTr("NOT LET IN") : root.reason === "kicked" ? qsTr("REMOVED")
+                : root.streamLost ? qsTr("STREAM LOST") : qsTr("CO-OP ENDED")
+            color: root.removed ? "#FFD166" : root.streamLost ? "#FF8A80" : "#7FD4FF"
             mono: true
             size: 11
             lineHeightPx: 14
@@ -72,7 +74,9 @@ FocusScope {
             id: titleText
             width: parent.width
             wrapMode: Text.WordWrap
-            text: root.reason === "kicked"
+            text: root.reason === "declined"
+                ? (root.host !== "" ? qsTr("%1 didn't let you in").arg(root.host) : qsTr("The host didn't let you in"))
+                : root.reason === "kicked"
                 ? (root.host !== "" ? qsTr("You left %1's game").arg(root.host) : qsTr("You left the game"))
                 : root.streamLost
                 ? (root.host !== "" ? qsTr("%1's stream stopped").arg(root.host) : qsTr("The host's stream stopped"))
@@ -91,6 +95,9 @@ FocusScope {
                 if (root.waitStartedMs > 0)
                     return root.host !== "" ? qsTr("Waiting for %1 to come back. You'll see a notice when there's room.").arg(root.host)
                         : qsTr("Waiting for the host to come back. You'll see a notice when there's room.")
+                if (root.reason === "declined")
+                    return root.host !== "" ? qsTr("%1 approves everyone who joins with a code. Ask them for an invite instead.").arg(root.host)
+                        : qsTr("This host approves everyone who joins with a code. Ask them for an invite instead.")
                 if (root.reason === "kicked")
                     return root.host !== "" ? qsTr("%1 removed you from the lobby. A new code lets you back in.").arg(root.host)
                         : qsTr("The host removed you from the lobby. A new code lets you back in.")
@@ -116,7 +123,7 @@ FocusScope {
                 focus: true
                 primary: true
                 glyph: "A"
-                text: root.reason === "kicked" ? qsTr("OK") : root.streamLost ? qsTr("Leave") : qsTr("Back to Home")
+                text: root.removed ? qsTr("OK") : root.streamLost ? qsTr("Leave") : qsTr("Back to Home")
                 KeyNavigation.right: waitButton.visible ? waitButton : null
                 onClicked: root.leave()
             }

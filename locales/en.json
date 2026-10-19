@@ -4899,6 +4899,20 @@
     "onlineCoOp": "ONLINE CO-OP",
     "nInvitedYou": "%1 invited you",
     "joinWithACode2": "Join with a code ›",
-    "nCoOpInvites": "%1 co-op invites"
+    "nCoOpInvites": "%1 co-op invites",
+    "yourStreamEndedSoCoOpClosed": "Your stream ended, so co-op closed for everyone.",
+    "nGuestsJoinedWithYourCode": "%1 guests joined with your code",
+    "nJoinedWithYourCodeCtrlShift": "%1 joined with your code. Ctrl+Shift+Y lets them in, Ctrl+Shift+N removes them.",
+    "nJoinedWithYourCode": "%1 joined with your code",
+    "code": "CODE",
+    "holdingPnNoStreamOrControllerUntil": "Holding P%1 · no stream or controller until you let them in",
+    "waitsForYourAnswerYourGameKeeps": "Waits for your answer · your game keeps running",
+    "notLetIn": "NOT LET IN",
+    "nDidntLetYouIn": "%1 didn't let you in",
+    "theHostDidntLetYouIn": "The host didn't let you in",
+    "nApprovesEveryoneWhoJoinsWithA": "%1 approves everyone who joins with a code. Ask them for an invite instead.",
+    "thisHostApprovesEveryoneWhoJoinsWith": "This host approves everyone who joins with a code. Ask them for an invite instead.",
+    "waitingForTheHostToLetYou": "Waiting for the host to let you in",
+    "yourSlotIsHeldTheStreamStarts": "Your slot is held. The stream starts once you're let in."
   }
 }

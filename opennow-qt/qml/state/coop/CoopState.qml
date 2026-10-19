@@ -20,6 +20,8 @@ QtObject {
     // ShellStore launch hook: launchGame(game) starts the host's own GFN session.
     property var launchGame: function(game) {}
     property bool hostStreaming: false
+    // The host's GFN session exists (it may be restarting); losing it ends co-op.
+    property bool hostSessionActive: false
     property bool persistPreferences: true
 
     readonly property int maxGuestsLimit: 3
@@ -51,7 +53,15 @@ QtObject {
     property var inviteHistory: []
     property var outgoingInvites: []
     property string inviteToastId: ""
+    // Asks to join, plus guests who joined by code while "Require host approval" is on:
+    // {id: "admit-<userId>", kind: "code", lobbyId, from: {id, displayName}, slot}. Those guests get no
+    // streamer peer (no media, no input) until the host lets them in.
     property var joinRequests: []
+    // Host: guests who get a streamer peer: invited, approved asks, let in after a code join, or joined
+    // while approval was off.
+    property var admittedIds: []
+    // Guest: the host has not let this code join in yet.
+    property bool admissionPending: false
     // Host notice: {kind: "joining", user, slot} after approving an ask, or {kind: "expired"} when the
     // code ran out before anyone joined (lobby.ended "expired")
     property var hostNotice: null
@@ -258,13 +268,23 @@ QtObject {
         return {appId: String(value.appId || value.launchAppId || value.id || ""),
             title: String(value.title || ""), artUrl: artUrl === "" ? null : artUrl}
     }
+    // Allow relay fallback off: no TURN servers or relay sites reach the streamer, so peers stay direct.
+    function networkConfig() {
+        if (preferences.allowRelay !== false)
+            return {iceServers: iceServers, relays: relays}
+        const direct = iceServers.map(server => Object.assign({}, server,
+            {urls: (server.urls || []).filter(url => !/^turns?:/i.test(String(url)))}))
+        return {iceServers: direct.filter(server => server.urls.length > 0), relays: []}
+    }
     function startFanout() {
         if (!isHost || fanoutStarted || !hostStreaming || iceServers.length === 0)
             return
-        if (sendStreamer("coop-host-start", {iceServers: iceServers, maxGuests: Number(lobby.maxGuests), relays: relays}) === "")
+        const network = networkConfig()
+        if (sendStreamer("coop-host-start", {iceServers: network.iceServers, maxGuests: Number(lobby.maxGuests),
+                relays: network.relays}) === "")
             return
         fanoutStarted = true
-        for (const member of guests)
+        for (const member of guests.filter(isAdmitted))
             sendStreamer("coop-peer-add", {peerId: member.userId, slot: member.slot, displayName: member.displayName})
         flushSignals()
     }
@@ -307,6 +327,7 @@ QtObject {
         hostStats = null
         outgoingInvites = []
         joinRequests = []
+        admittedIds = []
         hostNotice = null
         heldSlotOpened = false
         resetLobby()
@@ -314,6 +335,7 @@ QtObject {
     function invite(userId) {
         if (!isHost)
             return
+        admit(userId)
         call("coop.lobby.invite", {lobbyId: lobby.id, userId: userId}, {userId: userId})
     }
     function cancelInvite(inviteId) {
@@ -339,10 +361,46 @@ QtObject {
     }
     function respondJoinRequest(requestId, approve) {
         const request = joinRequests.find(item => item.id === requestId)
-        call("coop.joinRequest.respond", {requestId: requestId, approve: approve}, {requestId: requestId})
         joinRequests = joinRequests.filter(item => item.id !== requestId)
-        if (approve && request)
+        if (request && request.kind === "code") {
+            answerCodeJoin(request, approve)
+            return
+        }
+        call("coop.joinRequest.respond", {requestId: requestId, approve: approve}, {requestId: requestId})
+        if (approve && request) {
+            admit(request.from.id)
             hostNotice = {kind: "joining", user: request.from, slot: nextFreeSlot(), requestId: requestId}
+        }
+    }
+    function isAdmitted(member) {
+        return member.slot === 0 || admittedIds.indexOf(member.userId) >= 0
+    }
+    function admit(userId) {
+        if (userId && admittedIds.indexOf(userId) < 0)
+            admittedIds = admittedIds.concat([userId]).slice(-maxOutgoingInvites)
+    }
+    function sendAdmission(userId, state) {
+        call("coop.signal.send", {lobbyId: lobby.id, to: userId, payload: {type: "opennow-admission", state: state}}, {})
+    }
+    function holdForApproval(member) {
+        if (joinRequests.some(item => item.id === "admit-" + member.userId))
+            return
+        joinRequests = joinRequests.concat([{id: "admit-" + member.userId, kind: "code", lobbyId: lobby.id,
+            from: {id: member.userId, displayName: member.displayName, avatarUrl: member.avatarUrl}, slot: member.slot}])
+            .slice(-maxJoinRequests)
+        sendAdmission(member.userId, "pending")
+    }
+    function answerCodeJoin(request, approve) {
+        const member = memberAt(request.slot)
+        if (!approve) {
+            call("coop.member.kick", {lobbyId: lobby.id, userId: request.from.id}, {})
+            return
+        }
+        admit(request.from.id)
+        sendAdmission(request.from.id, "admitted")
+        if (fanoutStarted && member && member.userId === request.from.id)
+            sendStreamer("coop-peer-add", {peerId: member.userId, slot: member.slot, displayName: member.displayName})
+        hostNotice = {kind: "joining", user: request.from, slot: request.slot}
     }
     function respondToFirstJoinRequest(approve) {
         if (joinRequests.length === 0)
@@ -487,7 +545,8 @@ QtObject {
     function startGuestPipeline() {
         if (role !== "guest" || !lobby || guestStartRequestId !== "")
             return
-        guestStartRequestId = sendStreamer("coop-guest-start", {iceServers: iceServers, relays: relays,
+        const network = networkConfig()
+        guestStartRequestId = sendStreamer("coop-guest-start", {iceServers: network.iceServers, relays: network.relays,
             hostPeerId: lobby.hostId, slot: slot})
         if (guestStartRequestId === "") {
             failJoin("cant_connect")
@@ -599,8 +658,11 @@ QtObject {
         }
     }
     function closeGuestFlow() {
-        if (role === "guest")
+        if (role === "guest") {
+            if (lobby)
+                call("coop.lobby.leave", {lobbyId: lobby.id}, {})
             stopGuestPipeline()
+        }
         resetLobby()
         guestPhase = "idle"
         joinError = ""
@@ -637,6 +699,7 @@ QtObject {
         slot = 0
         selfId = ""
         pendingSignals = []
+        admissionPending = false
     }
 
     // Shared event handling -----------------------------------------------------------------
@@ -648,6 +711,17 @@ QtObject {
         const previous = lobby
         lobby = next
         if (role === "host") {
+            const before = (previous.members || []).map(member => member.userId)
+            const present = (next.members || []).map(member => member.userId)
+            joinRequests = joinRequests.filter(item => item.kind !== "code" || present.indexOf(item.from.id) >= 0)
+            for (const member of next.members || []) {
+                if (before.indexOf(member.userId) >= 0 || isAdmitted(member))
+                    continue
+                if (preferences.requireApproval === true)
+                    holdForApproval(member)
+                else
+                    admit(member.userId)
+            }
             syncPeers(previous, next)
             outgoingInvites = outgoingInvites.map(invite => (next.members || []).some(member => invite.to && member.userId === invite.to.id)
                 && invite.state === "pending" ? Object.assign({}, invite, {state: "accepted"}) : invite)
@@ -655,7 +729,7 @@ QtObject {
             const me = (next.members || []).find(member => member.userId === selfId)
             if (me)
                 slot = me.slot
-            if (next.state === "streaming" && guestPhase === "waiting")
+            if (next.state === "streaming" && guestPhase === "waiting" && !admissionPending)
                 enterGuestStream()
         }
     }
@@ -671,13 +745,15 @@ QtObject {
             if (member.slot === 0)
                 continue
             const old = before[member.userId]
+            if (!isAdmitted(member))
+                continue
             if (!old)
                 sendStreamer("coop-peer-add", {peerId: member.userId, slot: member.slot, displayName: member.displayName})
             else if (old.slot !== member.slot)
                 sendStreamer("coop-peer-slot", {peerId: member.userId, slot: member.slot})
         }
         for (const userId of Object.keys(before)) {
-            if (before[userId].slot !== 0 && !after[userId]) {
+            if (before[userId].slot !== 0 && !after[userId] && isAdmitted(before[userId])) {
                 sendStreamer("coop-peer-remove", {peerId: userId, reason: "left"})
                 const next = Object.assign({}, peers)
                 delete next[userId]
@@ -774,12 +850,34 @@ QtObject {
     function acceptSignal(payload) {
         if (!lobby || payload.lobbyId !== lobby.id)
             return
+        if (payload.payload && payload.payload.type === "opennow-admission") {
+            if (role === "guest" && String(payload.from || "") === String(lobby.hostId || ""))
+                acceptAdmission(String(payload.payload.state || ""))
+            return
+        }
+        const sender = (lobby.members || []).find(member => member.userId === String(payload.from || ""))
+        if (role === "host" && sender && !isAdmitted(sender))
+            return
         const ready = role === "host" ? fanoutStarted : guestStartRequestId !== ""
         if (!ready) {
             pendingSignals = pendingSignals.concat([payload]).slice(-maxPendingSignals)
             return
         }
         sendStreamer("coop-signal-in", {peerId: String(payload.from || ""), payload: payload.payload})
+    }
+    // The host holds a code join until it lets the guest in; the pipeline waits so it cannot time out.
+    function acceptAdmission(state) {
+        if (state === "pending") {
+            admissionPending = true
+            stopGuestPipeline()
+            guestPhase = "waiting"
+            if (appController && appController.route !== "coop-guest")
+                appController.navigate("coop-guest")
+        } else if (state === "admitted" && admissionPending) {
+            admissionPending = false
+            guestPhase = "connecting"
+            startGuestPipeline()
+        }
     }
     function flushSignals() {
         const queued = pendingSignals
@@ -841,7 +939,23 @@ QtObject {
         }
     }
 
-    onHostStreamingChanged: if (hostStreaming) startFanout()
+    // Engine::stop destroys the native host with the session; a restarted session needs a fresh fan-out.
+    onHostStreamingChanged: {
+        if (hostStreaming) {
+            startFanout()
+        } else if (fanoutStarted) {
+            fanoutStarted = false
+            peers = ({})
+            hostStats = null
+        }
+    }
+    onHostSessionActiveChanged: {
+        if (hostSessionActive || !isHost)
+            return
+        call("coop.lobby.close", {lobbyId: lobby.id}, {})
+        finishHosting()
+        accessibilityAnnounced(qsTr("Your stream ended, so co-op closed for everyone."))
+    }
 
     property Connections streamerEvents: Connections {
         target: root.streamRuntime
@@ -866,7 +980,7 @@ QtObject {
                 root.acceptLobbyEnded(payload)
             else if (name === "coop.lobby.kicked") {
                 if (root.lobby && payload.lobbyId === root.lobby.id && root.role === "guest")
-                    root.endAsGuest("kicked")
+                    root.endAsGuest(root.admissionPending ? "declined" : "kicked")
             } else if (name === "coop.signal")
                 root.acceptSignal(payload)
             else if (name === "social.presence.changed")
@@ -880,6 +994,8 @@ QtObject {
             if (entry.join) {
                 if (root.guestPhase === "joining")
                     root.acceptJoin(result)
+                else if (result && result.lobby)
+                    root.call("coop.lobby.leave", {lobbyId: result.lobby.id}, {})
             } else if (method === "coop.iceServers.get") {
                 root.relays = (result.relays || []).slice(0, 8)
                 if (root.role !== "guest" || root.iceServers.length === 0 || entry.relayRetry)

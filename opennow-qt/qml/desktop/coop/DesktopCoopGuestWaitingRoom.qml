@@ -102,7 +102,10 @@ FocusScope {
             id: titleText
             width: parent.width
             wrapMode: Text.WordWrap
-            text: root.host !== "" ? qsTr("Waiting for %1 to start").arg(root.host) : qsTr("Waiting for the host to start")
+            objectName: "coopWaitingTitle"
+            text: root.coop.admissionPending
+                ? (root.host !== "" ? qsTr("Waiting for %1 to let you in").arg(root.host) : qsTr("Waiting for the host to let you in"))
+                : root.host !== "" ? qsTr("Waiting for %1 to start").arg(root.host) : qsTr("Waiting for the host to start")
             size: 40
             lineHeightPx: 46
             tracking: -0.01
@@ -129,6 +132,7 @@ FocusScope {
             DesktopCoopGuestText {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.coop.guestPhase === "reconnecting" ? qsTr("Reconnecting to the host…")
+                    : root.coop.admissionPending ? qsTr("Your slot is held. The stream starts once you're let in.")
                     : root.host !== "" ? qsTr("You join the moment %1 presses Start").arg(root.host)
                     : qsTr("You join the moment the host presses Start")
                 color: "#7FD4FF"
