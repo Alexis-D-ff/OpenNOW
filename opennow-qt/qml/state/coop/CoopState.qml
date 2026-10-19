@@ -375,9 +375,14 @@ QtObject {
     function isAdmitted(member) {
         return member.slot === 0 || admittedIds.indexOf(member.userId) >= 0
     }
+    // Guests still in the lobby are never evicted; the cap only drops the oldest admissions nobody used.
     function admit(userId) {
-        if (userId && admittedIds.indexOf(userId) < 0)
-            admittedIds = admittedIds.concat([userId]).slice(-maxOutgoingInvites)
+        if (!userId || admittedIds.indexOf(userId) >= 0)
+            return
+        const present = (lobby && lobby.members || []).map(member => member.userId)
+        const next = admittedIds.concat([userId])
+        const joined = next.filter(id => present.indexOf(id) >= 0)
+        admittedIds = joined.concat(next.filter(id => present.indexOf(id) < 0).slice(joined.length - maxOutgoingInvites))
     }
     function sendAdmission(userId, state) {
         call("coop.signal.send", {lobbyId: lobby.id, to: userId, payload: {type: "opennow-admission", state: state}}, {})
@@ -723,6 +728,7 @@ QtObject {
                     admit(member.userId)
             }
             syncPeers(previous, next)
+            admittedIds = admittedIds.filter(id => present.indexOf(id) >= 0 || before.indexOf(id) < 0)
             outgoingInvites = outgoingInvites.map(invite => (next.members || []).some(member => invite.to && member.userId === invite.to.id)
                 && invite.state === "pending" ? Object.assign({}, invite, {state: "accepted"}) : invite)
         } else {
@@ -848,6 +854,10 @@ QtObject {
         askNotice = {kind: "room", user: friend ? friend.user : null, game: presence.game, lobbyId: presence.lobby.id}
     }
     function acceptSignal(payload) {
+        if (!lobby && guestPhase === "joining") {
+            pendingSignals = pendingSignals.concat([payload]).slice(-maxPendingSignals)
+            return
+        }
         if (!lobby || payload.lobbyId !== lobby.id)
             return
         if (payload.payload && payload.payload.type === "opennow-admission") {

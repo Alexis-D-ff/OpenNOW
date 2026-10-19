@@ -642,15 +642,21 @@ QtObject {
                 client.emit("coop.lobby.updated", {lobby: lobby("open", [member(mara, 0), member(jonas, 1), member(tess, 2),
                     member(lieke, 3)])})
                 client.emit("coop.signal", {lobbyId: "lob_mara", from: tess.id, payload: {type: "offer", sdp: "fixture"}})
-                if (name === "c-03e-code-join-let-in")
+                if (name === "c-03e-code-join-let-in") {
                     coop.respondToFirstJoinRequest(true)
+                    client.emit("coop.lobby.updated", {lobby: lobby("open", [member(mara, 0), member(tess, 2), member(lieke, 3)])})
+                }
                 else if (name === "c-03f-code-join-declined")
                     coop.respondToFirstJoinRequest(false)
             }))
         } else if (name === "c-06b-waiting-approval" || name === "c-10-declined") {
+            const pending = {lobbyId: "lob_mara", from: mara.id, payload: {type: "opennow-admission", state: "pending"}}
             joinAsGuest("code", "")
+            if (name === "c-10-declined")
+                client.emit("coop.signal", pending)
             Qt.callLater(() => Qt.callLater(() => {
-                client.emit("coop.signal", {lobbyId: "lob_mara", from: mara.id, payload: {type: "opennow-admission", state: "pending"}})
+                if (name === "c-06b-waiting-approval")
+                    client.emit("coop.signal", pending)
                 client.emit("coop.lobby.updated", {lobby: lobby("streaming", [member(mara, 0), member(jonas, 1), member(lieke, 2)])})
                 if (name === "c-10-declined")
                     client.emit("coop.lobby.kicked", {lobbyId: "lob_mara"})
@@ -756,6 +762,10 @@ QtObject {
             if (name === "c-03e-code-join-let-in")
                 check(peerAdds(tess.id) === 1 && admission("admitted") && coop.joinRequests.length === 0
                     && coop.hostNotice && coop.hostNotice.kind === "joining", "Let in adds the code guest as a streamer peer")
+            if (name === "c-03e-code-join-let-in")
+                check(coop.admittedIds.indexOf(jonas.id) < 0 && coop.admittedIds.indexOf(tess.id) >= 0
+                    && runtime.sent.some(item => item.type === "coop-peer-remove" && item.peerId === jonas.id),
+                    "a guest who leaves gives up their admission after their peer is removed")
             if (name === "c-03f-code-join-declined")
                 check(peerAdds(tess.id) === 0 && coop.joinRequests.length === 0
                     && client.calls.some(call => call.method === "coop.member.kick" && call.params.userId === tess.id),
@@ -769,7 +779,7 @@ QtObject {
             check(!checkScreens || (title && title.text === "Waiting for Mara to let you in"), "the waiting room says the host must let you in")
         }
         if (name === "c-10-declined")
-            check(coop.guestPhase === "ended" && coop.endReason === "declined" && !coop.admissionPending,
+            check(!client.calls.some(call => call.method === "coop.lobby.leave") && coop.guestPhase === "ended" && coop.endReason === "declined" && !coop.admissionPending,
                 "a held guest who is removed sees they weren't let in")
         if (name === "c-03b-lobby-expired")
             check(coop.role === "none" && coop.hostNotice && coop.hostNotice.kind === "expired"
