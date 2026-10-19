@@ -169,6 +169,20 @@ QtObject {
     function peer(userId) {
         return peers[userId] || null
     }
+    // Host badge for a guest's link: the streamer's peer state wins, then the path once connected.
+    function peerLink(userId) {
+        const current = peers[userId] || {}
+        const state = String(current.state || "")
+        if (state === "failed" || state === "disconnected")
+            return {kind: "failed", label: qsTr("CAN'T CONNECT")}
+        if (state === "reconnecting")
+            return {kind: "reconnecting", label: qsTr("RECONNECTING")}
+        if (current.path === "relay")
+            return {kind: "relay", label: qsTr("RELAY")}
+        if (current.path === "direct")
+            return {kind: "direct", label: qsTr("DIRECT")}
+        return {kind: "connecting", label: qsTr("CONNECTING")}
+    }
     function uploadHolds(card) {
         const streamKbps = hostStats ? Number(hostStats.streamKbps || 0) : 0
         return card.kind === "open" && !heldSlotOpened && uploadCapacityKbps > 0 && streamKbps * card.slot > uploadCapacityKbps
@@ -629,8 +643,11 @@ QtObject {
             joinContext = Object.assign({}, joinContext, {hostName: hostName, maxPlayers: maxPlayers || joinContext.maxPlayers})
         joinError = String(code || "cant_connect")
         guestPhase = "error"
-        if (role === "guest")
+        if (role === "guest") {
+            if (lobby)
+                call("coop.lobby.leave", {lobbyId: lobby.id}, {})
             stopGuestPipeline()
+        }
         role = "none"
         lobby = null
     }

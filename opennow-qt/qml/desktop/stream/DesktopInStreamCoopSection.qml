@@ -166,6 +166,7 @@ FocusScope {
                     readonly property var peer: member ? root.coop.peer(member.userId) : null
                     readonly property string path: peer && peer.path ? String(peer.path) : ""
                     readonly property bool relayed: path === "relay"
+                    readonly property var link: member ? root.coop.peerLink(member.userId) : null
                     readonly property string personName: member ? String(member.displayName || "")
                         : invite && invite.to ? String(invite.to.displayName || invite.to.username || "") : ""
                     readonly property bool actionsShown: kind === "guest" && (rowHover.hovered || actions.activeFocus || expanded)
@@ -251,11 +252,13 @@ FocusScope {
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             visible: text !== ""
-                            text: row.kind === "guest" ? (row.relayed ? qsTr("RELAY") : row.path === "direct" ? qsTr("DIRECT") : qsTr("CONNECTING"))
+                            objectName: row.kind === "guest" ? "coopPeerLink-" + row.member.userId : ""
+                            text: row.kind === "guest" ? row.link.label
                                 : row.kind === "invited" ? qsTr("INVITED · WAITING")
                                 : row.held ? qsTr("NEEDS %1 / %2 MBPS").arg(root.mbps(root.streamMbps * row.slotNumber)).arg(root.mbps(root.capacityMbps))
                                 : ""
-                            color: row.kind === "guest" ? (row.relayed ? "#FFD166" : row.path === "direct" ? "#1DB954" : "#A3FFFFFF")
+                            color: row.kind === "guest" ? ({failed: DesktopTokens.danger, reconnecting: "#FFD166", relay: "#FFD166",
+                                    direct: "#1DB954"}[row.link.kind] || "#A3FFFFFF")
                                 : row.kind === "invited" ? "#7FD4FF" : "#F5A623"
                             font.family: DesktopTokens.monoFont
                             font.pixelSize: 9

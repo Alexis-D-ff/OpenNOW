@@ -59,6 +59,7 @@ QtObject {
         "c-03d-code-join-held": "",
         "c-03e-code-join-let-in": "",
         "c-03f-code-join-declined": "",
+        "c-03g-peer-failed": "",
         "c-04-join-code": "5GF-0",
         "c-05-connecting": "5JO-0",
         "c-05b-error-invalid": "5KK-0",
@@ -76,6 +77,7 @@ QtObject {
         "c-06b-waiting-approval": "",
         "c-07-guest-overlay": "5ON-0",
         "c-08-host-panel": "5Q0-0",
+        "c-08b-peer-failed": "",
         "c-09-settings-coop": "5UT-0",
         "c-10-reconnecting": "62P-0",
         "c-10-host-ended": "62P-0",
@@ -121,6 +123,7 @@ QtObject {
         "c-03d-code-join-held": ["coopAskToast"],
         "c-03e-code-join-let-in": ["coopHostNotice"],
         "c-03f-code-join-declined": [],
+        "c-03g-peer-failed": ["coopLobby", "coopLobbyPeerStatus-usr_lieke", "coopLobbyPeerStatus-usr_jonas"],
         "c-04-join-code": ["coopJoinCode"],
         "c-05-connecting": ["coopConnecting"],
         "c-05b-error-invalid": ["coopJoinError"],
@@ -138,6 +141,7 @@ QtObject {
         "c-06b-waiting-approval": ["coopWaitingRoom", "coopWaitingTitle"],
         "c-07-guest-overlay": ["coopGuestOverlay"],
         "c-08-host-panel": ["streamCoopSection"],
+        "c-08b-peer-failed": ["streamCoopSection", "coopPeerLink-usr_lieke", "coopPeerLink-usr_jonas"],
         "c-09-settings-coop": ["settingsCoop"],
         "c-10-reconnecting": ["coopReconnectingToast"],
         "c-10-host-ended": ["coopEnded"],
@@ -649,6 +653,16 @@ QtObject {
                 else if (name === "c-03f-code-join-declined")
                     coop.respondToFirstJoinRequest(false)
             }))
+        } else if (name === "c-03g-peer-failed" || name === "c-08b-peer-failed") {
+            linkAs(mara)
+            seedFriends(false)
+            fakeStream()
+            host([member(mara, 0), member(jonas, 1), member(lieke, 2)], [])
+            Qt.callLater(() => Qt.callLater(() => {
+                runtime.coopEventReceived({type: "coop-peer-state", peerId: lieke.id, state: "failed", path: null, relayId: null})
+                runtime.coopEventReceived({type: "coop-peer-state", peerId: jonas.id, state: "reconnecting", path: "direct", relayId: null})
+                AppController.showOverlay(name === "c-03g-peer-failed" ? "coop-lobby" : "desktop-stream-menu")
+            }))
         } else if (name === "c-06b-waiting-approval" || name === "c-10-declined") {
             const pending = {lobbyId: "lob_mara", from: mara.id, payload: {type: "opennow-admission", state: "pending"}}
             joinAsGuest("code", "")
@@ -727,8 +741,29 @@ QtObject {
                 "c-05b-error-already-in-lobby": "unavailable", "c-05b-error-ask-expired": "ended"}[name]
             check(coop.joinFailure && coop.joinFailure.kind === kind, name + ": join failure is " + kind)
         }
-        if (name === "c-05b-error-cant-connect")
+        if (name === "c-05b-error-cant-connect") {
             check(coop.joinFailure.title === "Couldn't reach Mara", "a failed connection names the host")
+            check(coop.role === "none" && client.calls.some(call => call.method === "coop.lobby.leave" && call.params.lobbyId === "lob_mara"),
+                "a guest that fails after joining leaves the lobby instead of holding a dead slot")
+        }
+        if (name.indexOf("c-05b-error") === 0 && name !== "c-05b-error-cant-connect")
+            check(!client.calls.some(call => call.method === "coop.lobby.leave"), name + ": a join that never landed has nothing to leave")
+        if (name === "c-03g-peer-failed" || name === "c-08b-peer-failed") {
+            check(coop.peerLink(lieke.id).kind === "failed" && coop.peerLink(jonas.id).kind === "reconnecting",
+                "the streamer's peer state drives the host badge")
+            if (checkScreens) {
+                const prefix = name === "c-03g-peer-failed" ? "coopLobbyPeerLink-" : "coopPeerLink-"
+                const label = item => item.label !== undefined ? item.label : item.text
+                const failed = find(window.contentItem, prefix + lieke.id)
+                const reconnecting = find(window.contentItem, prefix + jonas.id)
+                check(label(failed) === "CAN'T CONNECT" && label(reconnecting) === "RECONNECTING",
+                    name + ": a failed guest shows CAN'T CONNECT and a reconnecting one RECONNECTING")
+                if (name === "c-03g-peer-failed")
+                    check(find(window.contentItem, "coopLobbyPeerStatus-" + lieke.id).text === "Can't connect · kick to free the slot"
+                        && find(window.contentItem, "coopLobbyPeerStatus-" + jonas.id).text === "Reconnecting…",
+                        "the lobby card's status line names the failure at every card width")
+            }
+        }
         if (name === "c-05c-relay-retry")
             check(coop.guestPhase === "connecting" && runtime.sent.filter(item => item.type === "coop-guest-start").length === 2
                 && client.calls.filter(call => call.method === "coop.iceServers.get").length >= 2,

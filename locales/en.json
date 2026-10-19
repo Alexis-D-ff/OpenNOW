@@ -4913,6 +4913,8 @@
     "nApprovesEveryoneWhoJoinsWithA": "%1 approves everyone who joins with a code. Ask them for an invite instead.",
     "thisHostApprovesEveryoneWhoJoinsWith": "This host approves everyone who joins with a code. Ask them for an invite instead.",
     "waitingForTheHostToLetYou": "Waiting for the host to let you in",
-    "yourSlotIsHeldTheStreamStarts": "Your slot is held. The stream starts once you're let in."
+    "yourSlotIsHeldTheStreamStarts": "Your slot is held. The stream starts once you're let in.",
+    "cantConnectKickToFreeTheSlot": "Can't connect · kick to free the slot",
+    "reconnecting": "Reconnecting…"
   }
 }

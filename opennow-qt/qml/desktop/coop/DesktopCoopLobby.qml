@@ -267,6 +267,7 @@ FocusScope {
         readonly property int peerPing: peer ? Number(peer.peerToHostPingMs || 0) : 0
         readonly property string path: peer && peer.path ? String(peer.path) : ""
         readonly property bool relayed: path === "relay"
+        readonly property var link: member ? root.coop.peerLink(member.userId) : null
         readonly property bool showActions: kind === "guest" && (hover.hovered || card.activeFocus)
         readonly property string personName: member ? String(member.displayName || "")
             : invite && invite.to ? String(invite.to.displayName || invite.to.username || "") : ""
@@ -305,10 +306,12 @@ FocusScope {
             Pill {
                 visible: (card.kind !== "open" || card.held) && card.width >= 230
                 anchors.verticalCenter: parent.verticalCenter
-                tone: card.kind === "host" ? "#7FD4FF" : card.kind === "guest" ? (card.relayed ? "#F5A623" : card.path === "direct" ? "#1DB954" : "#A3FFFFFF")
+                objectName: card.kind === "guest" ? "coopLobbyPeerLink-" + card.member.userId : ""
+                tone: card.kind === "host" ? "#7FD4FF" : card.kind === "guest" ? ({failed: DesktopTokens.danger, reconnecting: "#F5A623",
+                        relay: "#F5A623", direct: "#1DB954"}[card.link.kind] || "#A3FFFFFF")
                     : card.kind === "invited" ? "#7FD4FF" : "#F5A623"
                 label: card.kind === "host" ? qsTr("HOST")
-                    : card.kind === "guest" ? (card.relayed ? qsTr("RELAY") : card.path === "direct" ? qsTr("DIRECT") : qsTr("CONNECTING"))
+                    : card.kind === "guest" ? card.link.label
                     : card.kind === "invited" ? qsTr("INVITED") : qsTr("CLOSED")
             }
         }
@@ -469,16 +472,20 @@ FocusScope {
                     elide: Text.ElideRight
                 }
                 Text {
+                    objectName: card.kind === "guest" ? "coopLobbyPeerStatus-" + card.member.userId : ""
                     width: parent.width
                     text: card.kind === "host" ? (root.pads.length > 0 ? String(root.pads[0].name || qsTr("Controller")) : qsTr("Keyboard and mouse"))
-                        : card.kind === "guest" ? (card.peer && card.peer.inputMuted ? qsTr("Input muted")
+                        : card.kind === "guest" ? (card.link.kind === "failed" ? qsTr("Can't connect · kick to free the slot")
+                            : card.link.kind === "reconnecting" ? qsTr("Reconnecting…")
+                            : card.peer && card.peer.inputMuted ? qsTr("Input muted")
                             : card.relayed ? (root.coop.relayName(card.peer ? card.peer.relayId : "") !== ""
                                 ? qsTr("Via the %1 relay").arg(root.coop.relayName(card.peer ? card.peer.relayId : "")) : qsTr("Via relay"))
                             : card.path === "direct" ? qsTr("Direct connection") : qsTr("Connecting…"))
                         : card.kind === "invited" ? qsTr("Invited · waiting")
                         : card.held ? qsTr("Needs %1 of your %2 Mbps").arg(root.mbps(root.streamMbps * (card.slotNumber))).arg(root.mbps(root.capacityMbps))
                         : qsTr("You closed this slot")
-                    color: card.kind === "invited" ? "#7FD4FF" : card.closedLook ? "#F5A623" : "#A3FFFFFF"
+                    color: card.kind === "invited" ? "#7FD4FF" : card.closedLook ? "#F5A623"
+                        : card.kind === "guest" && card.link.kind === "failed" ? DesktopTokens.danger : "#A3FFFFFF"
                     font.family: DesktopTokens.bodyFont
                     font.pixelSize: 12
                     font.weight: card.kind === "invited" || card.closedLook ? Font.Bold : Font.Medium
