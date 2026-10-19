@@ -807,18 +807,23 @@ fn presence_is_coalesced_to_one_send_per_interval_and_replayed_after_reconnect()
         assert!(second.duration_since(*first) >= Duration::from_millis(350));
     }
 
-    let burst = thread::scope(|scope| {
-        scope.spawn(|| {
+    let (mut burst, producer_elapsed) = thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            let started = Instant::now();
             for activity in ["playing", "in_lobby", "idle", "online", "playing", "idle"] {
                 set(activity);
                 thread::sleep(Duration::from_millis(150));
             }
+            started.elapsed()
         });
-        socket.collect("presence.set", Duration::from_millis(1_500))
+        let frames = socket.collect("presence.set", Duration::from_millis(1_500));
+        (frames, producer.join().unwrap())
     });
+    burst.extend(socket.collect("presence.set", Duration::from_millis(1_000)));
+    let allowed = producer_elapsed.as_millis() / 400 + 2;
     assert!(
-        burst.len() <= 3,
-        "six sets over 900 ms with a 400 ms interval: {burst:?}"
+        burst.len() as u128 <= allowed,
+        "six sets over {producer_elapsed:?} with a 400 ms interval allow {allowed} sends: {burst:?}"
     );
     assert_eq!(burst.last().unwrap().1["activity"], "idle");
     for pair in burst.windows(2) {
