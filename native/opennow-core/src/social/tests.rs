@@ -1163,7 +1163,7 @@ fn the_socket_tunnels_through_an_http_connect_proxy() {
     let config = Config::from_settings(&json!({
         "socialBackendUrl":backend.url, "sessionProxyEnabled":true, "sessionProxyUrl":proxy_url,
     }));
-    let (mut client, _control) = socket::connect(&config, Duration::from_secs(5)).unwrap();
+    let mut client = socket::connect(&config, Duration::from_secs(5)).unwrap();
     let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
     let port = backend.url.rsplit(':').next().unwrap();
     assert!(

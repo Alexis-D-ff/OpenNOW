@@ -130,14 +130,14 @@ pub(super) fn session(
     account: bool,
 ) -> Ended {
     let timing = shared.timing;
-    let Ok((mut socket, control)) = connect(config, timing.connect) else {
+    let Ok(mut socket) = connect(config, timing.connect) else {
         return Ended::failed(false);
     };
     let auth = json!({"type":"auth", "token":token.expose()}).to_string();
     if socket.send(Message::text(auth)).is_err() {
         return Ended::failed(false);
     }
-    let _ = control.set_read_timeout(Some(timing.tick));
+    let _ = socket.get_ref().tcp().set_read_timeout(Some(timing.tick));
     let deadline = Instant::now() + timing.auth;
     let ready = loop {
         if let Some(ended) = superseded(shared, generation) {
@@ -243,6 +243,15 @@ pub(super) enum Transport {
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
+impl Transport {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Plain(stream) => stream,
+            Self::Tls(stream) => stream.get_ref(),
+        }
+    }
+}
+
 impl Read for Transport {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -286,11 +295,8 @@ fn other(message: &str) -> io::Error {
 }
 
 /// Opens the backend socket, through the configured session proxy when one is
-/// enabled. Returns the socket and a handle to its TCP stream for timeouts.
-pub(super) fn connect(
-    config: &Config,
-    timeout: Duration,
-) -> io::Result<(WebSocket<Transport>, TcpStream)> {
+/// enabled.
+pub(super) fn connect(config: &Config, timeout: Duration) -> io::Result<WebSocket<Transport>> {
     let secure = config.base.scheme() == "https";
     let authority = config
         .base
@@ -310,7 +316,6 @@ pub(super) fn connect(
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let _ = stream.set_nodelay(true);
-    let control = stream.try_clone()?;
     let transport = if secure {
         let name = rustls::pki_types::ServerName::try_from(host.to_owned())
             .map_err(|_| other("invalid host"))?;
@@ -330,7 +335,7 @@ pub(super) fn connect(
     let (socket, _) =
         tungstenite::client::client_with_config(url.as_str(), transport, Some(socket_config))
             .map_err(|_| other("WebSocket handshake failed"))?;
-    Ok((socket, control))
+    Ok(socket)
 }
 
 fn tcp_connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
