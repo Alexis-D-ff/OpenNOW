@@ -552,8 +552,9 @@ built-in backend (`DEFAULT_SOCIAL_BACKEND_URL` in
 `native/opennow-core/src/social/mod.rs`, the production Railway deployment);
 because saved settings keep `""`, changing the constant moves every install
 that did not choose its own backend. The backend sleeps when idle, so a request
-that gets a 502/503 without an error envelope, or no connection, is retried once
-after 750 ms while it wakes.
+that gets a 502/503 without an error envelope is retried once after 750 ms while
+it wakes. A request that gets no response at all is retried only for GET, because
+a POST or DELETE may already have been handled.
 `settings.set` accepts an `https://` origin, or `http://` only for
 `localhost`, `127.0.0.1`, or `[::1]`. Paths, queries, fragments, and user
 information are rejected with `invalid_setting`; a valid value is stored as its
