@@ -1586,12 +1586,12 @@ fn build_announce(context: &SessionContext, params: AnnounceParams<'_>) -> Strin
         "a=x-nv-vqos[0].resControl.bitrateIirFilterFactor:128".to_owned(),
         format!("a=x-nv-vqos[0].dynamicStreamingMode:{dynamic_streaming_mode}"),
         "a=x-nv-packetPacing.version:3".to_owned(),
-        "a=x-nv-packetPacing.mode:1".to_owned(),
+        // Local patch: pacing mode and delay captured from the official
+        // client's ANNOUNCE (plaintext capture): mode 2 with a flat 1 ms
+        // maximum group delay, instead of the fps-derived 2-4 ms.
+        "a=x-nv-packetPacing.mode:2".to_owned(),
         "a=x-nv-packetPacing.numGroups:5".to_owned(),
-        format!(
-            "a=x-nv-packetPacing.maxDelayUs:{}",
-            if fps >= 100 { 4000 } else { 2000 }
-        ),
+        "a=x-nv-packetPacing.maxDelayUs:1000".to_owned(),
         "a=x-nv-packetPacing.minNumPacketsFrame:10".to_owned(),
         "a=x-nv-packetPacing.minNumPacketsPerGroup:15".to_owned(),
         "a=x-nv-packetPacing.enableAccurateSleep:1".to_owned(),
@@ -1604,6 +1604,66 @@ fn build_announce(context: &SessionContext, params: AnnounceParams<'_>) -> Strin
         "a=x-nv-ri.enablePartiallyReliableTransferGamepad:255".to_owned(),
         "a=x-nv-ri.enablePartiallyReliableTransferHid:-1".to_owned(),
         "a=x-nv-bwe.useOwdCongestionControl:1".to_owned(),
+        // Local patch: QoS tuning captured from the official client's ANNOUNCE
+        // (plaintext capture): bandwidth-estimation filtering, packet-loss
+        // concealment, dynamic-resolution/fps controllers, QP-delta control,
+        // and relaxed-max-bitrate headroom — the official client's values
+        // verbatim so the host applies the same degradation policy.
+        "a=x-nv-bwe.iirFilterFactor:8".to_owned(),
+        "a=x-nv-bwe.lossyFrameHighThreshold:30".to_owned(),
+        "a=x-nv-vqos[0].qec.featureSetting:3".to_owned(),
+        "a=x-nv-vqos[0].qec.consecutiveFrameLostThreshold:6".to_owned(),
+        "a=x-nv-vqos[0].qec.packetLossConcealmentSetting:2".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.supported:1".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.overrideAvgBitrateThresholdPercent:4".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.customAvgBitrateThresholdPercent:65".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.avgQpThresholdPercent:51".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.overrideAvgQpThresholdPercent:7".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.customAvgQpThresholdPercent:51".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.iirFilterFactor:120".to_owned(),
+        "a=x-nv-vqos[0].relaxMaxBitrate.decodeFpsHeadroomPercent:110".to_owned(),
+        "a=x-nv-vqos[0].drc.iirFilterFactor:100".to_owned(),
+        "a=x-nv-vqos[0].drc.minAdaptiveQpThreshold:39".to_owned(),
+        "a=x-nv-vqos[0].drc.qpMaxResThresholdAdj:6".to_owned(),
+        "a=x-nv-vqos[0].drc.minRequiredBitrateCheckEnabled:1".to_owned(),
+        "a=x-nv-vqos[0].grc.supported:1".to_owned(),
+        "a=x-nv-vqos[0].grc.minAdaptiveQpThreshold:39".to_owned(),
+        "a=x-nv-vqos[0].grc.qpMaxResThresholdAdj:4".to_owned(),
+        "a=x-nv-vqos[0].cpm.flags:1".to_owned(),
+        "a=x-nv-vqos[0].cpm.resolutionUpdateCoolDownCount:6000".to_owned(),
+        "a=x-nv-vqos[0].cpm.iirFilterFactor:8".to_owned(),
+        "a=x-nv-vqos[0].cpm.ignoreOutOfFocusWindowState:1".to_owned(),
+        "a=x-nv-vqos[0].perfHistory.featureMask:3".to_owned(),
+        "a=x-nv-vqos[0].resControl.dfc.preserveTargetFpsWhenResolutionChange:1".to_owned(),
+        "a=x-nv-vqos[0].resControl.perfHistory.ignoreOutOfFocusWindowState:1".to_owned(),
+        "a=x-nv-vqos[0].dfc.enable:1".to_owned(),
+        "a=x-nv-vqos[0].dfc.minTargetFps:30".to_owned(),
+        "a=x-nv-vqos[0].dfc.lowResMinTargetFps:30".to_owned(),
+        "a=x-nv-vqos[0].dfc.highResMinClientFps:0".to_owned(),
+        "a=x-nv-vqos[0].dfc.decodeFpsAdjPercent:85".to_owned(),
+        "a=x-nv-vqos[0].dfc.fpsIncreasePercent:100".to_owned(),
+        "a=x-nv-vqos[0].dfc.qpMinUpperLimit:39".to_owned(),
+        "a=x-nv-vqos[0].dfc.qpMaxResThresholdAdj:6".to_owned(),
+        "a=x-nv-vqos[0].dfc.targetUpCooldownMs:5".to_owned(),
+        "a=x-nv-vqos[0].dfc.targetDownCooldownMs:250".to_owned(),
+        "a=x-nv-vqos[0].dfc.initFpsIncreasePercent:100".to_owned(),
+        "a=x-nv-vqos[0].rl.enableWeightedBwe:0".to_owned(),
+        "a=x-nv-vqos[0].rl.enableFeedback:0".to_owned(),
+        "a=x-nv-vqos[0].qpDelta.qpDeltaMaxPercent:10".to_owned(),
+        "a=x-nv-vqos[0].qpDelta.qpDeltaSurfaceAdjustmentStrengthPercent:70".to_owned(),
+        "a=x-nv-vqos[0].qpDelta.qpDeltaMinPercent:60".to_owned(),
+        "a=x-nv-vqos[0].qpDelta.qpDeltaIirFactor:60".to_owned(),
+        "a=x-nv-vqos[0].qpDelta.qpDeltaThrottlePercent:100".to_owned(),
+        "a=x-nv-vqos[0].statsProcessorThread.flags:1023".to_owned(),
+        "a=x-nv-vqos[0].sendEndOfSessionQosTelemetry:1".to_owned(),
+        "a=x-nv-general.rtpQueueMaxFrameWaitDurationMs:84".to_owned(),
+        "a=x-nv-general.readTosField:1".to_owned(),
+        "a=x-nv-general.clientConnectionType:1".to_owned(),
+        "a=x-nv-general.ipVersion:4".to_owned(),
+        "a=x-nv-general.videoStreamerCount:1".to_owned(),
+        "a=x-nv-general.controlChannelStatsTransmitIntervalMs:60000".to_owned(),
+        "a=x-nv-audio.surround.version:2".to_owned(),
+        "a=x-nv-audio.enableDynamicAudioConfig:1".to_owned(),
         "a=x-nv-general.rtspWebSocketPerConnection:1".to_owned(),
         "a=x-nv-general.pingIntervalBeforeConnectionMs:20".to_owned(),
         "a=x-nv-general.pingIntervalAfterConnectionMs:100".to_owned(),
@@ -2866,7 +2926,7 @@ mod tests {
             },
         );
         assert!(sdp.contains("a=x-nv-video[0].maxFPS:360"));
-        assert!(sdp.contains("a=x-nv-packetPacing.maxDelayUs:4000"));
+        assert!(sdp.contains("a=x-nv-packetPacing.maxDelayUs:1000"));
 
         let mut runaway = context();
         runaway.session.extra["negotiatedStreamProfile"] = json!({"codec":"AV1", "fps":600});
