@@ -1325,6 +1325,18 @@ if(BUILD_TESTING)
             target_link_libraries(${target} PRIVATE opennow-generic-hid)
         endif()
     endforeach()
+    if(APPLE)
+        set_tests_properties(
+            opennow-consolelaunchinput-tests
+            opennow-generichidinput-tests
+            opennow-controllerinput-tests
+            opennow-controllernavigation-tests
+            opennow-controllertuning-tests
+            opennow-controllersources-tests
+            opennow-controllermetadata-tests
+            PROPERTIES RESOURCE_LOCK macos-controller-discovery
+        )
+    endif()
     set(OPENNOW_CI_UNIT_TEST_TARGETS
         opennow-generichidinput-tests
         opennow-windowtheme-tests
