@@ -13,6 +13,8 @@
 
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
+#include <algorithm>
+#include <QtLogging>
 #include <QDebug>
 
 #include <utility>
@@ -316,10 +318,6 @@ public:
         }
         m_outputDirty = true;
         m_outputKind = 1;
-        if (m_sourceColorSpace != OPENNOW_STREAMER_COLOR_SPACE_SDR709) {
-            m_frameGenerationStatus.store(m_frameGeneration ? FrameGenerationState::HdrUnsupported : FrameGenerationState::Off);
-            return;
-        }
         if (!m_frameGeneration || m_frameGenerationFailed) return;
 
         const auto now = clockNs();
@@ -432,12 +430,25 @@ public:
     void frameSwapped() override
     {
         const int kind = m_submittedKind.exchange(0);
+        const auto now = clockNs();
         if (kind) {
             ++m_outputCount;
-            m_swapTimings.markSwap(clockNs());
+            m_swapTimings.markSwap(now);
         }
         if (kind == 2) m_midpointSwapped.store(true);
-        const auto now = clockNs();
+        // Present-cadence telemetry (diagnostics): measure the interval between consecutive
+        // frameSwapped callbacks, which tracks the actual scanout cadence of the window.
+        // A "spike" visible to the eye shows up here as one or more intervals far above
+        // the expected 1000/refresh-rate period.
+        if (m_presentLastSwapNs) {
+            const auto intervalNs = now - m_presentLastSwapNs;
+            m_presentIntervalSumNs += intervalNs;
+            ++m_presentIntervalCount;
+            m_presentIntervalMaxNs = std::max(m_presentIntervalMaxNs, intervalNs);
+            if (intervalNs > 25'000'000) ++m_presentSpikeCount; // >25 ms gap at 120 Hz
+        }
+        m_presentLastSwapNs = now;
+        ++m_presentSwapCount;
         const auto start = m_sampleStart.load();
         if (!start) {
             m_sampleStart.store(now);
@@ -445,6 +456,22 @@ public:
         } else if (now - start >= 1'000'000'000) {
             m_outputFps.store(double(m_outputCount.exchange(0)) * 1.0e9 / double(now - start));
             m_sampleStart.store(now);
+            // One line per second: everything needed to locate presentation hitches.
+            const auto timing = m_swapTimings.snapshot();
+            const double elapsedS = double(m_presentIntervalCount) > 0
+                ? double(m_presentIntervalSumNs) / double(m_presentIntervalCount) / 1.0e6 : 0.0;
+            qInfo("present-stats swaps=%llu newFrames=%llu intAvgMs=%.2f intMaxMs=%.2f spikes25ms=%llu "
+                  "sinceLastSwapMs=%.2f submitToSwapP95Ms=%.2f submitToSwapMaxMs=%.2f",
+                  m_presentSwapCount, m_outputCount.load() + 0, elapsedS,
+                  double(m_presentIntervalMaxNs) / 1.0e6, m_presentSpikeCount,
+                  timing.hasLastSwap ? double(now - timing.lastSwapNs) / 1.0e6 : -1.0,
+                  timing.available ? double(timing.submitToSwap.p95Ns) / 1.0e6 : -1.0,
+                  timing.available ? double(timing.submitToSwap.maxNs) / 1.0e6 : -1.0);
+            m_presentIntervalSumNs = 0;
+            m_presentIntervalCount = 0;
+            m_presentIntervalMaxNs = 0;
+            m_presentSpikeCount = 0;
+            m_presentSwapCount = 0;
         }
     }
 
@@ -598,6 +625,14 @@ private:
     std::atomic_int64_t m_sampleStart = 0;
     std::atomic<double> m_outputFps = 0;
     std::atomic<StreamFramePacer::TimingSource> m_timingSource = StreamFramePacer::TimingSource::None;
+    // Present-cadence telemetry (diagnostics). Only touched from frameSwapped(), which Qt
+    // invokes on a single render thread, so plain members are sufficient.
+    std::int64_t m_presentLastSwapNs = 0;
+    std::int64_t m_presentIntervalSumNs = 0;
+    std::uint64_t m_presentIntervalCount = 0;
+    std::int64_t m_presentIntervalMaxNs = 0;
+    std::uint64_t m_presentSpikeCount = 0;
+    std::uint64_t m_presentSwapCount = 0;
     std::atomic<StreamFramePacer::Rejection> m_rejection = StreamFramePacer::Rejection::None;
     std::atomic_uint64_t m_sourceInterval = 0;
     std::atomic_uint64_t m_timestampDelta = 0;

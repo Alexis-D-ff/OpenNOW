@@ -229,7 +229,8 @@ bool StreamFrameInterpolator::ingest(QRhiCommandBuffer *cb, QRhiTexture *source)
         || qint64(size.width()) * size.height() > 4096 * 2160
         || source->flags().testAnyFlags(QRhiTexture::CubeMap | QRhiTexture::TextureArray
                                        | QRhiTexture::ThreeDimensional)
-        || (source->format() != QRhiTexture::RGBA8 && source->format() != QRhiTexture::RGB10A2)
+        || (source->format() != QRhiTexture::RGBA8 && source->format() != QRhiTexture::RGB10A2
+            && source->format() != QRhiTexture::RGBA16F)
         || !rhi->isTextureFormatSupported(source->format(), QRhiTexture::RenderTarget)) {
         reset();
         return false;
