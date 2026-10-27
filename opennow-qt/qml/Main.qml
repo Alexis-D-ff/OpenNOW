@@ -38,7 +38,16 @@ ApplicationWindow {
             && consoleOverlayHost.supportedOverlay ? consoleOverlayHost : null
     onConsoleModalFocusOwnerChanged: if (consoleModalFocusOwner) Qt.callLater(window.restoreConsoleModalFocus)
     onClosing: event => {
-        if (!applicationCloseConfirmed && ShellStore.applicationQuitNeedsConfirmation) {
+        // Personal: while a session runs, Cmd+Q / Dock quit ask to end the session
+        // instead of quitting the app (matches official GFN). When idle, Dock/close
+        // exit immediately; only Cmd+Q confirms if the setting is on.
+        if (activeRoute === "stream") {
+            event.accepted = false
+            ShellStore.requestStreamExitConfirmation()
+            return
+        }
+        if (!applicationCloseConfirmed && ShellStore.applicationQuitNeedsConfirmation
+                && AppController.quitViaKeyboard()) {
             event.accepted = false
             AppController.showOverlay("application-quit-confirm")
         }

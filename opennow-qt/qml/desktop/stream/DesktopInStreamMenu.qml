@@ -70,6 +70,12 @@ FocusScope {
     }
     readonly property string fpsText: root.liveText(root.liveValue(root.firstAvailable(live.framesPerSecond, live.fps)), "", qsTr("Measuring"))
     readonly property string bitrateText: root.liveText(root.liveValue(root.firstAvailable(live.bitrateMbps, live.receiveBitrateMbps)), " Mb", qsTr("Measuring"))
+    // Personal: in-menu stream options like the official client.
+    readonly property var bitrateSteps: [25, 50, 75, 100, 150, 200]
+    readonly property bool dlssDynamicFrameGeneration: {
+        const overrides = ShellStore.settings.dlssOverrides || {}
+        return overrides.fgMode === 1 && (overrides.fgModel || 0) !== 0
+    }
     readonly property string codecText: String(root.liveValue(live.codec) || profile.codec
         || ShellStore.runtimeStreamProfile.codec || ShellStore.settings.codec || qsTr("Automatic")).toUpperCase()
     readonly property string transportText: String(root.liveValue(live.transport) || "NVST").toUpperCase()
@@ -626,6 +632,38 @@ FocusScope {
                             description: qsTr("See frame rate, latency and bitrate without leaving the game.")
                             shortcutText: root.shortcut("shortcutToggleStats", "Ctrl+N")
                             onActivated: root.runAction("stats")
+                        }
+                        QuickTile {
+                            id: bitrateTile
+                            objectName: "streamBitrateControl"
+                            switchVisible: false
+                            glyph: "desktop-sliders.svg"
+                            title: qsTr("Max bitrate")
+                            stateText: Number(ShellStore.settings.maxBitrateMbps || 75) + " Mbps"
+                            description: qsTr("Cycle the bitrate ceiling. Applies from the next session.")
+                            onActivated: {
+                                const current = Number(ShellStore.settings.maxBitrateMbps || 75)
+                                const index = root.bitrateSteps.indexOf(current)
+                                ShellStore.setSetting("maxBitrateMbps",
+                                    root.bitrateSteps[(index + 1) % root.bitrateSteps.length])
+                            }
+                        }
+                        QuickTile {
+                            id: frameGenerationTile
+                            objectName: "streamFrameGenerationControl"
+                            switchVisible: false
+                            glyph: "desktop-sliders.svg"
+                            title: qsTr("DLSS frame generation")
+                            stateText: root.dlssDynamicFrameGeneration
+                                ? qsTr("Dynamic · up to 4x")
+                                : qsTr("In-game")
+                            description: qsTr("Override the game's frame generation. Applies from the next session.")
+                            onActivated: ShellStore.setSetting("dlssOverrides",
+                                root.dlssDynamicFrameGeneration
+                                    ? { srMode: 0, srModel: 0, srScale: 100, rrModel: 0,
+                                        fgMode: 0, fgModel: 0, fgMultiplier: 0 }
+                                    : { srMode: 0, srModel: 0, srScale: 100, rrModel: 0,
+                                        fgMode: 1, fgModel: 1, fgMultiplier: 4 })
                         }
                         QuickTile {
                             id: fullscreenTile
