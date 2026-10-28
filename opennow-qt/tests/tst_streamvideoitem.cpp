@@ -1243,6 +1243,8 @@ private slots:
             if (nativeWindow) RemoveWindowSubclass(hwnd, procedure, 1);
         });
 #endif
+        QWindowSystemInterface::handleFocusWindowChanged(&session.window, Qt::ActiveWindowFocusReason);
+        QCoreApplication::processEvents();
         StreamVideoItem item(session.window.contentItem());
         item.m_usesMacPointerCapture = false;
         item.setRenderCallback({});
